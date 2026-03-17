@@ -4878,6 +4878,29 @@ class Workforce(BaseNode):
                                 f"strategy={quality_eval.recovery_strategy}"
                             )
 
+                            # PIPELINE mode: accept completed tasks despite
+                            # quality concerns. Recovery strategies (especially
+                            # DECOMPOSE) are incompatible with pipeline's
+                            # fixed topology and would cause deadlocks.
+                            if self.mode == WorkforceMode.PIPELINE:
+                                logger.info(
+                                    f"Task {returned_task.id} accepted in "
+                                    f"PIPELINE mode despite quality score "
+                                    f"{quality_eval.quality_score} "
+                                    f"(issues: {quality_eval.issues})"
+                                )
+                                print(
+                                    f"{Fore.YELLOW}⚠️ Task "
+                                    f"{returned_task.id} quality score: "
+                                    f"{quality_eval.quality_score} — "
+                                    f"accepted in PIPELINE mode"
+                                    f"{Fore.RESET}"
+                                )
+                                await self._handle_completed_task(
+                                    returned_task
+                                )
+                                continue
+
                             # Check retry limit before attempting recovery
                             if returned_task.failure_count >= 2:
                                 print(

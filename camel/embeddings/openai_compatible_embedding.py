@@ -14,12 +14,88 @@
 from __future__ import annotations
 
 import os
+import random
+import time
 from typing import Any, Optional
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from camel.embeddings.base import BaseEmbedding
+from camel.logger import get_logger
 from camel.utils import api_keys_required
+
+logger = get_logger(__name__)
+
+_OPENAI_COMPAT_LLM_MAX_RETRIES = int(
+    os.getenv("OPENAI_COMPATIBILITY_LLM_RETRIES", "6")
+)
+_OPENAI_COMPAT_LLM_BACKOFF_INITIAL = float(
+    os.getenv("OPENAI_COMPATIBILITY_LLM_BACKOFF_INITIAL", "1")
+)
+_OPENAI_COMPAT_LLM_BACKOFF_MAX = float(
+    os.getenv("OPENAI_COMPATIBILITY_LLM_BACKOFF_MAX", "60")
+)
+_OPENAI_COMPAT_LLM_BACKOFF_JITTER = os.getenv(
+    "OPENAI_COMPATIBILITY_LLM_BACKOFF_JITTER", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+_OPENAI_COMPAT_LLM_MIN_INTERVAL = float(
+    os.getenv("OPENAI_COMPATIBILITY_LLM_MIN_INTERVAL", "0")
+)
+
+_LAST_OPENAI_COMPAT_CALL_TS: Optional[float] = None
+
+
+def _openai_compat_maybe_sleep_for_rate_limit() -> None:
+    if _OPENAI_COMPAT_LLM_MIN_INTERVAL <= 0:
+        return
+    global _LAST_OPENAI_COMPAT_CALL_TS
+    now = time.monotonic()
+    if _LAST_OPENAI_COMPAT_CALL_TS is not None:
+        elapsed = now - _LAST_OPENAI_COMPAT_CALL_TS
+        if elapsed < _OPENAI_COMPAT_LLM_MIN_INTERVAL:
+            time.sleep(_OPENAI_COMPAT_LLM_MIN_INTERVAL - elapsed)
+    _LAST_OPENAI_COMPAT_CALL_TS = time.monotonic()
+
+
+def _openai_compat_is_rate_limit_error(exc: Exception) -> bool:
+    if RateLimitError is not Exception and isinstance(exc, RateLimitError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "rate limit" in message
+
+
+def _openai_compat_call_with_backoff(request_fn, *, label: str):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _OPENAI_COMPAT_LLM_MAX_RETRIES + 1):
+        try:
+            _openai_compat_maybe_sleep_for_rate_limit()
+            return request_fn()
+        except Exception as exc:
+            last_error = exc
+            if not _openai_compat_is_rate_limit_error(exc):
+                raise
+            if attempt >= _OPENAI_COMPAT_LLM_MAX_RETRIES:
+                break
+            base_delay = min(
+                _OPENAI_COMPAT_LLM_BACKOFF_MAX,
+                _OPENAI_COMPAT_LLM_BACKOFF_INITIAL * (2 ** (attempt - 1)),
+            )
+            if _OPENAI_COMPAT_LLM_BACKOFF_JITTER:
+                delay = base_delay * (1 + random.random())
+            else:
+                delay = base_delay
+            logger.warning(
+                "[%s] rate limit, retry %d/%d after %.2fs: %s",
+                label,
+                attempt,
+                _OPENAI_COMPAT_LLM_MAX_RETRIES,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"[{label}] exceeded retry limit due to rate limiting: {last_error}"
+    )
 
 
 class OpenAICompatibleEmbedding(BaseEmbedding[str]):
@@ -78,10 +154,13 @@ class OpenAICompatibleEmbedding(BaseEmbedding[str]):
                 as a list of floating-point numbers.
         """
 
-        response = self._client.embeddings.create(
-            input=objs,
-            model=self.model_type,
-            **kwargs,
+        response = _openai_compat_call_with_backoff(
+            lambda: self._client.embeddings.create(
+                input=objs,
+                model=self.model_type,
+                **kwargs,
+            ),
+            label="openai-compatible-embedding",
         )
         self.output_dim = len(response.data[0].embedding)
         return [data.embedding for data in response.data]

@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>INAGENT Web Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="bg-grid"></div>
+
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <h1>INAGENT Web Platform</h1>
+        <p class="subtitle">CAMEL-compatible Agents + Workforce + RAG + TestOps</p>
+      </div>
+      <div class="quick-status">
+        <span class="pill" id="pill-gateway">Gateway: -</span>
+        <span class="pill" id="pill-rag">RAG: -</span>
+        <span class="pill" id="pill-device">Device: -</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-view="knowledge">1. 产品功能学习</button>
+      <button class="tab-btn" data-view="chat">2. 产品知识展示</button>
+      <button class="tab-btn" data-view="testing">3. 产品测试功能</button>
+      <button class="tab-btn" data-view="reports">4. 测试结果展示</button>
+      <button class="tab-btn" data-view="system">5. 系统管理</button>
+    </nav>
+
+    <main class="panels">
+      <section class="panel active" id="view-knowledge">
+        <div class="grid-2">
+          <article class="card">
+            <h2>知识库统计</h2>
+            <div class="stat-grid">
+              <div class="stat-item"><span>Chunks</span><strong id="kb-total-chunks">-</strong></div>
+              <div class="stat-item"><span>Modules</span><strong id="kb-module-count">-</strong></div>
+              <div class="stat-item"><span>Protocols</span><strong id="kb-protocol-count">-</strong></div>
+              <div class="stat-item"><span>GraphRAG</span><strong id="kb-graphrag-ready">-</strong></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <h2>文档导入 (PDF)</h2>
+            <div class="h-stack">
+              <input type="file" id="doc-file" accept=".pdf">
+              <button class="btn primary" id="btn-upload-doc">上传</button>
+              <button class="btn" id="btn-refresh-docs">刷新</button>
+            </div>
+            <div class="action-row">
+              <button class="btn" data-db-action="status">DB Status</button>
+              <button class="btn" data-db-action="create">DB Create</button>
+              <button class="btn" data-db-action="update">DB Update</button>
+              <button class="btn warn" data-db-action="rebuild">DB Rebuild</button>
+              <button class="btn danger" data-db-action="delete">DB Delete</button>
+            </div>
+            <pre class="mini-log tall" id="db-action-log">等待操作...</pre>
+          </article>
+        </div>
+
+        <article class="card">
+          <h2>已上传文档</h2>
+          <table class="table" id="docs-table">
+            <thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </article>
+
+        <article class="card">
+          <h2>知识条目浏览</h2>
+          <div class="h-stack wrap">
+            <input class="input" id="chunk-module" placeholder="module 过滤 (如 slb)">
+            <input class="input" id="chunk-protocol" placeholder="protocol 过滤 (如 http)">
+            <input class="input long" id="chunk-search" placeholder="全文关键字检索">
+            <button class="btn" id="btn-refresh-chunks">查询</button>
+          </div>
+          <table class="table" id="chunks-table">
+            <thead><tr><th>ID</th><th>模块</th><th>协议</th><th>步骤</th><th>片段</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </article>
+      </section>
+
+      <section class="panel" id="view-chat">
+        <div class="split-layout">
+          <aside class="card sidebar">
+            <h2>会话</h2>
+            <button class="btn" id="btn-refresh-sessions">刷新会话</button>
+            <div class="session-list" id="session-list"></div>
+          </aside>
+
+          <div class="chat-main">
+            <article class="card">
+              <h2>产品知识问答</h2>
+              <div class="h-stack">
+                <select id="chat-mode" class="input select">
+                  <option value="explain">功能解释模式</option>
+                  <option value="config">配置生成模式</option>
+                </select>
+                <button class="btn" id="btn-clear-chat">清空窗口</button>
+              </div>
+              <div class="chat-window" id="chat-window"></div>
+              <div class="h-stack stretch">
+                <textarea id="chat-input" class="input" rows="3" placeholder="输入你的问题，例如：解释 NSAE 健康检查三步法..." ></textarea>
+                <button class="btn primary" id="btn-send-chat">发送</button>
+              </div>
+            </article>
+
+            <article class="card">
+              <h2>最近配置输出</h2>
+              <div class="output-grid">
+                <div>
+                  <h3>Config Commands</h3>
+                  <pre class="mini-log" id="chat-config-output">-</pre>
+                </div>
+                <div>
+                  <h3>Verify Commands</h3>
+                  <pre class="mini-log" id="chat-verify-output">-</pre>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="view-testing">
+        <div class="split-layout">
+          <aside class="card sidebar">
+            <h2>Jobs 任务管理</h2>
+            <button class="btn" id="btn-refresh-jobs">刷新任务</button>
+            <div class="job-list" id="job-list"></div>
+          </aside>
+
+          <div class="testing-main">
+            <article class="card">
+              <h2>任务编辑器</h2>
+              <div class="h-stack">
+                <input class="input" id="job-name" placeholder="任务文件名，例如 demo.txt">
+                <button class="btn" id="btn-save-job">保存/覆盖</button>
+                <button class="btn danger" id="btn-delete-job">删除</button>
+              </div>
+              <textarea class="input" id="job-content" rows="8" placeholder="输入测试任务内容..."></textarea>
+            </article>
+
+            <article class="card">
+              <h2>测试执行</h2>
+              <div class="h-stack wrap">
+                <button class="btn primary" id="btn-run-selected">执行选中任务</button>
+                <button class="btn" id="btn-run-all">执行全部任务</button>
+                <button class="btn danger" id="btn-cancel-run">取消当前运行</button>
+                <span class="hint" id="current-run">当前 Run: -</span>
+              </div>
+              <pre class="live-log" id="run-live-log">等待执行...</pre>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="view-reports">
+        <div class="grid-2">
+          <article class="card">
+            <h2>结果统计</h2>
+            <div class="stat-grid">
+              <div class="stat-item"><span>Total Runs</span><strong id="sum-total">-</strong></div>
+              <div class="stat-item"><span>Running</span><strong id="sum-running">-</strong></div>
+              <div class="stat-item"><span>Success</span><strong id="sum-success">-</strong></div>
+              <div class="stat-item"><span>Failed</span><strong id="sum-failed">-</strong></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <h2>Verdict 分布</h2>
+            <pre class="mini-log" id="verdict-summary">-</pre>
+          </article>
+        </div>
+
+        <article class="card">
+          <h2>历史运行</h2>
+          <button class="btn" id="btn-refresh-runs">刷新列表</button>
+          <table class="table" id="runs-table">
+            <thead><tr><th>Run ID</th><th>Job</th><th>Status</th><th>Verdict</th><th>Created</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </article>
+
+        <article class="card">
+          <h2>运行详情</h2>
+          <div class="output-grid">
+            <div>
+              <h3>Report (Markdown)</h3>
+              <pre class="mini-log tall" id="report-md">-</pre>
+            </div>
+            <div>
+              <h3>Result (JSON)</h3>
+              <pre class="mini-log tall" id="report-json">-</pre>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel" id="view-system">
+        <div class="grid-2">
+          <article class="card">
+            <h2>环境状态</h2>
+            <div class="status-list" id="system-status-list"></div>
+            <div class="action-row">
+              <button class="btn" data-probe="llm_gateway">Probe Gateway</button>
+              <button class="btn" data-probe="nsae_device">Probe Device</button>
+              <button class="btn" data-probe="test_vm">Probe VM</button>
+              <button class="btn" data-probe="rag">Probe RAG</button>
+              <button class="btn" data-probe="graphrag">Probe GraphRAG</button>
+            </div>
+            <pre class="mini-log" id="probe-output">-</pre>
+          </article>
+
+          <article class="card">
+            <h2>关键配置</h2>
+            <div class="form-grid">
+              <label>LLM Gateway URL<input class="input" id="env-gateway-url"></label>
+              <label>LLM Chat Model<input class="input" id="env-chat-model"></label>
+              <label>LB Device IP<input class="input" id="env-device-ip"></label>
+              <label>LB Username<input class="input" id="env-device-user"></label>
+              <label>VM Mgmt IP<input class="input" id="env-vm-ip"></label>
+              <label>VM Username<input class="input" id="env-vm-user"></label>
+            </div>
+            <button class="btn primary" id="btn-save-env">保存配置</button>
+          </article>
+        </div>
+
+        <article class="card">
+          <h2>日志中心</h2>
+          <div class="h-stack">
+            <button class="btn" id="btn-refresh-logs">刷新日志</button>
+            <select id="log-select" class="input select"></select>
+            <button class="btn" id="btn-open-log">查看日志</button>
+          </div>
+          <pre class="mini-log tall" id="log-viewer">-</pre>
+        </article>
+
+        <article class="card">
+          <h2>LLM Gateway 控制</h2>
+          <div class="h-stack wrap">
+            <button class="btn primary" id="btn-gateway-start">启动 Gateway</button>
+            <button class="btn danger" id="btn-gateway-stop">停止 Gateway</button>
+            <button class="btn" id="btn-gateway-refresh">刷新状态</button>
+            <span class="hint" id="gateway-pid-hint"></span>
+          </div>
+          <div class="form-grid" style="margin-top:0.75rem;">
+            <label>调用模式
+              <select id="gateway-mode-select" class="input select">
+                <option value="balance">balance（轮询，推荐）</option>
+                <option value="race">race（并发抢先）</option>
+                <option value="hybrid">hybrid（混合）</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn" id="btn-gateway-set-mode" style="margin-top:0.5rem;">切换模式</button>
+          <div style="margin-top:0.75rem;">
+            <h3>Gateway 状态</h3>
+            <pre class="mini-log" id="gateway-status-output">-</pre>
+          </div>
+          <div style="margin-top:0.75rem;">
+            <div class="h-stack">
+              <h3 style="flex:1">Gateway 日志</h3>
+              <button class="btn" id="btn-gateway-logs">刷新日志</button>
+            </div>
+            <pre class="mini-log tall" id="gateway-log-viewer">-</pre>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

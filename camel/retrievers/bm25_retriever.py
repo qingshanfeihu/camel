@@ -66,12 +66,18 @@ class BM25Retriever(BaseRetriever):
             **kwargs (Any): Additional keyword arguments for content parsing.
         """
         from rank_bm25 import BM25Okapi
+        from unstructured.documents.elements import Element
 
         # Load and preprocess documents
-        self.content_input_path = content_input_path
-        elements = self.unstructured_modules.parse_file_or_url(
-            content_input_path, **kwargs
-        )
+        self.content_input_path = str(content_input_path)
+        
+        if isinstance(content_input_path, list) and all(isinstance(e, Element) for e in content_input_path):
+            elements = content_input_path
+        else:
+            elements = self.unstructured_modules.parse_file_or_url(
+                content_input_path, **kwargs
+            )
+            
         if elements:
             self.chunks = self.unstructured_modules.chunk_elements(
                 chunk_type=chunk_type, elements=elements

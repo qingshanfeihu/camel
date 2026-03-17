@@ -36,13 +36,13 @@ class HybridRetriever(BaseRetriever):
         self.vr = VectorRetriever(embedding_model, vector_storage)
         self.bm25 = BM25Retriever()
 
-    def process(self, content_input_path: str) -> None:
+    def process(self, content_input_path: Union[str, Any]) -> None:
         r"""Processes the content input path for both vector and BM25
         retrievers.
 
         Args:
-            content_input_path (str): File path or URL of the content to be
-                processed.
+            content_input_path (Union[str, Any]): File path, URL, or content object 
+                to be processed.
 
         Raises:
             ValueError: If the content_input_path is empty.
@@ -50,9 +50,9 @@ class HybridRetriever(BaseRetriever):
         if not content_input_path:
             raise ValueError("content_input_path cannot be empty.")
 
-        self.content_input_path = content_input_path
-        self.vr.process(content=self.content_input_path)
-        self.bm25.process(content_input_path=self.content_input_path)
+        self.content_input_path = str(content_input_path)
+        self.vr.process(content=content_input_path)
+        self.bm25.process(content_input_path=content_input_path)
 
     def _sort_rrf_scores(
         self,

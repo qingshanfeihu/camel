@@ -3775,7 +3775,18 @@ class ChatAgent(BaseAgent):
             for tool_call in tool_calls:
                 tool_name = tool_call.function.name  # type: ignore[union-attr]
                 tool_call_id = tool_call.id
-                args = json.loads(tool_call.function.arguments)  # type: ignore[union-attr]
+                raw_args = tool_call.function.arguments  # type: ignore[union-attr]
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {"_raw": raw_args}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (TypeError, ValueError):
+                        args = {"_raw": args}
+                if not isinstance(args, dict):
+                    args = {"_raw": args}
                 extra_content = getattr(tool_call, 'extra_content', None)
 
                 tool_call_request = ToolCallRequest(
@@ -5517,6 +5528,7 @@ class ChatAgent(BaseAgent):
             pause_event=self.pause_event,
             prune_tool_calls_from_memory=self.prune_tool_calls_from_memory,
             stream_accumulate=self.stream_accumulate,
+            step_timeout=self.step_timeout,
         )
 
         # Copy memory if requested

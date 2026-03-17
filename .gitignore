@@ -465,3 +465,60 @@ yarn-error.log*
 
 # Yarn Integrity file
 .yarn-integrity
+
+##### INAGENT - MinerU & Knowledge Base Artifacts #####
+# Knowledge base (local data, PDFs, indexes — all regenerated)
+INAGENT/knowledge_base/
+
+# Local RAG index stores (rebuild from knowledge_base.json)
+INAGENT/local_qdrant_db/
+INAGENT/test_qdrant_db/
+INAGENT/graphrag_index/
+INAGENT/graphrag_output/
+
+# Review results (generated output)
+INAGENT/review_results/
+_review_results/
+
+# Test reports and execution output (generated per run)
+INAGENT/reports/
+INAGENT/output/
+
+# Backup / legacy code (not core)
+INAGENT/backup/
+
+# Local documents input (user-specific, not core code)
+INAGENT/doc_local/
+
+# Deprecated workspace / test artifacts
+INAGENT/workspace/
+INAGENT/graphrag_test/
+INAGENT/mocks/
+
+# Environment config (contains secrets)
+INAGENT/.env
+
+# Database files (local runtime data)
+*.db
+*.db-shm
+*.db-wal
+
+# Gateway config (contains API keys — use config.yaml.example)
+llm_gateway/config.yaml.local
+
+# One-off scripts with hardcoded credentials
+INAGENT/scripts/cleanup_run9.py
+
+# Context files (Copilot session artifacts)
+context_files/
+
+# Claude config
+.claude/
+
+# Root temp files (development only)
+_*.log
+_*.txt
+_check_*.py
+_consolidate_*.py
+check_mineru_config.py
+What's New.MD

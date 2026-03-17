@@ -1,0 +1,240 @@
+# Gateway Service Configuration
+# LLM Gateway handles all upstream LLM routing (vLLM is NOT used here)
+
+service:
+  name: "INFOAGEN LLM Gateway"
+  version: "0.1.0"
+  host: "0.0.0.0"
+  port: 9000
+  log_level: "INFO"
+
+# Calling mode: balance (round-robin, one model per request, no wasted RPM/TPM), race, or hybrid
+# balance模式: 轮询分配请求到不同模型，多个并发请求时各模型独立处理
+# race模式: 并发调用所有模型，返回最快响应（浪费配额）
+# 注意: Gateway 完全忽略客户端传入的 model 参数，由 Gateway 自行路由
+calling_mode: "balance"
+
+# Request timeout configuration (seconds)
+# IMPORTANT: OpenAI SDK built-in retries are DISABLED (max_retries=0)
+# This prevents 3x timeout delays (e.g., 3×30s=90s). Gateway handles failover.
+# If you see "Request timed out" / 504: increase chat timeout (e.g. 120 or 180) for long generations.
+request_timeout:
+  chat: 600         # Chat completions timeout - 已优化: 240→600 (大chunk实体抽取需更长时间)
+  embedding: 60     # Embedding timeout
+  reranker: 60      # Reranker timeout
+
+# Global rate limits (optional)
+global_limits:
+  enabled: false
+  rpm: 3000  # Total RPM across all models
+  tpm: 150000  # Total TPM across all models
+
+# Provider configurations
+providers:
+  siliconflow:
+    name: "SiliconFlow"
+    enabled: true
+    base_url: "https://api.siliconflow.cn/v1"
+    # Multi-account load balancing: round-robin across API keys for better rate limit distribution
+    # 多账号负载均衡：轮询使用不同账号的 API key，每个账号独立的速率限制
+    api_keys:
+      - "${SILICONFLOW_API_KEY_1}"  # Account 1
+      - "${SILICONFLOW_API_KEY_2}"  # Account 2 (optional)
+    
+    # Provider-level limits (PER ACCOUNT - each account has independent limits)
+    # These are per-account limits; with 2 accounts, effective limits are doubled
+    # 每个账号的限制；使用2个账号时，实际总限制翻倍
+    limits:
+      rpm: 5000      # Per account: 1000×5 models (留余量)
+      tpm: 800000    # Per account: realistic usage distribution
+    
+    # Chat models - concurrent usage for speed
+    # 性能测试结果 (2026-01-30) - 直接测试 SiliconFlow API:
+    #   Qwen3-8B: 最快 (~550ms) ✅ 推荐
+    #   GLM-Z1-9B: 慢 (~4000ms) - 比 Qwen3-8B 慢 7 倍
+    #   DeepSeek-R1: 最慢 (~9000ms) - 推理模型，不适合高吞吐
+    # 结论：对于 GraphRAG 等高吞吐场景，只启用 Qwen3-8B
+    chat_models:
+      - id: "qwen3-8b"
+        model: "Qwen/Qwen3-8B"
+        enabled: false  # 暂时禁用，测试百度千帆
+        limits:
+          rpm: 1000
+          tpm: 50000
+        description: "Qwen3 8B model - 最快 (~550ms)，推荐用于 GraphRAG"
+
+      - id: "glm-z1-9b"
+        model: "THUDM/GLM-Z1-9B-0414"
+        enabled: false  # 禁用：比 Qwen3-8B 慢 7 倍 (~4s)
+        limits:
+          rpm: 1000
+          tpm: 50000
+        description: "GLM-Z1 9B model - 输出详细但较慢"
+      
+      - id: "deepseek-r1-qwen3-8b"
+        model: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+        enabled: false  # 禁用：推理模型太慢 (~9s)，不适合高吞吐
+        limits:
+          rpm: 1000
+          tpm: 50000
+        description: "DeepSeek R1 Qwen3 8B model - 推理模型，适合复杂任务"
+    
+    # Embedding models
+    embedding_models:
+      - id: "bge-m3"
+        model: "BAAI/bge-m3"
+        enabled: true
+        limits:
+          rpm: 2000
+          tpm: 500000
+        description: "BGE M3 embedding model"
+      
+      - id: "bce-embedding-base"
+        model: "netease-youdao/bce-embedding-base_v1"
+        enabled: true
+        limits:
+          rpm: 2000
+          tpm: 500000
+        description: "NetEase BCE Embedding Base V1 model"
+    
+    # Reranker model
+    reranker_models:
+      - id: "bge-reranker-v2-m3"
+        model: "BAAI/bge-reranker-v2-m3"
+        enabled: true
+        limits:
+          rpm: 2000
+          tpm: 500000
+        description: "BGE Reranker V2 M3 model"
+
+  # Local vLLM Service (MinerU PDF only; NOT used by LLM Gateway)
+  vllm:
+    name: "vLLM Local"
+    enabled: false
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key: "EMPTY"  # vLLM doesn't require API key
+    
+    # Provider-level limits (local service, generous limits)
+    limits:
+      rpm: 10000
+      tpm: 1000000
+    
+    # Chat models served by vLLM
+    chat_models:
+      - id: "mineru-vlm"
+        model: "mineru-vlm"
+        enabled: true
+        limits:
+          rpm: 5000
+          tpm: 500000
+        description: "MinerU vLLM model"
+
+  # Baidu Qianfan (百度千帆)
+  qianfan:
+    name: "Baidu Qianfan"
+    enabled: false  # 禁用：切换到智谱
+    base_url: "https://qianfan.baidubce.com/v2"
+    api_keys:
+      - "${QIANFAN_API_KEY}"
+    
+    # Provider-level limits (放开限制，依赖API返回429后的指数退避重试)
+    limits:
+      rpm: 10000
+      tpm: 10000000
+    
+    # Chat models
+    chat_models:
+      - id: "ernie-4.5-turbo-32k"
+        model: "ernie-4.5-turbo-32k"
+        enabled: true
+        limits:
+          rpm: 10000
+          tpm: 10000000
+        description: "ERNIE 4.5 Turbo 32K - 百度千帆高性能模型"
+
+  # Zhipu AI (智谱AI)
+  # GLM-4-Flash 免费！支持 Batch API 可获50%折扣
+  # Batch API 文档: https://docs.bigmodel.cn/cn/guide/tools/batch
+  zhipu:
+    name: "Zhipu AI"
+    enabled: true
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    api_keys:
+      - "${ZHIPU_API_KEY}"
+    
+    # Provider-level limits
+    # GLM-4-Flash: 免费，无并发限制(Batch模式)
+    limits:
+      rpm: 1000
+      tpm: 1000000
+    
+    # Chat models
+    chat_models:
+      - id: "glm-4-flash"
+        model: "glm-4-flash"
+        enabled: false
+        limits:
+          rpm: 1000
+          tpm: 500000
+        description: "GLM-4-Flash - 免费模型，Batch模式更快"
+      
+      - id: "glm-4-plus"
+        model: "glm-4-plus"
+        enabled: false
+        limits:
+          rpm: 100
+          tpm: 100000
+        description: "GLM-4-Plus - 高性能模型，Batch模式50%折扣"
+
+  # DashScope (Aliyun)
+  dashscope:
+    name: "DashScope"
+    enabled: true
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key: "${DASHSCOPE_API_KEY}"
+    limits:
+      rpm: 10000
+      tpm: 1000000
+    chat_models:
+      - id: "qwen-plus"
+        model: "qwen-plus"
+        enabled: true
+        limits:
+          rpm: 10000
+          tpm: 1000000
+        description: "Qwen-Plus - DashScope 高性价比模型"
+  #       enabled: false
+  #       limits:
+  #         rpm: 1000
+  #         tpm: 50000
+
+  # Hunyuan (Tencent) - Commented out
+  # hunyuan:
+  #   name: "Hunyuan"
+  #   enabled: false
+  #   base_url: "https://api.hunyuan.cloud.tencent.com/v1"
+  #   api_key: "${HUNYUAN_API_KEY}"
+  #   limits:
+  #     rpm: 1000
+  #     tpm: 50000
+  #   chat_models:
+  #     - id: "hunyuan-a13b"
+  #       model: "hunyuan-a13b"
+  #       enabled: false
+  #       limits:
+  #         rpm: 1000
+  #         tpm: 50000
+
+# Retry configuration
+retry:
+  max_attempts: 3
+  initial_delay: 1.0
+  exponential_base: 2.0
+  max_delay: 30.0
+  jitter: true
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"

@@ -17,13 +17,15 @@ import asyncio
 import datetime
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, Union
 
 from colorama import Fore
+from pydantic import BaseModel
 
 from camel.agents import ChatAgent
 from camel.agents.chat_agent import AsyncStreamingChatAgentResponse
 from camel.logger import get_logger
+from camel.responses import ChatAgentResponse
 from camel.societies.workforce.prompts import PROCESS_TASK_PROMPT
 from camel.societies.workforce.structured_output_handler import (
     StructuredOutputHandler,
@@ -333,6 +335,89 @@ class SingleAgentWorker(Worker):
             )
         return self._workflow_manager
 
+    async def _safe_agent_call(
+        self,
+        agent: ChatAgent,
+        prompt: str,
+        response_format: Optional[Type[BaseModel]] = None,
+    ) -> Union[ChatAgentResponse, AsyncStreamingChatAgentResponse]:
+        r"""Call agent with async fallback to sync when async is unsupported."""
+        model_backend = getattr(agent, "model_backend", None)
+        model_type = getattr(model_backend, "model_type", None)
+        backend_name = type(model_backend).__name__ if model_backend else "unknown"
+        call_start = time.perf_counter()
+        if self._is_async_unsupported(agent):
+            logger.info(
+                "Worker sync call (model=%s, backend=%s)",
+                model_type,
+                backend_name,
+            )
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: agent.step(prompt, response_format=response_format),
+            )
+            logger.info(
+                "Worker call finished in %.2fs",
+                time.perf_counter() - call_start,
+            )
+            return response
+        try:
+            response = await agent.astep(prompt, response_format=response_format)
+            logger.info(
+                "Worker async call finished in %.2fs (model=%s, backend=%s)",
+                time.perf_counter() - call_start,
+                model_type,
+                backend_name,
+            )
+            return response
+        except NotImplementedError as exc:
+            message = str(exc).lower()
+            if "async" in message:
+                logger.info(
+                    "Worker async unsupported; falling back to sync (model=%s, backend=%s)",
+                    model_type,
+                    backend_name,
+                )
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: agent.step(
+                        prompt, response_format=response_format
+                    ),
+                )
+                logger.info(
+                    "Worker call finished in %.2fs",
+                    time.perf_counter() - call_start,
+                )
+                return response
+            raise
+
+    @staticmethod
+    def _is_async_unsupported(agent: ChatAgent) -> bool:
+        model_backend = getattr(agent, "model_backend", None)
+        if model_backend is None:
+            return False
+
+        try:
+            backend_name = type(model_backend).__name__.lower()
+            if "siliconflow" in backend_name:
+                return True
+            model_type = str(getattr(model_backend, "model_type", "")).lower()
+            if "siliconflow" in model_type:
+                return True
+            models = getattr(model_backend, "models", None)
+            if models:
+                for model in models:
+                    model_name = type(model).__name__.lower()
+                    module_name = type(model).__module__.lower()
+                    if "siliconflow" in model_name or "siliconflow" in module_name:
+                        return True
+        except Exception:
+            return False
+
+        return False
+
     async def _process_task(
         self, task: Task, dependencies: List[Task]
     ) -> TaskState:
@@ -388,7 +473,9 @@ class SingleAgentWorker(Worker):
                         "succeeded or failed.",
                     )
                 )
-                response = await worker_agent.astep(enhanced_prompt)
+                response = await self._safe_agent_call(
+                    worker_agent, enhanced_prompt
+                )
 
                 # Handle streaming response
                 if isinstance(response, AsyncStreamingChatAgentResponse):
@@ -415,8 +502,8 @@ class SingleAgentWorker(Worker):
                 )
             else:
                 # Use native structured output if supported
-                response = await worker_agent.astep(
-                    prompt, response_format=TaskResult
+                response = await self._safe_agent_call(
+                    worker_agent, prompt, response_format=TaskResult
                 )
 
                 # Handle streaming response for native output

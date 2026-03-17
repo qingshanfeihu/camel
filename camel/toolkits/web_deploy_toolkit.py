@@ -22,6 +22,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -52,6 +53,7 @@ class WebDeployToolkit(BaseToolkit):
         tag_url: str = "https://github.com/camel-ai/camel",
         remote_server_ip: Optional[str] = None,
         remote_server_port: int = 8080,
+        bind_address: str = "0.0.0.0",
     ):
         r"""Initialize the WebDeployToolkit.
 
@@ -70,9 +72,14 @@ class WebDeployToolkit(BaseToolkit):
                 (default: :obj:`None` - use local deployment)
             remote_server_port (int): Remote server port.
                 (default: :obj:`8080`)
+            bind_address (str): Address to bind the local HTTP server to.
+                Use ``"0.0.0.0"`` to allow external access from other
+                hosts (e.g. network devices), or ``"127.0.0.1"`` for
+                local-only access. (default: :obj:`"0.0.0.0"`)
         """
         super().__init__(timeout=timeout)
         self.timeout = timeout
+        self.bind_address = bind_address
         self.server_instances: Dict[int, Any] = {}  # Track running servers
         self.add_branding_tag = add_branding_tag
         self.logo_path = logo_path
@@ -174,10 +181,18 @@ class WebDeployToolkit(BaseToolkit):
         r"""Check if a port is available for binding."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                sock.bind(('127.0.0.1', port))
+                sock.bind((self.bind_address, port))
                 return True
             except OSError:
                 return False
+
+    def _is_port_listening(self, port: int) -> bool:
+        r"""Check if a port is accepting connections."""
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def _load_server_registry(self):
         r"""Load server registry from persistent storage."""
@@ -188,6 +203,14 @@ class WebDeployToolkit(BaseToolkit):
                     # Reconstruct server instances from registry
                     for port_str, server_info in data.items():
                         port = int(port_str)
+                        # Skip if we already have a live entry with a
+                        # real Popen 'process' object – never overwrite it
+                        # with a registry-only dict that lacks the handle.
+                        existing = self.server_instances.get(port)
+                        if isinstance(existing, dict) and existing.get(
+                            'process'
+                        ):
+                            continue
                         pid = server_info.get('pid')
                         if pid and self._is_process_running(pid):
                             # Create a mock process object for tracking
@@ -624,17 +647,28 @@ class WebDeployToolkit(BaseToolkit):
 
             # Start http.server as a background process with security
             # improvements
+            python_cmd = sys.executable
+            if not python_cmd:
+                python_cmd = shutil.which("python3") or shutil.which("python")
+            if not python_cmd:
+                python_cmd = "python"
+
             process = subprocess.Popen(
                 [
-                    "python3",
+                    python_cmd,
                     "-m",
                     "http.server",
                     str(port),
                     "--bind",
-                    "127.0.0.1",
+                    self.bind_address,
                 ],
                 cwd=directory,
                 stdout=subprocess.DEVNULL,
+                # Use DEVNULL instead of PIPE for stderr to prevent broken-pipe
+                # errors.  When stderr is a PIPE and the read-end is closed
+                # (either by GC or explicitly), http.server's per-request
+                # logging triggers BrokenPipeError which crashes the handler
+                # and causes "Remote end closed connection without response".
                 stderr=subprocess.DEVNULL,
                 shell=False,  # Prevent shell injection
                 env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
@@ -651,18 +685,24 @@ class WebDeployToolkit(BaseToolkit):
 
             # Wait for server to start with timeout
             start_time = time.time()
-            while time.time() - start_time < 5:
-                if not self._is_port_available(port):
-                    # Port is now in use, server started
+            while time.time() - start_time < 15:
+                if self._is_port_listening(port):
                     break
-                time.sleep(0.1)
-            else:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.2)
+
+            if not self._is_port_listening(port):
                 # Server didn't start in time
                 process.terminate()
                 del self.server_instances[port]
+                exit_code = process.poll()
                 return {
                     'success': False,
-                    'error': f'Server failed to start on port {port}',
+                    'error': (
+                        f'Server failed to start on port {port}.'
+                        f' Process exit code: {exit_code}'
+                    ),
                 }
 
             server_url = f"http://localhost:{port}"

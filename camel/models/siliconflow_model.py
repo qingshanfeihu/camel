@@ -12,12 +12,16 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 import os
+import random
+import time
 from typing import Any, Dict, List, Optional, Type, Union
 
-from openai import AsyncStream
+from openai import AsyncStream, RateLimitError, Stream
+from openai.lib.streaming.chat import ChatCompletionStreamManager
 from pydantic import BaseModel
 
 from camel.configs import SiliconFlowConfig
+from camel.logger import get_logger
 from camel.messages import OpenAIMessage
 from camel.models.openai_compatible_model import OpenAICompatibleModel
 from camel.types import (
@@ -29,6 +33,79 @@ from camel.utils import (
     BaseTokenCounter,
     api_keys_required,
 )
+
+logger = get_logger(__name__)
+
+_SF_LLM_MAX_RETRIES = int(os.getenv("SILICONFLOW_LLM_RETRIES", "6"))
+_SF_LLM_BACKOFF_INITIAL = float(
+    os.getenv("SILICONFLOW_LLM_BACKOFF_INITIAL", "1")
+)
+_SF_LLM_BACKOFF_MAX = float(
+    os.getenv("SILICONFLOW_LLM_BACKOFF_MAX", "60")
+)
+_SF_LLM_BACKOFF_JITTER = os.getenv(
+    "SILICONFLOW_LLM_BACKOFF_JITTER", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+_SF_LLM_MIN_INTERVAL = float(os.getenv("SILICONFLOW_LLM_MIN_INTERVAL", "0"))
+
+_LAST_SF_LLM_CALL_TS: Optional[float] = None
+
+_GATEWAY_API_KEY = os.getenv("LLM_GATEWAY_API_KEY")
+if _GATEWAY_API_KEY and not os.getenv("SILICONFLOW_API_KEY"):
+    os.environ["SILICONFLOW_API_KEY"] = _GATEWAY_API_KEY
+
+
+def _sf_maybe_sleep_for_rate_limit() -> None:
+    if _SF_LLM_MIN_INTERVAL <= 0:
+        return
+    global _LAST_SF_LLM_CALL_TS
+    now = time.monotonic()
+    if _LAST_SF_LLM_CALL_TS is not None:
+        elapsed = now - _LAST_SF_LLM_CALL_TS
+        if elapsed < _SF_LLM_MIN_INTERVAL:
+            time.sleep(_SF_LLM_MIN_INTERVAL - elapsed)
+    _LAST_SF_LLM_CALL_TS = time.monotonic()
+
+
+def _sf_is_rate_limit_error(exc: Exception) -> bool:
+    if RateLimitError is not Exception and isinstance(exc, RateLimitError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "rate limit" in message
+
+
+def _sf_call_openai_with_backoff(request_fn, *, label: str):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _SF_LLM_MAX_RETRIES + 1):
+        try:
+            _sf_maybe_sleep_for_rate_limit()
+            return request_fn()
+        except Exception as exc:
+            last_error = exc
+            if not _sf_is_rate_limit_error(exc):
+                raise
+            if attempt >= _SF_LLM_MAX_RETRIES:
+                break
+            base_delay = min(
+                _SF_LLM_BACKOFF_MAX,
+                _SF_LLM_BACKOFF_INITIAL * (2 ** (attempt - 1)),
+            )
+            if _SF_LLM_BACKOFF_JITTER:
+                delay = base_delay * (1 + random.random())
+            else:
+                delay = base_delay
+            logger.warning(
+                "[%s] rate limit, retry %d/%d after %.2fs: %s",
+                label,
+                attempt,
+                _SF_LLM_MAX_RETRIES,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"[{label}] exceeded retry limit due to rate limiting: {last_error}"
+    )
 
 
 class SiliconFlowModel(OpenAICompatibleModel):
@@ -78,11 +155,21 @@ class SiliconFlowModel(OpenAICompatibleModel):
     ) -> None:
         if model_config_dict is None:
             model_config_dict = SiliconFlowConfig().as_dict()
+        gateway_url = os.environ.get("LLM_GATEWAY_BASE_URL")
+        if not gateway_url:
+            raise ValueError(
+                "LLM_GATEWAY_BASE_URL 未配置。当前项目禁止直连 SiliconFlow API。"
+            )
         api_key = api_key or os.environ.get("SILICONFLOW_API_KEY")
         url = url or os.environ.get(
-            "SILICONFLOW_API_BASE_URL",
-            "https://api.siliconflow.cn/v1/",
+            "LLM_GATEWAY_BASE_URL",
+            os.environ.get(
+                "SILICONFLOW_API_BASE_URL",
+                "https://api.siliconflow.cn/v1/",
+            ),
         )
+        if url and url.rstrip("/").endswith("/v1") is False:
+            url = f"{url.rstrip('/')}/v1"
         timeout = timeout or float(os.environ.get("MODEL_TIMEOUT", 180))
         super().__init__(
             model_type=model_type,
@@ -93,6 +180,21 @@ class SiliconFlowModel(OpenAICompatibleModel):
             timeout=timeout,
             max_retries=max_retries,
             **kwargs,
+        )
+
+    def _run(
+        self,
+        messages: List[OpenAIMessage],
+        response_format: Optional[Type[BaseModel]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Union[
+        ChatCompletion,
+        Stream[ChatCompletionChunk],
+        ChatCompletionStreamManager[BaseModel],
+    ]:
+        return _sf_call_openai_with_backoff(
+            lambda: OpenAICompatibleModel._run(self, messages, response_format, tools),
+            label="siliconflow-chat",
         )
 
     async def _arun(

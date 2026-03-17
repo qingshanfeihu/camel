@@ -1,0 +1,149 @@
+{
+    "models-dir": {
+        "pipeline": "C:\\Users\\jiang\\.cache\\modelscope\\hub\\models\\OpenDataLab\\PDF-Extract-Kit-1___0",
+        "vlm": "C:\\Users\\jiang\\.cache\\modelscope\\hub\\models\\OpenDataLab\\MinerU2___5-2509-1___2B"
+    },
+    "device-mode": "cuda",
+    "llm-aided-config": {
+        "title_aided": {
+            "api_key": "ENV:SILICONFLOW_API_KEY",
+            "base_url": "ENV:SILICONFLOW_API_BASE_URL",
+            "model": "ENV:SILICONFLOW_MINERU_MODEL",
+            "enable": true,
+            "stream": false,
+            "timeout": 1800
+                },
+                "frontmatter_filter": {
+                    "enable": true,
+                    "api_key": "ENV:SILICONFLOW_API_KEY",
+                    "base_url": "ENV:SILICONFLOW_API_BASE_URL",
+                    "model": "ENV:SILICONFLOW_MINERU_MODEL",
+                    "stream": false,
+                    "timeout": 600,
+                    "max_pages": 10,
+                    "max_chars_per_page": 800
+        },
+        "front_matter_filter": {
+            "enable": true,
+            "api_key": "ENV:SILICONFLOW_API_KEY",
+            "base_url": "ENV:SILICONFLOW_API_BASE_URL",
+            "model": "ENV:SILICONFLOW_MINERU_MODEL",
+            "max_pages": 12
+        },
+        "metadata_extraction": {
+            "enable": true,
+            "api_key": "ENV:SILICONFLOW_API_KEY",
+            "base_url": "ENV:SILICONFLOW_API_BASE_URL",
+            "model": "ENV:SILICONFLOW_MINERU_MODEL",
+            "stream": false,
+            "timeout": 600
+        }
+    },
+    "metadata_rules": {
+        "intents": {
+            "manage_server_group": ["server group", "manage server", "scaling group", "服务器负载均衡", "SLB", "集群", "cluster", "backend service", "virtual service", "server farm"],
+            "app_deployment": ["application", "deployment", "deploy", "流量编排", "orchestration", "application flow", "应用安全"],
+            "resource_monitoring": ["monitor", "metric", "alarm", "健康检查", "health check", "statistics", "统计信息", "system health"],
+            "log_analysis": ["log", "audit", "日志", "审计", "syslog", "event"],
+            "user_management": ["user", "permission", "role", "policy", "用户", "权限", "access control", "访问控制"],
+            "network_config": ["vpc", "subnet", "security group", "eip", "网络配置", "VLAN", "VXLAN", "NAT", "IP地址", "interface", "route", "网关"],
+            "ssl_management": ["SSL", "certificate", "证书", "cipher", "key", "加密", "TLS"],
+            "high_availability": ["HA", "高可用", "failover", "失效切换", "redundancy", "backup"]
+        },
+        "config_modes": {
+            "console": ["console", "web ui", "dashboard", "WebUI", "控制台", "界面"],
+            "cli": ["cli", "command line", "terminal", "命令行", "SSH", "shell", "cmd"],
+            "api": ["api", "sdk", "rest", "接口", "interface"]
+        },
+        "product_modules": {
+            "SLB": ["SLB", "服务器负载均衡", "server load balance", "slb", "虚拟服务", "virtual service", "后台服务组", "backend service group"],
+            "GSLB": ["GSLB", "全局负载均衡", "global server load balance", "gslb"],
+            "LLB": ["LLB", "链路负载均衡", "link load balance", "llb"],
+            "基础网络": ["基础网络", "network", "interface", "route", "vlan", "vxlan", "nat", "ip地址", "网关", "gateway"],
+            "安全": ["安全", "security", "firewall", "acl", "ssl", "tls", "证书", "certificate", "加密", "encryption"]
+        },
+        "protocol_types": {
+            "HTTP": ["HTTP", "http", "http/1.1", "http/2", "http2"],
+            "HTTPS": ["HTTPS", "https", "ssl", "tls", "TCPS"],
+            "TCP": ["TCP", "tcp"],
+            "UDP": ["UDP", "udp"],
+            "ICMP": ["ICMP", "icmp", "ping"],
+            "DNS": ["DNS", "dns", "domain name"],
+            "FTP": ["FTP", "ftp"],
+            "TFTP": ["TFTP", "tftp"],
+            "SIP": ["SIP", "sip"],
+            "RTSP": ["RTSP", "rtsp"],
+            "RTP": ["RTP", "rtp"],
+            "SMTP": ["SMTP", "smtp"],
+            "POP3": ["POP3", "pop3"],
+            "IMAP": ["IMAP", "imap"],
+            "SNMP": ["SNMP", "snmp"],
+            "LDAP": ["LDAP", "ldap"],
+            "RADIUS": ["RADIUS", "radius"],
+            "TACACS": ["TACACS", "tacacs"],
+            "SSH": ["SSH", "ssh"],
+            "Telnet": ["Telnet", "telnet"],
+            "NTP": ["NTP", "ntp"],
+            "BGP": ["BGP", "bgp"],
+            "OSPF": ["OSPF", "ospf"],
+            "RIP": ["RIP", "rip"],
+            "ISIS": ["ISIS", "isis"],
+            "IGMP": ["IGMP", "igmp"],
+            "ARP": ["ARP", "arp"]
+        },
+        "command_prefixes": {
+            "slb": ["slb "],
+            "gslb": ["gslb "],
+            "health": ["health "],
+            "show": ["show "],
+            "clear": ["clear "],
+            "no": ["no "],
+            "enable": ["enable "],
+            "set": ["set "],
+            "add": ["add "],
+            "delete": ["delete "],
+            "create": ["create "],
+            "config": ["config "],
+            "interface": ["interface "],
+            "route": ["route "],
+            "vlan": ["vlan "],
+            "acl": ["acl "],
+            "aaa": ["aaa "],
+            "ip": ["ip "],
+            "ipv6": ["ipv6 "],
+            "dns": ["dns "],
+            "ftp": ["ftp "],
+            "sip": ["sip "],
+            "rtsp": ["rtsp "],
+            "snmp": ["snmp "],
+            "ntp": ["ntp "],
+            "bgp": ["bgp "],
+            "ospf": ["ospf "],
+            "rip": ["rip "]
+        },
+        "cli_format_rules": {
+            "command_body": "粗体字体表示命令主体",
+            "command_param": "斜体字体表示命令参数",
+            "required_param": "< > 表示必选参数",
+            "optional_param": "[ ] 表示可选参数",
+            "subcommands": "no/show/clear 等子命令用于显示/删除/清除等功能",
+            "choice_required": "{ x | y | ... } 表示从多个选项中选取一个或多个",
+            "choice_optional": "[ x | y | ... ] 表示从多个选项中选取一个或者不选",
+            "string_quotes": "字符串参数推荐使用双引号",
+            "max_line_length": "每行最多支持输入2048字节"
+        }
+    },
+    "default-args": {
+        "dump_model_output": true,
+        "dump_middle_json": true,
+        "dump_content_list": true,
+        "proxy": "http://127.0.0.1:10808"
+    },
+    "config_version": "1.3.1",
+    "_comment": {
+        "backend": "MinerU CLI 默认使用 'hybrid-auto-engine'，支持本地 vLLM 加速（不需要远程 HTTP 服务器）",
+        "vllm_server": "使用 mineru-vllm-server 启动本地 VLM 推理加速，运行在 http://127.0.0.1:30000",
+        "vllm_gpu_memory": "GPU 内存利用率由 vLLM 自动优化，可通过 --gpu-memory-utilization 参数调整（0.5-0.9）",
+        "reference": "https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#vllm-vlm"
+    }
+}

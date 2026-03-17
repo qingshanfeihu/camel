@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  llm-gateway:
+    build:
+      context: ..
+      dockerfile: llm_gateway/Dockerfile
+    container_name: infoagen-llm-gateway
+    ports:
+      - "9000:9000"
+    environment:
+      - GATEWAY_CONFIG=/app/llm_gateway/config.yaml
+      - GATEWAY_PORT=9000
+      # Load from .env file
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
+      - SILICONFLOW_API_BASE_URL=${SILICONFLOW_API_BASE_URL}
+      - SILICONFLOW_CHAT_MODEL=${SILICONFLOW_CHAT_MODEL}
+      - SILICONFLOW_EMBEDDING_MODEL=${SILICONFLOW_EMBEDDING_MODEL}
+      - SILICONFLOW_RERANKER_MODEL=${SILICONFLOW_RERANKER_MODEL}
+    volumes:
+      - ../llm_gateway:/app/llm_gateway
+      - ../INAGENT/.env:/app/.env:ro
+    restart: unless-stopped
+    networks:
+      - infoagen-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  infoagen-network:
+    driver: bridge

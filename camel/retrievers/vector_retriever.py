@@ -111,7 +111,9 @@ class VectorRetriever(BaseRetriever):
             )
         from unstructured.documents.elements import Element
 
-        if isinstance(content, Element):
+        if isinstance(content, list) and all(isinstance(e, Element) for e in content):
+            elements = content
+        elif isinstance(content, Element):
             elements = [content]
         elif isinstance(content, IOBase):
             elements = (
@@ -175,6 +177,14 @@ class VectorRetriever(BaseRetriever):
                             if content.metadata.file_directory
                             else ""
                         }
+                    elif isinstance(content, list) and content and isinstance(content[0], Element):
+                        content_path_info = {
+                            "content path": content[0].metadata.file_directory[:100]
+                            if content[0].metadata.file_directory
+                            else "List of Elements"
+                        }
+                    else:
+                        content_path_info = {"content path": "Unknown"}
 
                     chunk_metadata = {"metadata": chunk.metadata.to_dict()}
                     # Remove the 'orig_elements' key if it exists
@@ -182,10 +192,16 @@ class VectorRetriever(BaseRetriever):
                     chunk_metadata["extra_info"] = extra_info or {}
                     chunk_text = {"text": str(chunk)}
                     chunk_metadata["metadata"]["piece_num"] = i + offset + 1
+                    chunk_id = (
+                        chunk_metadata["metadata"].get("chunk_id")
+                        or chunk_metadata["metadata"].get("block_id")
+                        or chunk_metadata["metadata"].get("piece_num")
+                    )
                     combined_dict = {
                         **content_path_info,
                         **chunk_metadata,
                         **chunk_text,
+                        "chunk_id": chunk_id,
                     }
 
                     records.append(
