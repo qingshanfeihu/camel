@@ -388,6 +388,16 @@ RRF 融合后每条结果:
 
 **推荐顺序**（与 `scripts/test_ircookie_e2e.py` 文档串一致）：农民 `write_to_reference` → `merge_knowledge_base` → 农场主 `process_gaps` / `process_gap_entries`（若需向量一致再开 `refresh_hybrid_vectors`）→ 若仍有农民回填写 reference，则再 merge + 刷新向量。
 
+### 3.8 `hybrid_vectors_force` / `force_rebuild_vectors`（06 选型）
+
+路径：`workflow_config_generator.initialize_rag_system`、`refresh_hybrid_vector_index`；农场主通过 `process_gap_entries(..., hybrid_vectors_force=...)` 传入。
+
+| 目标 | 建议 | 代价 / 风险 |
+|------|------|----------------|
+| Qdrant 与合并后 `knowledge_base.json` **严格一致** | `force=True`（默认） | 全量重嵌 |
+| **减少** Qdrant 写入次数 | `force=False` | 指纹未变时 **Qdrant 不更新**；BM25 仍会随当前 KB 刷新；仅改 `reference/*.json` 未改合并指纹时易 **向量滞后** |
+| 按变更 **增量 upsert** 若干点 | **未实现**；由 **混合搜索（06）** 扩展 Hybrid/Qdrant API（如与 `block_id` 对齐） | 非农场主范围；见 `sessions/06-hybrid-search.md`、`sessions/04-farm-owner.md` |
+
 ---
 
 ## L3 — 评审管线

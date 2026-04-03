@@ -25,7 +25,7 @@
 
 1. **需要 Qdrant 与合并后的 `knowledge_base.json` 严格一致时**：编排使用 **`force=True`（或删指纹后全量）**，接受 **全量重建** 成本。
 2. **希望少打 Qdrant、但能接受「仅 BM25 反映最新 KB、Qdrant 仍为旧全量」的风险时**：可用 **`force=False`**，并理解 **指纹不变时 Qdrant 不会追平** `reference/*.json` 单独改动（除非先合并进 `knowledge_base.json` 使指纹变）。
-3. **若产品必须「按变更增量 upsert Qdrant」**：由 **混合搜索（06）** 在 `workflow_config_generator` / `HybridRetriever` / `QdrantStorage`（及与 `block_id` 等 chunk 身份对齐）**另行设计与实现**；**不属于**农场主交付范围。落地后需在 PR 中同步本段与 `06-hybrid-search.md`、`DATA_FLOW.md`。
+3. **若产品必须「按变更增量 upsert Qdrant」**：由 **混合搜索（06）** 在 `workflow_config_generator` / `HybridRetriever` / `QdrantStorage`（及与 `block_id` 等 chunk 身份对齐）**另行设计与实现**；**不属于**农场主交付范围。落地后需在 PR 中同步本段与 `06-hybrid-search.md`、`DATA_FLOW.md`（§3.8）。
 
 ### 混合向量刷新与农民的调用顺序（非 bug，易漏）
 
