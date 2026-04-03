@@ -12,13 +12,18 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
-农场主 Agent (Knowledge Farm-Owner Agent)
+农场主 Agent (Knowledge Farm-Owner Agent) — TreeInformed Decision Engine v2
 
 职责：接收 schema_gaps.jsonl（由采购员/农民产出），
 执行 GraphRAG 结构性维护 —— 新实体、属性列、冲突与溢出的保守裁决。
 写入前 snapshot_backup；结束后对 GraphRAG 检索器 reload()（仅刷新当前进程内图视图）。
 
-不写 knowledge_base.json。混合向量（Qdrant/BM25）默认不刷新；可传 ``refresh_hybrid_vectors=True`` 在 reload 后调用 ``refresh_hybrid_vector_index``。
+决策流程：每个 gap 先查 CLIGraphStore 获取 TreeContext（层级路径、父节点候选、
+Skeleton artifact 状态、enrich 快照）；规则可确定时走规则，模糊时交 LLM；
+禁止硬编码相似度阈值。needs_tree_session 条目放 FarmOwnerReport.deferred。
+
+不写 knowledge_base.json。混合向量（Qdrant/BM25）默认不刷新；可传
+``refresh_hybrid_vectors=True`` 先 merge_knowledge_base 再 refresh_hybrid_vector_index。
 仅做图结构维护，不做 chunk 内容富化（农民的职责）。
 
 职责变更时请同步：INAGENT/docs/agents/sessions/04-farm-owner.md、
@@ -40,6 +45,8 @@ from INAGENT.rag.knowledge_schema import (
     FarmOwnerReport,
     FillRequest,
     SchemaGapEntry,
+    TreeContext,
+    TREE_ENRICH_KEYS,
 )
 from INAGENT.utils.env_utils import get_product_name, load_inagent_env
 
@@ -70,10 +77,14 @@ class KnowledgeFarmOwnerAgent:
         model: Optional[BaseModelBackend] = None,
         product_name: Optional[str] = None,
         _chat_agent=None,
+        cli_graph=None,
+        skeleton_index=None,
     ) -> None:
         self.graphrag = graphrag_retriever
         self._chat_agent = _chat_agent
         self._overflow_field_denylist = _load_overflow_field_denylist()
+        self._cli_graph_override = cli_graph
+        self._skeleton_index_override = skeleton_index
         if self._chat_agent is None and model is not None:
             load_inagent_env()
             owner_product_name = product_name or get_product_name()
@@ -158,6 +169,15 @@ class KnowledgeFarmOwnerAgent:
 
         if refresh_hybrid_vectors:
             try:
+                from pathlib import Path
+                from INAGENT.data_tools.merge_knowledge_base import merge_knowledge_base
+
+                _ref_dir = Path(__file__).resolve().parent.parent / "knowledge_base" / "reference"
+                merge_knowledge_base(_ref_dir, _ref_dir / "knowledge_base.json")
+            except Exception as exc:
+                report.errors.append(f"merge_knowledge_base 失败: {exc}")
+
+            try:
                 from INAGENT.workflow_config_generator import refresh_hybrid_vector_index
 
                 refresh_hybrid_vector_index(force=hybrid_vectors_force)
@@ -235,29 +255,151 @@ class KnowledgeFarmOwnerAgent:
         if not entries:
             return
 
-        entity_patches = [
-            {
-                "title": entry.entity_title,
-                "description": entry.entity_description,
-                "entity_type": entry.entity_type or "CONFIGURATION",
-                "source_id": entry.source_file,
-            }
-            for entry in entries
-        ]
+        for entry in entries:
+            ctx = self._query_tree_context(entry.entity_title)
+            action, enrich_fields, reason = self._decide_new_entity_action(entry, ctx, report)
 
-        added = 0
-        try:
-            added = self.graphrag.upsert_entities(entity_patches)
-            report.entities_added += added
-        except Exception as exc:
-            report.errors.append(f"upsert_entities 失败: {exc}")
+            if action == "discard":
+                logger.debug("new_entity discard: %s (%s)", entry.entity_title, reason)
+                continue
 
-        if added > 0:
+            if action == "needs_tree_session":
+                report.deferred.append(FillRequest(
+                    entity_title=entry.entity_title,
+                    source_evidence=entry.evidence,
+                    action="needs_tree_session",
+                    target_node_id=entry.entity_title,
+                    tree_level=ctx.tree_level,
+                    enrich_fields=enrich_fields,
+                ))
+                continue
+
+            # merge_into_existing / tree_create_leaf / tree_create_branch
             try:
-                titles = [patch["title"] for patch in entity_patches]
-                report.entities_reembedded += self.graphrag.reembed_entities(titles)
+                added = self.graphrag.upsert_entities([{
+                    "title": entry.entity_title,
+                    "description": entry.entity_description,
+                    "entity_type": entry.entity_type or "CONFIGURATION",
+                    "source_id": entry.source_file,
+                }])
+                report.entities_added += added
             except Exception as exc:
-                report.errors.append(f"reembed_entities 失败: {exc}")
+                report.errors.append(f"upsert_entities 失败: {exc}")
+                continue
+
+            if report.entities_added > 0 or action == "merge_into_existing":
+                try:
+                    report.entities_reembedded += self.graphrag.reembed_entities(
+                        [entry.entity_title]
+                    )
+                except Exception as exc:
+                    report.errors.append(f"reembed_entities 失败: {exc}")
+
+            # add_relationships if merging into existing parent
+            if action in ("merge_into_existing",) and ctx.parent_candidate_id:
+                try:
+                    self.graphrag.add_relationships([{
+                        "source": entry.entity_title,
+                        "target": ctx.parent_candidate_id,
+                        "type": "BELONGS_TO",
+                        "description": entry.evidence,
+                        "source_id": entry.source_file,
+                    }])
+                except Exception as exc:
+                    logger.debug("add_relationships 失败(非致命): %s", exc)
+
+            # skeleton_register
+            if action in ("merge_into_existing", "tree_create_leaf", "tree_create_branch"):
+                si = self._get_skeleton_index()
+                if si is not None and ctx.skeleton_module_id:
+                    try:
+                        si.register_artifact(
+                            artifact_id=entry.entity_title,
+                            artifact_type="graphrag_entity",
+                            module_id=ctx.skeleton_module_id,
+                            document_category=entry.entity_type or "CONFIGURATION",
+                            source_file=entry.source_file,
+                            graphrag_entity_id=entry.entity_title,
+                            title=entry.entity_title,
+                        )
+                    except Exception as exc:
+                        logger.debug("skeleton register 失败(非致命): %s", exc)
+
+            report.fill_requests.append(FillRequest(
+                entity_title=entry.entity_title,
+                fill_fields=enrich_fields,
+                source_evidence=entry.evidence,
+                action=action,
+                resolved_value=enrich_fields,
+                target_node_id=ctx.matched_node_id or entry.entity_title,
+                tree_level=ctx.tree_level,
+                enrich_fields=enrich_fields,
+                artifact_id=entry.entity_title,
+            ))
+
+    def _decide_new_entity_action(
+        self,
+        entry: SchemaGapEntry,
+        ctx: TreeContext,
+        report: FarmOwnerReport,
+    ):
+        """规则先行，规则无法判断交 LLM。返回 (action, enrich_fields, reason)。"""
+        # 规则 1: exists_in_tree + artifact 已有 → merge_into_existing
+        if ctx.exists_in_tree and ctx.skeleton_artifact_exists:
+            return "merge_into_existing", {}, "树上已有且 artifact 已注册"
+
+        # 规则 2: exists_in_tree + 无 artifact → merge + skeleton_register
+        if ctx.exists_in_tree and not ctx.skeleton_artifact_exists:
+            return "merge_into_existing", {}, "树上已有但缺 artifact 注册"
+
+        # 规则 3: 不在树上 + 有父节点候选 → 按类型决定 leaf/branch
+        if not ctx.exists_in_tree and ctx.parent_candidate_id:
+            entity_type = (entry.entity_type or "").upper()
+            action = "tree_create_leaf" if "COMMAND" in entity_type else "tree_create_branch"
+            return action, {}, f"父节点候选 {ctx.parent_candidate_id}"
+
+        # 规则无法判断 → LLM
+        return self._llm_decide_new_entity(entry, ctx, report)
+
+    def _llm_decide_new_entity(
+        self,
+        entry: SchemaGapEntry,
+        ctx: TreeContext,
+        report: FarmOwnerReport,
+    ):
+        has_info = bool(entry.entity_title or entry.entity_description)
+        default_action = "tree_create_branch" if has_info else "discard"
+        prompt = (
+            "你是知识图谱维护裁决者，只返回 JSON。\n"
+            "输出格式: {\"action\": \"tree_create_leaf|tree_create_branch|merge_into_existing|needs_tree_session|discard\", "
+            "\"enrich_fields\": {}, \"reason\": \"...\"}\n\n"
+            f"实体标题: {entry.entity_title}\n"
+            f"实体描述: {entry.entity_description}\n"
+            f"实体类型: {entry.entity_type}\n"
+            f"证据: {entry.evidence}\n"
+            f"树上是否存在: {ctx.exists_in_tree}\n"
+            f"相似命令: {json.dumps(ctx.similar_commands, ensure_ascii=False)}\n"
+            f"层级路径: {ctx.hierarchy_prefix}\n"
+            f"父节点候选: {ctx.parent_candidate_id}\n"
+            f"Skeleton 模块: {ctx.skeleton_module_id}\n"
+            "请裁决此实体应当：新建叶(tree_create_leaf)、新建枝(tree_create_branch)、"
+            "挂入已有节点(merge_into_existing)、等待树会话(needs_tree_session)、还是丢弃(discard)。"
+        )
+        result = self._run_decision(
+            prompt, {"action": default_action, "enrich_fields": {}, "reason": "fallback"}
+        )
+        action = result.get("action", default_action)
+        valid_actions = {
+            "tree_create_leaf", "tree_create_branch",
+            "merge_into_existing", "needs_tree_session", "discard",
+        }
+        if action not in valid_actions:
+            report.errors.append(f"LLM 返回无效 action '{action}'，改为 {default_action}")
+            action = default_action
+        enrich_fields = result.get("enrich_fields") or {}
+        if not isinstance(enrich_fields, dict):
+            enrich_fields = {}
+        return action, enrich_fields, result.get("reason", "")
 
     def _process_attribute_gaps(
         self,
@@ -299,6 +441,28 @@ class KnowledgeFarmOwnerAgent:
                 resolved_value={entry.column_name: entry.default_value},
                 target_node_id=entry.entity_title,
             ))
+
+        # skeleton_register: 为已添加列的实体注册 artifact
+        si = self._get_skeleton_index()
+        if si is not None:
+            for entry in entries:
+                if not entry.entity_title:
+                    continue
+                ctx = self._query_tree_context(entry.entity_title)
+                if not ctx.skeleton_module_id:
+                    continue
+                try:
+                    si.register_artifact(
+                        artifact_id=entry.entity_title,
+                        artifact_type="graphrag_entity",
+                        module_id=ctx.skeleton_module_id,
+                        document_category=entry.entity_type or "CONFIGURATION",
+                        source_file=entry.source_file,
+                        graphrag_entity_id=entry.entity_title,
+                        title=entry.entity_title,
+                    )
+                except Exception as exc:
+                    logger.debug("attribute_gaps skeleton register 失败(非致命): %s", exc)
 
     def _process_conflicts(
         self,
@@ -459,26 +623,44 @@ class KnowledgeFarmOwnerAgent:
     def _decide_conflict(self, entry: SchemaGapEntry) -> Dict[str, Any]:
         fallback = self._fallback_conflict_decision(entry)
         neighbors = self._get_neighbors(entry.entity_title)
+        ctx = self._query_tree_context(entry.entity_title or "")
         prompt = (
             "你是知识图谱维护裁决者，只返回 JSON。\n"
-            "输出格式: {\"decision\": \"accept_new|keep_skeleton|merge\", \"resolved_value\": ..., \"rationale\": \"...\"}\n"
+            "输出格式: {\"decision\": \"accept_new|keep_skeleton|merge\", \"resolved_value\": ..., "
+            "\"tree_level\": \"...\", \"enrich_fields\": {}, \"rationale\": \"...\"}\n"
             f"实体: {entry.entity_title}\n"
             f"冲突字段: {entry.field_name}\n"
             f"骨架值: {json.dumps(entry.skeleton_value, ensure_ascii=False)}\n"
             f"新值: {json.dumps(entry.new_value, ensure_ascii=False)}\n"
             f"证据: {entry.evidence}\n"
+            f"树层级: {ctx.tree_level}\n"
+            f"层级路径: {ctx.hierarchy_prefix}\n"
+            f"已有 enrich 字段快照: {json.dumps(ctx.enrich_snapshot, ensure_ascii=False)}\n"
+            f"父节点候选: {ctx.parent_candidate_id}\n"
             f"图上下文: {json.dumps(neighbors, ensure_ascii=False)}"
         )
         return self._run_decision(prompt, fallback)
 
     def _decide_overflow(self, entry: SchemaGapEntry) -> Dict[str, Any]:
         fallback = self._fallback_overflow_decision(entry)
+        ctx = self._query_tree_context(entry.entity_title or "")
+        valid_enrich = TREE_ENRICH_KEYS.get(ctx.tree_level, [])
+        # 规则: 若字段名在该层级合法 enrich 键内，直接归为 attr_tag_update
+        if entry.field_name and entry.field_name in valid_enrich:
+            return {
+                "decision": "merge_into",
+                "target_node_id": ctx.matched_node_id or self._default_overflow_target(entry),
+            }
         prompt = (
             "你是知识图谱维护裁决者，只返回 JSON。\n"
             "输出格式: {\"decision\": \"create_new|merge_into|discard\", \"target_node_id\": \"...\", \"new_entity\": {\"title\": \"...\", \"description\": \"...\", \"entity_type\": \"...\"}, \"rationale\": \"...\"}\n"
             f"候选标题: {entry.entity_title}\n"
             f"候选描述: {entry.entity_description}\n"
             f"最近节点: {json.dumps(entry.nearest_matches, ensure_ascii=False)}\n"
+            f"树层级: {ctx.tree_level}\n"
+            f"层级路径: {ctx.hierarchy_prefix}\n"
+            f"树上已有: {ctx.exists_in_tree}\n"
+            f"相似命令: {json.dumps(ctx.similar_commands, ensure_ascii=False)}\n"
             f"原始内容: {entry.chunk_content or entry.evidence}"
         )
         return self._run_decision(prompt, fallback)
@@ -527,11 +709,8 @@ class KnowledgeFarmOwnerAgent:
 
     def _fallback_overflow_decision(self, entry: SchemaGapEntry) -> Dict[str, Any]:
         target_node_id = self._default_overflow_target(entry)
-        if target_node_id and entry.nearest_matches:
-            top_match = entry.nearest_matches[0]
-            similarity = float(top_match.get("similarity", 0.0) or 0.0)
-            if similarity >= 0.9:
-                return {"decision": "merge_into", "target_node_id": target_node_id}
+        if target_node_id:
+            return {"decision": "merge_into", "target_node_id": target_node_id}
         if entry.entity_title or entry.entity_description or entry.chunk_content:
             return {
                 "decision": "create_new",
@@ -597,3 +776,139 @@ class KnowledgeFarmOwnerAgent:
             return {"entities": [], "relationships": []}
         except Exception:
             return {"entities": [], "relationships": []}
+
+    # ── 懒加载树查询依赖 ───────────────────────────────────────────
+
+    def _get_cli_graph(self):
+        if self._cli_graph_override is not None:
+            return self._cli_graph_override
+        try:
+            from INAGENT.rag.cli_graph_store import get_cli_graph_store
+            return get_cli_graph_store()
+        except Exception as exc:
+            logger.warning("CLIGraphStore 不可用: %s", exc)
+            return None
+
+    def _get_skeleton_index(self):
+        if self._skeleton_index_override is not None:
+            return self._skeleton_index_override
+        try:
+            from INAGENT.rag.skeleton_index import get_skeleton_index
+            return get_skeleton_index()
+        except Exception as exc:
+            logger.warning("SkeletonIndex 不可用: %s", exc)
+            return None
+
+    def _query_tree_context(self, entity_title: str) -> TreeContext:
+        """纯读树查询，无副作用。失败时返回 exists_in_tree=False 的空上下文。"""
+        ctx = TreeContext(entity_title=entity_title)
+        if not entity_title:
+            return ctx
+
+        cli = self._get_cli_graph()
+        si = self._get_skeleton_index()
+
+        # Step 1: command_exists
+        if cli is not None:
+            try:
+                exists, similar = cli.command_exists(entity_title)
+                ctx.exists_in_tree = exists
+                ctx.similar_commands = similar or []
+            except Exception as exc:
+                logger.debug("command_exists 异常: %s", exc)
+
+        # Step 2: 若命中，查层级前缀推断 tree_level
+        if ctx.exists_in_tree and cli is not None:
+            try:
+                prefix = cli.get_hierarchy_prefix(entity_title)
+                ctx.hierarchy_prefix = prefix or ""
+                # 推断层级：有前缀说明至少是 branch/leaf
+                ctx.tree_level = self._infer_tree_level_from_cli(cli, entity_title)
+            except Exception as exc:
+                logger.debug("get_hierarchy_prefix 异常: %s", exc)
+
+        # Step 3: derive_trunk（有 module_id 时）
+        if cli is not None and ctx.tree_level in ("root", "trunk"):
+            try:
+                trunk = cli.derive_trunk(entity_title)
+                ctx.trunk_info = trunk or {}
+            except Exception as exc:
+                logger.debug("derive_trunk 异常: %s", exc)
+
+        # Step 4: branch_ids → parent_candidate
+        if cli is not None and ctx.exists_in_tree:
+            try:
+                branches = cli.get_branch_ids(entity_title)
+                ctx.branch_ids = branches or []
+                if not ctx.parent_candidate_id and ctx.branch_ids:
+                    ctx.parent_candidate_id = ctx.branch_ids[0]
+            except Exception as exc:
+                logger.debug("get_branch_ids 异常: %s", exc)
+
+        # Step 5: resolve_module via SkeletonIndex
+        if si is not None:
+            try:
+                module_id = si.resolve_module(entity_title)
+                ctx.skeleton_module_id = module_id or ""
+            except Exception as exc:
+                logger.debug("resolve_module 异常: %s", exc)
+
+        # Step 6: artifact_count
+        if si is not None and ctx.skeleton_module_id:
+            try:
+                cnt = si.artifact_count(ctx.skeleton_module_id)
+                ctx.skeleton_artifact_exists = cnt > 0
+            except Exception as exc:
+                logger.debug("artifact_count 异常: %s", exc)
+
+        # Step 7: enrich_snapshot（从 CLI graph 节点直接读 enrich 字段）
+        if cli is not None and ctx.exists_in_tree:
+            try:
+                ctx.enrich_snapshot = self._read_enrich_snapshot(cli, entity_title)
+            except Exception as exc:
+                logger.debug("enrich_snapshot 异常: %s", exc)
+
+        return ctx
+
+    def _infer_tree_level_from_cli(self, cli, entity_title: str) -> str:
+        """根据 CLI graph 节点 type 推断树层级。"""
+        try:
+            cli._ensure_loaded()
+            nid = entity_title.lower().replace(" ", "_")
+            node = cli._nodes_by_id.get(nid) or cli._nodes_by_id.get(entity_title)
+            if node is None:
+                # 尝试通过 command_exists 中的相似 ID 找节点
+                for nid_k, n in cli._nodes_by_id.items():
+                    label = n.get("label", "").lower()
+                    if label == entity_title.lower():
+                        node = n
+                        break
+            if node is None:
+                return "unknown"
+            ntype = node.get("type", "")
+            if ntype == "module":
+                branches = cli.get_branch_ids(node.get("id", entity_title))
+                return "trunk" if branches else "root"
+            if ntype in ("command", "operation_command"):
+                return "leaf"
+            return "branch"
+        except Exception:
+            return "unknown"
+
+    def _read_enrich_snapshot(self, cli, entity_title: str) -> Dict[str, Any]:
+        """从 CLI graph 节点读取所有 enrich 字段的当前值。"""
+        all_enrich_keys = set()
+        for keys in TREE_ENRICH_KEYS.values():
+            all_enrich_keys.update(keys)
+        snapshot: Dict[str, Any] = {}
+        try:
+            cli._ensure_loaded()
+            nid = entity_title.lower().replace(" ", "_")
+            node = cli._nodes_by_id.get(nid) or cli._nodes_by_id.get(entity_title)
+            if node:
+                for k in all_enrich_keys:
+                    if k in node:
+                        snapshot[k] = node[k]
+        except Exception:
+            pass
+        return snapshot

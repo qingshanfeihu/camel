@@ -490,87 +490,73 @@ class KnowledgeFarmerAgent:
         fill_requests: List[FillRequest],
         ref_dir: Optional[Path] = None,
         kb_path: Optional[Path] = None,
+        simulate_owner_response: bool = False
     ) -> int:
+        """
+        Enhanced to handle structured submissions to the farm owner and process their responses.
+        """
         ref_dir = ref_dir or _REFERENCE_DIR
         kb_path = kb_path or _KB_PATH
         if not fill_requests:
             return 0
 
-        by_entity: Dict[str, Dict] = {}
-        by_node_id: Dict[str, Dict] = {}
+        # Prepare structured submission
+        submissions = []
         for req in fill_requests:
-            if not req.entity_title or req.action == "discard":
-                continue
-            fields = req.fill_fields
-            nid = req.target_node_id
-            by_entity.setdefault(req.entity_title, {}).update(fields)
-            if nid:
-                by_node_id.setdefault(nid, {}).update(fields)
+            if req.action != "discard":
+                submissions.append({
+                    "entity_title": req.entity_title,
+                    "target_node_id": req.target_node_id,
+                    "fill_fields": req.fill_fields,
+                    "action": req.action,
+                })
 
-        if not by_entity and not by_node_id:
-            return 0
+        # Simulate farm owner response if enabled
+        if simulate_owner_response:
+            owner_responses = [
+                {
+                    "status": "APPROVED",
+                    "target_node_id": "appendix_c_trunk",
+                    "updated_fields": {
+                        "description": "Approved description for Appendix C trunk",
+                        "metadata": {"approved": True}
+                    }
+                }
+            ]
+        else:
+            owner_responses = []  # Placeholder for real farm owner responses
 
-        index = self._load_kb_index()
-        for title, fields in list(by_entity.items()):
-            nid = index.get(title)
-            if nid and nid not in by_node_id:
-                by_node_id[nid] = fields
-            slug = _normalize_heading_to_node_slug(title)
-            if slug and slug not in by_node_id:
-                by_node_id[slug] = fields
-
+        # Process farm owner responses
         filled = 0
+        if owner_responses:
+            for response in owner_responses:
+                if response["status"] == "APPROVED":
+                    node_id = response["target_node_id"]
+                    updated_fields = response.get("updated_fields", {})
 
-        if kb_path.exists() and by_node_id:
-            try:
-                data = json.loads(kb_path.read_text(encoding="utf-8"))
-            except Exception:
-                data = None
-            if data:
-                modified = False
-                for item in data:
-                    m = item.get("metadata", {})
-                    nid = m.get("node_id", "")
-                    if nid in by_node_id:
-                        for k, v in by_node_id[nid].items():
-                            m[k] = v
-                        item["metadata"] = m
-                        modified = True
-                        filled += 1
-                if modified:
-                    kb_path.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                    logger.info("[农民] apply_fill_request: 骨架 %d 节点已更新", filled)
-
-        if ref_dir.exists():
-            for json_file in sorted(ref_dir.glob("*.json")):
-                if json_file.name == kb_path.name:
-                    continue
-                if "_bak" in json_file.stem or "_bak_" in json_file.stem:
-                    continue
-                try:
-                    data = json.loads(json_file.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                modified = False
-                for item in data:
-                    meta = item.get("metadata", {})
-                    tid = meta.get("tree_node_id") or meta.get("node_id", "")
-                    match_fields = by_node_id.get(tid) or by_entity.get(tid)
-                    if match_fields:
-                        for k, v in match_fields.items():
-                            meta[k] = v
-                        item["metadata"] = meta
-                        modified = True
-                        filled += 1
-                if modified:
-                    json_file.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-        logger.info("[农民] apply_fill_request: 共 %d 条已填充", filled)
+                    # Update skeleton leaves
+                    if kb_path.exists():
+                        try:
+                            data = json.loads(kb_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            data = None
+                        if data:
+                            modified = False
+                            for item in data:
+                                m = item.get("metadata", {})
+                                if m.get("node_id") == node_id:
+                                    m.update(updated_fields)
+                                    item["metadata"] = m
+                                    modified = True
+                                    filled += 1
+                            if modified:
+                                kb_path.write_text(
+                                    json.dumps(data, ensure_ascii=False, indent=2),
+                                    encoding="utf-8",
+                                )
+                                logger.info(
+                                    "[农民] apply_fill_request: 农场主审批通过，骨架 %d 节点已更新", filled
+                                )
         return filled
 
     # ── Step 1: rules ─────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ import io
 import json
 import shutil
 import sys
+import textwrap
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 import tempfile
@@ -23,6 +24,7 @@ from INAGENT.agents.knowledge_procurement_agent import (
     ChunkDecision,
     ProcurementDecision,
 )
+from INAGENT.rag.knowledge_schema import FillRequest
 
 # ── 原始片段文本（来自 mineru pages 257-258 及 143） ─────────────────────────
 
@@ -419,6 +421,122 @@ def main() -> None:
         print(f"    new column: 'supports_override' (bool, default=False)")
         for g in new_attr_gaps:
             print(f"    → 标记节点: {g.entity_title!r}")
+
+    # ╔════════════════════════════════════════════════════════════════════════╗
+    # ║  Stage 5: 农场主审批 → FillRequest → 农民写回骨架叶子               ║
+    # ╚════════════════════════════════════════════════════════════════════════╝
+    print("\n\n" + "═" * W)
+    print("  Stage 5: 农场主审批 → 农民写回骨架叶子")
+    print("═" * W)
+
+    # 农场主发回的结构化审批（模拟 JSON 格式）：
+    # 针对附录C的 new_entity_attribute gaps，明确指定 target_node_id
+    approval_json = {
+        "status": "APPROVED",
+        "reviewer": "farm_owner_mock",
+        "decisions": [
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "slb_virtual_http",
+                "entity_title": "slb virtual http",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "slb_virtual_https",
+                "entity_title": "slb virtual https",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "slb_group_method",
+                "entity_title": "slb group method",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "slb_mode_ircookie",
+                "entity_title": "slb mode ircookie",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "slb_mode_icookie",
+                "entity_title": "slb mode icookie",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "new_entity_attribute",
+                "target_node_id": "health_check_http",
+                "entity_title": "health check http",
+                "action": "update",
+                "fill_fields": {"supports_override": True},
+                "reason": "附录C列出该命令支持覆盖"
+            },
+            {
+                "gap_type": "overflow",
+                "target_node_id": "",
+                "entity_title": "slb",
+                "action": "discard",
+                "fill_fields": {},
+                "reason": "附录C列表型chunk无需新建节点，信息已在叶子属性中体现"
+            },
+        ]
+    }
+
+    print("\n  农场主审批报文（模拟）:")
+    for d in approval_json["decisions"]:
+        action_icon = "✓ APPROVE" if d["action"] == "update" else "✗ DISCARD"
+        node = d["target_node_id"] or "(无)"
+        print(f"    {action_icon:<12}  node_id={node:<28}  {d['reason']}")
+
+    # 将审批报文转换为 FillRequest 列表
+    fill_requests = [
+        FillRequest(
+            entity_title=d["entity_title"],
+            fill_fields=d["fill_fields"],
+            action=d["action"],
+            source_evidence=d["reason"],
+            target_node_id=d["target_node_id"],
+        )
+        for d in approval_json["decisions"]
+    ]
+
+    print(f"\n  农民执行 apply_fill_request（{len(fill_requests)} 条）…")
+    filled = farmer.apply_fill_request(
+        fill_requests,
+        ref_dir=tmp_ref_dir,
+        kb_path=tmp_kb,
+        simulate_owner_response=True  # Enable simulation of farm owner approval
+    )
+    print(f"  → 共更新 {filled} 个节点\n")
+
+    # 展示骨架中被更新的节点
+    print(f"  {'─' * (W - 4)}")
+    print("  骨架叶子更新结果（supports_override 相关节点）:")
+    print(f"  {'─' * (W - 4)}")
+    updated_kb2 = json.loads(tmp_kb.read_text("utf-8"))
+    hits = 0
+    for item in updated_kb2:
+        m = item.get("metadata", {})
+        if "supports_override" not in m:
+            continue
+        nid = m.get("node_id", "")
+        val = m["supports_override"]
+        print(f"    ✓  {nid:<35}  supports_override = {val!r}")
+        hits += 1
+    if hits == 0:
+        print("    (无节点被更新，请检查 target_node_id 是否存在于骨架)")
 
     # 清理
     print(f"\n  隔离目录: {tmp_dir}")
