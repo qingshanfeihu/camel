@@ -1,9 +1,0 @@
-1. 参数[group_name]建议增加配置为global的case，预期结果应为配置成功。
-2. WebUI测试建议补充语言与主题两项检查。
-3. 根据spec章节5.1“支持segment，且Segment只支持基于group配置”，segment WebUI的global配置相关case（case118-case137）预期结果应为配置失败，建议删减整合，仅保留部分负面用例。
-4. 全局配置APV cookie加密已是既有能力，本次功能修改重点是基于group配置slb mode ircookie并支持AES加密密码，WebUI和function testing应以group与AES加密为主，全局仅保留基本可用性验证。
-5. 建议增加新功能对HTTP 1.0、HTTP 1.1、HTTP 2.0支持的基本功能case。
-6. 建议增加新功能对IPv4、IPv6以及IPv4/IPv6双栈支持的基本功能case。
-7. 建议增加多条基于group的slb mode ircookie与全局slb mode ircookie并存的case，验证相互之间功能不受影响。
-8. 建议优化涉及http turbo的集成case。
-9. CLI configure类case建议明确预期结果，例如加密密码以及基于group的slb mode ircookie配置可被恢复。
