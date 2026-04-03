@@ -1892,7 +1892,12 @@ def _apply_llm_metadata_extraction_batch(
         "- parent_section (string, no numbering)\n"
         "- scenario_id (string)\n"
         "- step_type (string)\n"
-        "- function_hierarchy (string, e.g. 'SLB > Health Check > HTTP')\n\n"
+        "- function_hierarchy (string, e.g. 'SLB > Health Check > HTTP')\n"
+        "- chunk_type (string: 'single_command' | 'command_list' | 'narrative'; "
+        "use 'command_list' for appendix/list pages documenting multiple commands, "
+        "'single_command' for pages documenting exactly one CLI command)\n"
+        "- override_commands (list of strings: bare command names that support "
+        "override/支持覆盖 as listed in the chunk; empty list [] otherwise)\n\n"
         f"Valid Intents: {valid_intents}\n"
         f"Valid Config Modes: {valid_config_modes}\n"
         f"Valid Modules: {', '.join(pm_descs[:20])}\n"
@@ -1988,6 +1993,10 @@ def _apply_llm_metadata_extraction_batch(
             meta_item["function_hierarchy"] = llm_meta["function_hierarchy"]
         if llm_meta.get("command_structure") and isinstance(llm_meta["command_structure"], dict):
             meta_item["command_structure"] = llm_meta["command_structure"]
+        if llm_meta.get("chunk_type"):
+            meta_item["chunk_type"] = str(llm_meta["chunk_type"])
+        if llm_meta.get("override_commands") and isinstance(llm_meta["override_commands"], list):
+            meta_item["override_commands"] = llm_meta["override_commands"]
 
 
 def _select_provider_for_thread() -> Tuple[str, str, str]:

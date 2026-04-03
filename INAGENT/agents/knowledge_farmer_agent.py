@@ -83,13 +83,57 @@ _SKELETON_META_FIELDS = frozenset({
 _SKIP_DIFF_FIELDS = frozenset({
     "clean_text", "section_title", "parent_section", "section_path",
     "block_id", "word_count", "has_code_block", "tree_node_id",
-    "command_refs", "source_file",
+    "command_refs", "source_file", "chunk_type", "override_commands",
 })
 
 _SKELETON_SECTION_RE = re.compile(
     r"^(\[命令\]|\[说明\]|语法:|参数:|适用范围:|相关操作:|内部函数:)",
     re.MULTILINE,
 )
+
+
+def _extract_labeled_section(text: str, label: str) -> str:
+    """Extract body under `label:` line in raw text until the next section label."""
+    pat = re.compile(r"^" + re.escape(label) + r"[ \t]*\n", re.MULTILINE)
+    m = pat.search(text)
+    if not m:
+        return ""
+    start = m.end()
+    nm = _SKELETON_SECTION_RE.search(text, start)
+    return text[start : (nm.start() if nm else len(text))].strip()
+
+
+def _write_skeleton_section_if_richer(pc: str, label: str, body: str) -> str:
+    """Replace section `label` in skeleton page_content if `body` is richer.
+
+    'Richer' = more non-whitespace characters. If the section doesn't exist,
+    append it. If existing content is already longer, leave it alone.
+    """
+    lp = re.compile(r"^" + re.escape(label) + r"[ \t]*$", re.MULTILINE)
+    m = lp.search(pc)
+    new_body = "  " + "\n  ".join(body.splitlines())
+    if not m:
+        return pc.rstrip() + f"\n{label}\n{new_body}"
+    after = pc[m.end():]
+    nm = _SKELETON_SECTION_RE.search(after)
+    existing = after[: nm.start()].strip() if nm else after.strip()
+    if len(existing.replace(" ", "")) >= len(body.replace(" ", "")):
+        return pc
+    end = m.end() + (nm.start() if nm else len(after))
+    return pc[: m.end()] + "\n" + new_body + "\n" + pc[end:]
+
+
+def _append_skeleton_section_entries(pc: str, label: str, entries: List[str]) -> str:
+    """Append entries to section `label` in page_content, creating if absent."""
+    formatted = "\n  ".join(str(e) for e in entries)
+    lp = re.compile(r"^" + re.escape(label) + r"[ \t]*$", re.MULTILINE)
+    m = lp.search(pc)
+    if not m:
+        return pc.rstrip() + f"\n{label}\n  {formatted}"
+    after = pc[m.end():]
+    nm = _SKELETON_SECTION_RE.search(after)
+    body_end = m.end() + (nm.start() if nm else len(after))
+    return pc[:body_end].rstrip() + f"\n  {formatted}\n" + pc[body_end:]
 
 
 def _normalize_heading_to_node_slug(text: str) -> str:
@@ -257,13 +301,15 @@ class KnowledgeFarmerAgent:
 
             if not meta.get("command_prefix") and ac_meta.get("command_prefix"):
                 meta["command_prefix"] = str(ac_meta["command_prefix"])
-                enriched.append("command_prefix")
+                if "command_prefix" not in enriched:
+                    enriched.append("command_prefix")
             elif meta.get("command_prefix") and ac_meta.get("command_prefix"):
                 mcp = str(meta["command_prefix"])
                 acp = str(ac_meta["command_prefix"])
                 if len(acp) > len(mcp) and acp.lower().startswith(mcp.lower()):
                     meta["command_prefix"] = acp
-                    enriched.append("command_prefix")
+                    if "command_prefix" not in enriched:
+                        enriched.append("command_prefix")
 
             # Tree node matching (ac_meta carries section_title / LLM tree hints)
             tree_node_id = self._match_tree_node(content, meta, ac_meta)
@@ -298,7 +344,8 @@ class KnowledgeFarmerAgent:
                     val = ac_meta.get(fname)
                     if val and val not in ("unknown", "") and not meta.get(fname):
                         meta[fname] = val
-                        enriched.append(fname)
+                        if fname not in enriched:
+                            enriched.append(fname)
 
                 cmd_prefix = (
                     ac_meta.get("command_prefix") or meta.get("command_prefix", "")
@@ -307,6 +354,7 @@ class KnowledgeFarmerAgent:
                     gaps.append(SchemaGapEntry(
                         gap_type="overflow",
                         entity_title=str(cmd_prefix),
+                        field_name="unmatched_chunk",
                         entity_description=str(ac_meta.get("description", "")),
                         evidence=content[:200],
                         source_file=cd.source_file,
@@ -318,12 +366,14 @@ class KnowledgeFarmerAgent:
                     ))
 
             # Schema gap detection (supports_override etc.)
-            gaps.extend(self._detect_schema_gaps(content, meta))
+            gaps.extend(self._detect_schema_gaps(content, meta, ac_meta))
 
             # Step 3: function-index fields
             step3 = self._step3_index(meta)
             meta.update(step3)
-            enriched.extend(step3.keys())
+            for k in step3:
+                if k not in enriched:
+                    enriched.append(k)
 
             chunk["metadata"] = meta
             results.append(FarmResult(
@@ -612,6 +662,8 @@ class KnowledgeFarmerAgent:
         if cp and cp in index:
             return index[cp]
 
+        if ac_meta.get("chunk_type") and ac_meta["chunk_type"] != "single_command":
+            return None
         for cand in _extract_cli_prefix_strings(content):
             nid = _longest_prefix_match_node_id(index, cand.lower())
             if nid:
@@ -632,15 +684,25 @@ class KnowledgeFarmerAgent:
         return refs
 
     def _detect_schema_gaps(
-        self, content: str, meta: Dict
+        self, content: str, meta: Dict, ac_meta: Optional[Dict] = None
     ) -> List[SchemaGapEntry]:
         gaps: List[SchemaGapEntry] = []
+        ac_meta = ac_meta or {}
         match = _SCHEMA_GAP_OVERRIDE_RE.search(content)
-        entity_title = meta.get("tree_node_id") or meta.get("command_prefix") or ""
-        if match and entity_title:
-            start = max(0, match.start() - 40)
-            end = min(len(content), match.end() + 40)
-            evidence = content[start:end]
+        if not match:
+            return gaps
+        override_cmds: List[str] = ac_meta.get("override_commands") or []
+        entities = (
+            [c.strip() for c in override_cmds if c.strip()]
+            if override_cmds
+            else [meta.get("tree_node_id") or meta.get("command_prefix") or ""]
+        )
+        start = max(0, match.start() - 40)
+        end = min(len(content), match.end() + 40)
+        evidence = content[start:end]
+        for entity_title in entities:
+            if not entity_title:
+                continue
             gaps.append(SchemaGapEntry(
                 gap_type="new_entity_attribute",
                 entity_title=entity_title,
@@ -731,7 +793,7 @@ class KnowledgeFarmerAgent:
             needs_llm: list = []
             for i, meta in enumerate(results):
                 filled = sum(1 for f in _KEY_FIELDS if meta.get(f))
-                if filled < 3:
+                if filled < 3 or not meta.get("chunk_type"):
                     text = (chunks[i].get("page_content") or "")
                     needs_llm.append((text, meta))
             if needs_llm:
@@ -880,9 +942,13 @@ class KnowledgeFarmerAgent:
             return 0
 
         by_node: Dict[str, Dict] = {}
+        by_node_content: Dict[str, str] = {}
         for r in matched:
             meta = r.chunk.get("metadata", {})
             by_node[r.matched_node_id] = meta
+            by_node_content[r.matched_node_id] = (
+                r.chunk.get("page_content") or r.chunk.get("text") or ""
+            )
 
         updated = 0
         for item in data:
@@ -915,6 +981,36 @@ class KnowledgeFarmerAgent:
                         )
                     else:
                         item["page_content"] = f"{pc}\n[说明] {desc}"
+                    changed = True
+
+            # P2: fill empty 参数: / 语法: from chunk content
+            chunk_pc = by_node_content.get(nid, "")
+            if chunk_pc:
+                sk_secs = self._parse_skeleton_sections(item.get("page_content", ""))
+                chunk_params = _extract_labeled_section(chunk_pc, "参数:")
+                if chunk_params:
+                    item["page_content"] = _write_skeleton_section_if_richer(
+                        item["page_content"], "参数:", chunk_params
+                    )
+                    changed = True
+                if not sk_secs.get("语法:", "").strip():
+                    first_line = chunk_pc.strip().split("\n")[0].strip()
+                    if first_line and first_line[0].isascii() and first_line[0].isalpha():
+                        item["page_content"] = _write_skeleton_section_if_richer(
+                            item["page_content"], "语法:", first_line
+                        )
+                        changed = True
+
+            # P3: append command_refs to 相关操作:
+            command_refs = node_meta.get("command_refs") or []
+            if command_refs and isinstance(command_refs, list):
+                sk_secs_ref = self._parse_skeleton_sections(item.get("page_content", ""))
+                existing_refs = sk_secs_ref.get("相关操作:", "")
+                new_refs = [r for r in command_refs if r not in existing_refs]
+                if new_refs:
+                    item["page_content"] = _append_skeleton_section_entries(
+                        item["page_content"], "相关操作:", new_refs
+                    )
                     changed = True
 
             if changed:
