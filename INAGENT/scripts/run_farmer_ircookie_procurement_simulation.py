@@ -25,6 +25,7 @@ from INAGENT.agents.knowledge_farmer_agent import KnowledgeFarmerAgent  # noqa: 
 from INAGENT.agents.knowledge_procurement_agent import (  # noqa: E402
     ChunkDecision,
     ProcurementDecision,
+    enrich_chunk_decision_for_farmer,
 )
 from INAGENT.data_tools.auto_convert import _extract_text_from_block  # noqa: E402
 from INAGENT.utils.env_utils import load_inagent_env  # noqa: E402
@@ -117,7 +118,10 @@ def main() -> int:
         logger.error("MinerU JSON not found: %s", args.mineru_json)
         return 1
 
-    decisions = build_accept_decisions(args.mineru_json)
+    decisions = [
+        enrich_chunk_decision_for_farmer(d)
+        for d in build_accept_decisions(args.mineru_json)
+    ]
     logger.info("采购员模拟: %d 个 accept（ircookie 相关块）", len(decisions))
 
     farmer = KnowledgeFarmerAgent(model=None)

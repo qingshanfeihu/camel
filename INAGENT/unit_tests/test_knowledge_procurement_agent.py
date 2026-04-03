@@ -34,6 +34,7 @@ from INAGENT.agents.knowledge_procurement_agent import (
     ProcurementDecision,
     build_procurement_agent,
     build_procurement_prompt,
+    enrich_chunk_decision_for_farmer,
 )
 from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
 
@@ -382,6 +383,56 @@ class TestFilterAccepted:
         decisions = agent.evaluate_batch([chunk])
         accepted = agent.filter_accepted(decisions)
         assert accepted[0]["metadata"]["document_category"] == "architecture/design"
+        assert accepted[0]["metadata"]["suggested_value"] == "architecture/design"
+
+
+# ── enrich_decisions_for_farmer / enrich_chunk_decision_for_farmer ────────────
+
+class TestEnrichForFarmer:
+    def test_aligns_source_file_on_metadata(self):
+        chunk = _make_chunk(
+            "NSAE 采用三层架构：前端接入层、核心处理层、后端管理层。",
+            source_file="wrong_stem.pdf",
+        )
+        cd = ChunkDecision(
+            chunk=chunk,
+            decision=ProcurementDecision(
+                action="accept",
+                target_kb="product",
+                confidence=0.9,
+                reason="ok",
+                suggested_value="spec/design",
+            ),
+            source_file="cli.pdf",
+            chunk_index=3,
+        )
+        out = enrich_chunk_decision_for_farmer(cd)
+        assert out.chunk["metadata"]["source_file"] == "cli.pdf"
+
+    def test_reject_unchanged(self):
+        chunk = _make_chunk("x" * 60)
+        cd = ChunkDecision(
+            chunk=chunk,
+            decision=ProcurementDecision(
+                action="reject",
+                target_kb="unknown",
+                confidence=1.0,
+                reason="no",
+                suggested_value="spec/design",
+            ),
+            source_file="cli.pdf",
+            chunk_index=0,
+        )
+        out = enrich_chunk_decision_for_farmer(cd)
+        assert out is cd
+
+    def test_enrich_decisions_for_farmer_on_agent(self, agent_with_mock_llm):
+        chunk = _make_chunk(
+            "slb virtual http 配置说明：此命令用于创建 HTTP 类型虚拟服务，需要指定 VIP 和端口。"
+        )
+        decisions = agent_with_mock_llm.evaluate_batch([chunk])
+        enriched = agent_with_mock_llm.enrich_decisions_for_farmer(decisions)
+        assert enriched[0].chunk["metadata"].get("suggested_value") == "spec/design"
 
 
 # ── build 辅助函数 ─────────────────────────────────────────────────────────────

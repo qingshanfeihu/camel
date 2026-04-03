@@ -136,7 +136,11 @@ def extract_ircookie_chunks():
 # ── 3. 农民填肉 ──────────────────────────────────────────────────────────────
 
 def run_farmer(chunks, model):
-    from INAGENT.agents.knowledge_procurement_agent import ChunkDecision, ProcurementDecision
+    from INAGENT.agents.knowledge_procurement_agent import (
+        ChunkDecision,
+        ProcurementDecision,
+        enrich_chunk_decision_for_farmer,
+    )
     from INAGENT.agents.knowledge_farmer_agent import KnowledgeFarmerAgent
 
     decisions = []
@@ -156,6 +160,7 @@ def run_farmer(chunks, model):
     farmer = KnowledgeFarmerAgent(model=model)
 
     logger.info("=== 农民开始填肉: %d chunks ===", len(decisions))
+    decisions = [enrich_chunk_decision_for_farmer(d) for d in decisions]
     results = farmer.cultivate_batch(decisions)
     logger.info("农民富化完成: %d results", len(results))
 

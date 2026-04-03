@@ -26,6 +26,7 @@ alwaysApply: true
 
 - 向 **农民** 输送已准入 chunk；**不**直接写 GraphRAG parquet。
 - `staging` 仅产出 **gap 线索**（如 `schema_gaps.jsonl`）；与 `knowledge_schema`、**农场主** 消费格式保持一致；结构裁决交给农场主会话。
+- 交给农民前：`enrich_chunk_decision_for_farmer` / `filter_accepted` 同步 `source_file`、`suggested_value`、`document_category`；勿截断正文；accept-only 批次。
 
 ## 依赖
 

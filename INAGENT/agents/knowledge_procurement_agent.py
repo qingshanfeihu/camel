@@ -31,6 +31,14 @@
 职责或契约变更时，请同步更新：
   INAGENT/docs/agents/sessions/03-procurement.md
   与 .cursor/rules/kb-session-procurement.mdc
+
+交给农民（KnowledgeFarmerAgent.cultivate_batch）前须满足：
+  - 勿截断 page_content / text（含 MinerU 表格）；勿清除 auto_convert 已写入的元数据字段。
+  - metadata.source_file 与 ChunkDecision.source_file 一致（reference/{stem}.json、block_id 依赖 stem）。
+  - 对 accept：将 LLM suggested_category（ProcurementDecision.suggested_value）写入 metadata：
+      suggested_value 始终写入（非空时）；若在 DOCUMENT_CATEGORIES 内则同时写入 document_category。
+  - cultivate_batch 只应传入 action==accept 的决策子集，或先用 enrich_decisions_for_farmer 再交给农民；
+      chunk_index 须稳定，勿与 pending/staging 混在同一批除非有意跳过。
 """
 from __future__ import annotations
 
@@ -78,6 +86,33 @@ class ChunkDecision:
     decision: ProcurementDecision
     source_file: str = ""
     chunk_index: int = 0
+
+
+def enrich_chunk_decision_for_farmer(cd: ChunkDecision) -> ChunkDecision:
+    """Sync procurement outputs onto chunk metadata before cultivate_batch.
+
+    Farmers read metadata.suggested_value when document_category is empty
+    (_step1_rules). They expect source_file aligned with ChunkDecision.source_file.
+    Does not drop keys from chunk or metadata; shallow-copies chunk and metadata.
+    """
+    if cd.decision.action != "accept":
+        return cd
+    chunk = {**cd.chunk}
+    meta = {**chunk.get("metadata", {})}
+    sug = (cd.decision.suggested_value or "").strip()
+    if sug:
+        meta["suggested_value"] = sug
+        if sug in DOCUMENT_CATEGORIES:
+            meta["document_category"] = sug
+    if cd.source_file and cd.source_file != "unknown":
+        meta["source_file"] = cd.source_file
+    chunk["metadata"] = meta
+    return ChunkDecision(
+        chunk=chunk,
+        decision=cd.decision,
+        source_file=cd.source_file,
+        chunk_index=cd.chunk_index,
+    )
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -141,6 +176,12 @@ def _build_system_prompt(
   - 修订历史表（仅有版本号和日期）
   - 空白页、图表列表、纯缩略词/术语表（无解释）
   - 占位模板内容（如 "XXX子功能"、"YYY子功能"）
+
+【粒度（与下游 CLI 树匹配相关）】
+  - 一大张附录表、同一块内多条独立命令时，最长前缀匹配易绑错叶子。
+  - 若上游能把此类内容拆成多块或按命令行分块（chunk_type 与内容一致，如 single_command），
+    优先标 accept；若无法拆分且风险高，可用 pending_review 并说明「建议拆块」。
+  - 不要编造或删除正文；表格（MinerU 转写）须随原文完整保留在评估依据中。
 
 【注意】：标题看似"附录"或"说明"，但内容含具体命令语法、配置参数或行为描述 → 应接受。
 {modules_section}
@@ -221,7 +262,9 @@ class KnowledgeProcurementAgent:
         agent = KnowledgeProcurementAgent(model=model)
         decisions = agent.evaluate_batch(chunks)
         agent.write_logs(decisions)
-        accepted = agent.filter_accepted(decisions)
+        decisions = agent.enrich_decisions_for_farmer(decisions)
+        # 农民：cultivate_batch([d for d in decisions if d.decision.action == "accept"])
+        # 若只要已同步 metadata 的裸 chunk 列表：filter_accepted(decisions)
     """
 
     def __init__(
@@ -288,17 +331,22 @@ class KnowledgeProcurementAgent:
         decisions.sort(key=lambda d: d.chunk_index)
         return decisions
 
+    def enrich_decisions_for_farmer(self, decisions: List[ChunkDecision]) -> List[ChunkDecision]:
+        """Return decisions with accept chunks' metadata synced for cultivate_batch.
+
+        Call this (or filter_accepted) before passing accepts to the farmer so
+        suggested_category → metadata.suggested_value / document_category and
+        source_file stay aligned with ChunkDecision.
+        """
+        return [enrich_chunk_decision_for_farmer(cd) for cd in decisions]
+
     def filter_accepted(self, decisions: List[ChunkDecision]) -> List[Dict]:
-        """Return accepted chunks with corrected metadata applied."""
-        result = []
-        for cd in decisions:
-            if cd.decision.action != "accept":
-                continue
-            chunk = {**cd.chunk}
-            if cd.decision.suggested_value and cd.decision.suggested_value in DOCUMENT_CATEGORIES:
-                chunk.setdefault("metadata", {})["document_category"] = cd.decision.suggested_value
-            result.append(chunk)
-        return result
+        """Return accepted chunks with farmer-handoff metadata applied."""
+        return [
+            enrich_chunk_decision_for_farmer(cd).chunk
+            for cd in decisions
+            if cd.decision.action == "accept"
+        ]
 
     def write_logs(
         self,

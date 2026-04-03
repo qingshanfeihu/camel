@@ -23,6 +23,7 @@ from INAGENT.agents.knowledge_farmer_agent import KnowledgeFarmerAgent
 from INAGENT.agents.knowledge_procurement_agent import (
     ChunkDecision,
     ProcurementDecision,
+    enrich_chunk_decision_for_farmer,
 )
 from INAGENT.rag.knowledge_schema import FillRequest
 
@@ -311,7 +312,7 @@ def main() -> None:
     print("═" * W)
     print("  Stage 1: 采购员 → 6 条 ircookie ChunkDecision")
     print("═" * W)
-    decisions = _make_decisions()
+    decisions = [enrich_chunk_decision_for_farmer(d) for d in _make_decisions()]
     for i, (label, page, _) in enumerate(_CHUNKS):
         print(f"  [{i}] page={page:<4} {label}")
     print()

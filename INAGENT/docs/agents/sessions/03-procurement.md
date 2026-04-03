@@ -20,6 +20,14 @@
 - 向 **农民** 输送已准入 chunk；`staging` 与 `schema_gaps` 线索需与 `knowledge_schema` 及 **农场主** 消费格式一致
 - 不直接写入 GraphRAG parquet；结构类问题交给 **农场主**
 
+### 与农民交接（`cultivate_batch` 前）
+
+- **正文**：保持 `page_content` / `text` 完整（含 MinerU 表格转写）；入库前勿清空 auto_convert 已写入的元数据（如 `command_prefix`、`chunk_type`、`tree_node_id` 等）。
+- **来源**：`metadata.source_file` 与 `ChunkDecision.source_file` 一致（`reference/{stem}.json`、`block_id` 依赖 stem）。
+- **分类**：LLM `suggested_category` → `ProcurementDecision.suggested_value`；调用农民前对 accept 执行 `enrich_chunk_decision_for_farmer` 或 `filter_accepted`，将非空的 `suggested_value` 写入 `metadata.suggested_value`，若在 `DOCUMENT_CATEGORIES` 内则同时写入 `metadata.document_category`（农民 `_step1_rules` 在缺省时读 `suggested_value`）。
+- **批次**：仅将 `action=="accept"` 传入 `cultivate_batch`，或整批先 `enrich_decisions_for_farmer` 再过滤；`chunk_index` 须稳定以利去重。
+- **粒度**：附录大表/多命令同块易误匹配；提示词侧鼓励拆块、`pending_review` 或上游 `chunk_type` 与内容一致；纯目录/版权等用 `reject`。
+
 ## 依赖文档
 
 - `INAGENT/rag/knowledge_config.py` — `DOCUMENT_CATEGORIES`、已知模块列表逻辑
