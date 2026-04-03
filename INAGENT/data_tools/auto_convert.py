@@ -17,7 +17,7 @@ except ImportError:
     json_repair = None
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import sys
 
@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from camel.loaders.local_mineru_reader import LocalMinerUReader
 from camel.logger import set_log_file, set_log_level
 
+from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
@@ -47,6 +48,19 @@ logger = logging.getLogger("auto_convert")
 # Bump this when auto_convert logic changes in a way that should invalidate cache
 # (e.g., text extraction, metadata extraction, block selection).
 AUTO_CONVERT_SCHEMA_VERSION = "2026-01-26.1"
+
+
+def _match_protocols_word_boundary(
+    protocol_map: Dict[str, list], text: str
+) -> List[str]:
+    lower_text = text.lower()
+    found: List[str] = []
+    for proto, keywords in protocol_map.items():
+        for k in keywords:
+            if re.search(rf"\b{re.escape(k.lower())}\b", lower_text):
+                found.append(proto)
+                break
+    return found
 
 
 def _remove_section_number(title: str) -> str:
@@ -100,8 +114,16 @@ def _infer_section_level_from_heading(title: str) -> Optional[int]:
 
 
 # vLLM probing timeouts
-VLLM_MODELS_TIMEOUT = float(os.getenv("VLLM_MODELS_TIMEOUT", "8"))
-VLLM_INFER_TIMEOUT = float(os.getenv("VLLM_INFER_TIMEOUT", "30"))
+VLLM_MODELS_TIMEOUT = cfg_float(
+    "auto_convert.vllm.models_timeout_seconds",
+    8.0,
+    env="VLLM_MODELS_TIMEOUT",
+)
+VLLM_INFER_TIMEOUT = cfg_float(
+    "auto_convert.vllm.infer_timeout_seconds",
+    30.0,
+    env="VLLM_INFER_TIMEOUT",
+)
 
 
 def _normalize_openai_base_url(url: str) -> str:
@@ -122,7 +144,11 @@ def _normalize_openai_base_url(url: str) -> str:
 
 def _load_project_config() -> Dict:
     load_inagent_env()
-    config_path = os.getenv("MINERU_TOOLS_CONFIG_JSON")
+    config_path = cfg_str(
+        "auto_convert.mineru_tools_config_json",
+        "",
+        env="MINERU_TOOLS_CONFIG_JSON",
+    )
     candidate_paths = []
 
     if config_path:
@@ -327,8 +353,8 @@ MINERU_BACKUP_DIR = DOC_LOCAL_DIR / "mineru_backup"
 # Docs: https://opendatalab.github.io/MinerU/zh/quick_start/docker_deployment/
 USE_DOCKER_VLLM = True
 DOCKER_VLLM_URL = (
-    os.getenv("MINERU_VLLM_URL")
-    or os.getenv("VLLM_URL")
+    cfg_str("auto_convert.vllm.url", "", env="MINERU_VLLM_URL")
+    or cfg_str("auto_convert.vllm.url", "", env="VLLM_URL")
     or "http://127.0.0.1:8000"
 )
 
@@ -339,7 +365,11 @@ _QIANFAN_AVAILABLE: Optional[bool] = None
 
 # Force all OpenAI-compatible LLM calls to use LLM Gateway runtime settings.
 # 已弃用其他提供商（百度千帆、腾讯混元），统一使用 LLM Gateway。
-FORCE_SILICONFLOW = os.getenv("AUTO_CONVERT_FORCE_SILICONFLOW", "1").strip().lower() not in {
+FORCE_SILICONFLOW = cfg_str(
+    "auto_convert.force_siliconflow",
+    "1",
+    env="AUTO_CONVERT_FORCE_SILICONFLOW",
+).strip().lower() not in {
     "0",
     "false",
     "no",
@@ -360,8 +390,8 @@ _provider_selector_counter = 0
 # 已统一使用 LLM Gateway，弃用其他提供商。
 # 模型优先从环境变量 LLM_GATEWAY_CHAT_MODEL 读取，未配置时使用默认模型。
 SILICONFLOW_MODEL = (
-    os.getenv("LLM_GATEWAY_CHAT_MODEL", "").strip()
-    or os.getenv("SILICONFLOW_CHAT_MODEL", "mineru-vlm")
+    cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL").strip()
+    or cfg_str("llm.siliconflow.chat_model", "mineru-vlm", env="SILICONFLOW_CHAT_MODEL")
 )
 
 # 向后兼容：QIANFAN_MODEL 现在返回硅基流动模型
@@ -373,12 +403,25 @@ SILICONFLOW_ALLOWED_CHAT_MODELS: set[str] = set()
 
 # 简单的 cache：logs 下存在同名 cache.json 就视为已转换
 
-NET_RETRY_ATTEMPTS = int(os.getenv("AUTO_CONVERT_NET_RETRIES", "3"))
-NET_RETRY_DELAY = float(os.getenv("AUTO_CONVERT_NET_RETRY_DELAY", "5"))
-NET_TIMEOUT = float(os.getenv("AUTO_CONVERT_NET_TIMEOUT", "8"))
-HUGGINGFACE_API_CHECK = os.getenv(
-    "AUTO_CONVERT_HF_CHECK",
+NET_RETRY_ATTEMPTS = cfg_int(
+    "auto_convert.network.retry_attempts",
+    3,
+    env="AUTO_CONVERT_NET_RETRIES",
+)
+NET_RETRY_DELAY = cfg_float(
+    "auto_convert.network.retry_delay_seconds",
+    5.0,
+    env="AUTO_CONVERT_NET_RETRY_DELAY",
+)
+NET_TIMEOUT = cfg_float(
+    "auto_convert.network.timeout_seconds",
+    8.0,
+    env="AUTO_CONVERT_NET_TIMEOUT",
+)
+HUGGINGFACE_API_CHECK = cfg_str(
+    "auto_convert.network.hf_check_url",
     "https://huggingface.co/api/models/opendatalab/PDF-Extract-Kit-1.0",
+    env="AUTO_CONVERT_HF_CHECK",
 )
 
 def get_baidu_access_token() -> str:
@@ -396,11 +439,15 @@ def get_baidu_access_token() -> str:
         config = get_qianfan_config()
         api_key = config.get("api_key", "")
         # 如果配置中有 secret_key，需要单独获取
-        secret_key = os.getenv("BAIDU_SECRET_KEY", "")
+        secret_key = cfg_str("llm.baidu.secret_key", "", env="BAIDU_SECRET_KEY")
     except Exception as e:
         logger.warning("从统一配置获取 API Key 失败，回退到环境变量: %s", e)
-        api_key = os.getenv("QIANFAN_API_KEY", "") or os.getenv("BAIDU_API_KEY", "")
-        secret_key = os.getenv("BAIDU_SECRET_KEY", "")
+        api_key = cfg_str("llm.baidu.qianfan_api_key", "", env="QIANFAN_API_KEY") or cfg_str(
+            "llm.baidu.api_key",
+            "",
+            env="BAIDU_API_KEY",
+        )
+        secret_key = cfg_str("llm.baidu.secret_key", "", env="BAIDU_SECRET_KEY")
 
     if not api_key:
         logger.warning(
@@ -513,7 +560,7 @@ def _get_qianfan_runtime() -> Dict[str, object]:
     获取主 LLM 运行时设置（已统一使用硅基流动）
     
     向后兼容函数，实际返回硅基流动配置。
-    限速标准（根据硅基流动官方文档）：对话模型 RPM 1000, TPM 50000
+    限速标准：Gateway → DashScope qwen-plus (RPM 10000, TPM 2000000)
     """
     # 统一使用硅基流动
     return _get_siliconflow_runtime()
@@ -523,7 +570,7 @@ def _siliconflow_temperature() -> float:
     
     硅基流动支持温度范围 [0, 2.0]，默认使用 0.7。
     """
-    raw = os.getenv("SILICONFLOW_TEMPERATURE", "0.7")
+    raw = cfg_str("llm.siliconflow.temperature", "0.7", env="SILICONFLOW_TEMPERATURE")
     try:
         value = float(raw)
     except Exception:
@@ -592,9 +639,10 @@ def _get_siliconflow_runtime() -> Dict[str, object]:
             "base_url": base_url,
             "model": SILICONFLOW_MODEL,  # 默认 Qwen/Qwen3-8B
             "timeout": config.get("timeout", 60),
-            # 根据硅基流动官方标准：对话模型 RPM 1000, TPM 50000
-            "rpm": 1000,
-            "tpm": 50000,
+            # 客户端限速：Gateway 路由到 DashScope qwen-plus (官方 RPM=30000, TPM=5000000)
+            # 保守取一半，避免突发流量触发阿里侧保护
+            "rpm": 10000,
+            "tpm": 2000000,
         }
     except Exception as e:
         logger.warning("从统一配置获取运行时设置失败: %s", e)
@@ -627,8 +675,8 @@ def _siliconflow_rate_limiter() -> _SlidingWindowRateLimiter:
 def _get_rate_limiter(base_url: str) -> Optional[_SlidingWindowRateLimiter]:
     """返回硅基流动限速器（已统一使用硅基流动）
     
-    限速标准（根据硅基流动官方文档）：
-    - 对话模型：RPM 1000, TPM 50000
+    限速标准（Gateway → DashScope 路由）：
+    - 对话模型：RPM 10000, TPM 2000000
     """
     # 统一使用硅基流动限速器
     return _siliconflow_rate_limiter()
@@ -963,31 +1011,64 @@ def _probe_qianfan_chat(
         timeout=timeout,
     )
 
-def _iter_pdf_files() -> List[Path]:
-    pdfs: List[Path] = []
-    for path in DOC_LOCAL_DIR.rglob("*.pdf"):
-        # 跳过 reference 自己
-        if REFERENCE_DIR in path.parents:
+
+def _is_under_doc_local(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(DOC_LOCAL_DIR.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _output_stem_for_file(file_path: Path) -> str:
+    """为输出 JSON 生成稳定 stem；外部文件附加路径哈希避免同名冲突。"""
+    if _is_under_doc_local(file_path):
+        return file_path.stem
+    path_hash = hashlib.md5(str(file_path.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"{file_path.stem}_{path_hash}"
+
+
+def _source_file_label(file_path: Path) -> str:
+    """标准化 source_file 标识，外部文件保留可追溯标签。"""
+    if _is_under_doc_local(file_path):
+        return file_path.name
+    path_hash = hashlib.md5(str(file_path.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"{file_path.name} [external:{path_hash}]"
+
+
+def _collect_extra_input_paths() -> List[Path]:
+    """收集额外知识输入路径（文件或目录），支持逗号/分号分隔。"""
+    raw = cfg_str(
+        "auto_convert.input.extra_paths",
+        "",
+        env="AUTO_CONVERT_EXTRA_PATHS",
+    ).strip()
+    if not raw:
+        return []
+    tokens = [p.strip() for p in re.split(r"[,\n;]+", raw) if p.strip()]
+    paths: List[Path] = []
+    for token in tokens:
+        p = Path(token)
+        if not p.exists():
+            logger.warning("[input-extra] 路径不存在，忽略: %s", token)
             continue
-        # 跳过 MinerU 输出目录与衍生 PDF
-        if (DOC_LOCAL_DIR / "mineru_output") in path.parents:
-            continue
-        if path.name.endswith("_layout.pdf"):
-            continue
-        pdfs.append(path)
-    return pdfs
+        paths.append(p)
+    return paths
 
 
-# ============================================================
-# Office 文档（docx/xlsx/doc/xls）处理
-# ============================================================
-OFFICE_EXTENSIONS = {".docx", ".doc", ".xlsx", ".xls"}
-
-
-def _iter_office_files() -> List[Path]:
-    """遍历 knowledge_base 目录下的 Office 文档"""
+def _iter_files_by_ext(exts: Set[str]) -> List[Path]:
+    """遍历 knowledge_base + 额外路径中的指定后缀文件。"""
     files: List[Path] = []
-    for ext in OFFICE_EXTENSIONS:
+    seen: Set[str] = set()
+
+    def _maybe_add(path: Path) -> None:
+        key = str(path.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        files.append(path)
+
+    for ext in exts:
         for path in DOC_LOCAL_DIR.rglob(f"*{ext}"):
             if REFERENCE_DIR in path.parents:
                 continue
@@ -995,8 +1076,43 @@ def _iter_office_files() -> List[Path]:
                 continue
             if (DOC_LOCAL_DIR / "mineru_backup") in path.parents:
                 continue
-            files.append(path)
+            if (DOC_LOCAL_DIR / "logs") in path.parents:
+                continue
+            if ext == ".pdf" and path.name.endswith("_layout.pdf"):
+                continue
+            _maybe_add(path)
+
+    for base in _collect_extra_input_paths():
+        if base.is_file():
+            if base.suffix.lower() in exts:
+                _maybe_add(base)
+            continue
+        for ext in exts:
+            for path in base.rglob(f"*{ext}"):
+                if ext == ".pdf" and path.name.endswith("_layout.pdf"):
+                    continue
+                _maybe_add(path)
     return files
+
+def _iter_pdf_files() -> List[Path]:
+    return _iter_files_by_ext({".pdf"})
+
+
+# ============================================================
+# Office 文档（docx/xlsx/doc/xls）处理
+# ============================================================
+OFFICE_EXTENSIONS = {".docx", ".doc", ".xlsx", ".xls"}
+TEXT_EXTENSIONS = {".txt"}
+
+
+def _iter_office_files() -> List[Path]:
+    """遍历 knowledge_base 目录下的 Office 文档"""
+    return _iter_files_by_ext(OFFICE_EXTENSIONS)
+
+
+def _iter_text_files() -> List[Path]:
+    """遍历 knowledge_base 目录下的 TXT 文档"""
+    return _iter_files_by_ext(TEXT_EXTENSIONS)
 
 
 def _compute_file_fingerprint(file_path: Path) -> str:
@@ -1038,7 +1154,8 @@ def convert_office_file(file_path: Path) -> None:
     from INAGENT.data_tools.spec_parser import parse_spec_document
     from INAGENT.data_tools.testlist_parser import parse_test_list
 
-    stem = file_path.stem
+    stem = _output_stem_for_file(file_path)
+    source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
     cache_path = LOG_DIR / f"{stem}.cache.json"
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1107,6 +1224,7 @@ def convert_office_file(file_path: Path) -> None:
 
     for block in knowledge_blocks:
         meta = block.get("metadata", {})
+        meta["source_file"] = source_label
         content = str(block.get("page_content") or "")
         lower_text = content.lower()
 
@@ -1119,10 +1237,7 @@ def convert_office_file(file_path: Path) -> None:
 
         # protocol_type
         if not meta.get("protocol_type"):
-            found_protocols = []
-            for proto, keywords in protocol_map.items():
-                if any(k.lower() in lower_text for k in keywords):
-                    found_protocols.append(proto)
+            found_protocols = _match_protocols_word_boundary(protocol_map, content)
             if found_protocols:
                 meta["protocol_type"] = found_protocols
 
@@ -1158,8 +1273,352 @@ def convert_office_file(file_path: Path) -> None:
     )
 
 
+# ============================================================
+# TXT 文档处理
+# ============================================================
+# Bug fix detail 字段提取模式
+_BUG_FIX_FIELD_RE = re.compile(
+    r"^(Description|Root Cause|Condition of Occurrence|Fixed Details"
+    r"|Testing Suggestions|Affected Release|Extra Impact)\s*:",
+    re.MULTILINE,
+)
+
+
+def _parse_bug_fix_text(text: str, source_file: str) -> List[Dict[str, Any]]:
+    """将 bug fix detail 文本拆分为结构化知识块。"""
+    blocks: List[Dict[str, Any]] = []
+
+    # 提取 Bug ID
+    bug_match = re.search(r"Bug\s+(\d+)", text, re.IGNORECASE)
+    bug_id = bug_match.group(1) if bug_match else ""
+
+    # 提取关键字段
+    fields: Dict[str, str] = {}
+    positions = list(_BUG_FIX_FIELD_RE.finditer(text))
+    for i, m in enumerate(positions):
+        key = m.group(1)
+        start = m.end()
+        end = positions[i + 1].start() if i + 1 < len(positions) else len(text)
+        value = text[start:end].strip().strip(":")
+        # 截断到下一个 Comment 行（SVN commit 部分不属于该字段）
+        comment_cut = re.search(r"\nComment\s+\d+", value)
+        if comment_cut:
+            value = value[: comment_cut.start()].strip()
+        fields[key] = value
+
+    # 提取 SVN commit 信息
+    svn_commits: List[str] = []
+    for m in re.finditer(r"New Revision:\s*(\d+)", text):
+        rev = m.group(1)
+        # 向后找到 Modified 行获取受影响文件
+        mod_match = re.search(
+            r"Modified:\s*\n\s*(.+?)(?:\nLog:|\n\n)", text[m.start() :]
+        )
+        file_changed = mod_match.group(1).strip() if mod_match else ""
+        svn_commits.append(f"r{rev}: {file_changed}")
+
+    base_meta = {
+        "source_file": source_file,
+        "document_category": "review/bug_fix",
+        "bug_id": bug_id,
+    }
+
+    # Block 1: 概要
+    first_line = text.split("\n")[0].strip()
+    blocks.append(
+        {
+            "page_content": f"Bug {bug_id} 概述: {first_line}",
+            "metadata": {
+                **base_meta,
+                "block_type": "bug_summary",
+                "block_id": f"bug_{bug_id}_summary",
+                "section_title": "Bug 概述",
+            },
+        }
+    )
+
+    # Block 2: 详情（Description + Root Cause + Condition + Fix）
+    detail_parts = []
+    for key in [
+        "Description",
+        "Root Cause",
+        "Condition of Occurrence",
+        "Fixed Details",
+    ]:
+        if key in fields:
+            detail_parts.append(f"{key}: {fields[key]}")
+    if detail_parts:
+        blocks.append(
+            {
+                "page_content": "\n".join(detail_parts),
+                "metadata": {
+                    **base_meta,
+                    "block_type": "bug_detail",
+                    "block_id": f"bug_{bug_id}_detail",
+                    "section_title": "Bug 详情与修复",
+                },
+            }
+        )
+
+    # Block 3: 代码修改记录
+    if svn_commits:
+        affected = fields.get("Affected Release", "")
+        commit_text = "代码修改记录:\n" + "\n".join(svn_commits)
+        if affected:
+            commit_text += f"\nAffected Release: {affected}"
+        blocks.append(
+            {
+                "page_content": commit_text,
+                "metadata": {
+                    **base_meta,
+                    "block_type": "code_change",
+                    "block_id": f"bug_{bug_id}_code",
+                    "section_title": "代码修改记录",
+                },
+            }
+        )
+
+    # Block 4: 测试建议
+    if "Testing Suggestions" in fields:
+        blocks.append(
+            {
+                "page_content": f"Testing Suggestions: {fields['Testing Suggestions']}",
+                "metadata": {
+                    **base_meta,
+                    "block_type": "test_suggestion",
+                    "block_id": f"bug_{bug_id}_test",
+                    "section_title": "测试建议",
+                },
+            }
+        )
+
+    return blocks
+
+
+def _parse_generic_text(text: str, source_file: str, category: str) -> List[Dict[str, Any]]:
+    """将通用 TXT 文件按段落拆分为知识块。"""
+    blocks: List[Dict[str, Any]] = []
+    paragraphs = re.split(r"\n{2,}", text.strip())
+    for i, para in enumerate(paragraphs):
+        para = para.strip()
+        if not para or len(para) < 10:
+            continue
+        blocks.append(
+            {
+                "page_content": para,
+                "metadata": {
+                    "source_file": source_file,
+                    "document_category": category,
+                    "block_type": "text_paragraph",
+                    "block_id": f"para_{i + 1}",
+                },
+            }
+        )
+    return blocks
+
+
+def convert_text_file(file_path: Path) -> None:
+    """
+    处理单个 TXT 文档，生成知识块 JSON。
+
+    流程：
+    1. 读取文本内容
+    2. 用 document_classifier 分类
+    3. 根据分类选择解析方式（bug_fix 专用解析 / 通用段落解析）
+    4. 运行 metadata 增强
+    5. 写入 reference/ 目录
+    """
+    from INAGENT.data_tools.document_classifier import (
+        classify_document,
+        infer_product_module_from_path,
+    )
+
+    stem = _output_stem_for_file(file_path)
+    source_label = _source_file_label(file_path)
+    json_path = REFERENCE_DIR / f"{stem}.json"
+    cache_path = LOG_DIR / f"{stem}.cache.json"
+    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if _can_skip_office_cached(file_path, json_path, cache_path):
+        logger.info("[text-cache] 跳过 %s，内容未变更", file_path.name)
+        return
+
+    start_time = time.perf_counter()
+    logger.info("[text] 开始处理: %s", file_path.name)
+
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    content_preview = text[:2000]
+
+    category, confidence = classify_document(file_path, content_preview)
+    product_module = infer_product_module_from_path(file_path)
+    logger.info(
+        "[text] 分类结果: %s -> %s (confidence=%.2f, module=%s)",
+        file_path.name,
+        category,
+        confidence,
+        product_module,
+    )
+
+    # 根据分类选择解析方式
+    if category == "review/bug_fix":
+        knowledge_blocks = _parse_bug_fix_text(text, source_label)
+    else:
+        knowledge_blocks = _parse_generic_text(text, source_label, category)
+
+    if not knowledge_blocks:
+        logger.warning("[text] 未生成任何知识块: %s", file_path.name)
+        return
+
+    # metadata 增强
+    config = _load_project_config()
+    meta_rules = config.get("metadata_rules", {})
+    product_modules_map = _merge_product_modules_map(
+        meta_rules.get("product_modules", {})
+    )
+    protocol_map = meta_rules.get("protocol_types", {})
+
+    for block in knowledge_blocks:
+        meta = block.get("metadata", {})
+        content = str(block.get("page_content") or "")
+        lower_text = content.lower()
+
+        if product_module and product_module != "unknown":
+            meta.setdefault("product_module", product_module)
+        if not meta.get("product_module") or meta["product_module"] == "unknown":
+            for module, keywords in product_modules_map.items():
+                if any(k.lower() in lower_text for k in keywords):
+                    meta["product_module"] = module
+                    break
+
+        if not meta.get("protocol_type"):
+            found_protocols = _match_protocols_word_boundary(protocol_map, content)
+            if found_protocols:
+                meta["protocol_type"] = found_protocols
+
+    _enhance_metadata_with_function_index(knowledge_blocks)
+
+    # 写入 JSON
+    json_path.write_text(
+        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 写入缓存
+    cache_payload = {
+        "source_file": str(file_path),
+        "source_file_fingerprint": _compute_file_fingerprint(file_path),
+        "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
+        "document_category": category,
+        "document_category_confidence": confidence,
+        "product_module": product_module,
+        "record_count": len(knowledge_blocks),
+        "output_json": str(json_path),
+    }
+    cache_path.write_text(
+        json.dumps(cache_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    elapsed = time.perf_counter() - start_time
+    logger.info(
+        "[text] 完成: %s -> %s (%d 块, %.2fs)",
+        file_path.name,
+        json_path.name,
+        len(knowledge_blocks),
+        elapsed,
+    )
+
+
+def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
+    """当 MinerU 不可用时，回退为 MarkItDown 纯文本抽取。"""
+    try:
+        from camel.loaders.markitdown import MarkItDownLoader
+        from INAGENT.data_tools.document_classifier import (
+            classify_document,
+            infer_product_module_from_path,
+        )
+    except Exception as exc:
+        logger.warning("[pdf-fallback] 依赖不可用，无法回退: %s", exc)
+        return False
+
+    json_path, cache_path = _target_paths(pdf)
+    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger.warning("[pdf-fallback] 启动 MarkItDown 回退: %s (reason=%s)", pdf.name, reason)
+    try:
+        text = MarkItDownLoader().convert_file(str(pdf)) or ""
+    except Exception as exc:
+        logger.warning("[pdf-fallback] 文本抽取失败: %s", exc)
+        return False
+    if not text.strip():
+        logger.warning("[pdf-fallback] 抽取文本为空: %s", pdf.name)
+        return False
+
+    category, confidence = classify_document(pdf, text[:2000])
+    product_module = infer_product_module_from_path(pdf)
+    source_label = json_path.name
+    knowledge_blocks = _parse_generic_text(text, source_label, category or "spec/design")
+    if not knowledge_blocks:
+        logger.warning("[pdf-fallback] 未生成知识块: %s", pdf.name)
+        return False
+
+    config = _load_project_config()
+    meta_rules = config.get("metadata_rules", {})
+    product_modules_map = _merge_product_modules_map(
+        meta_rules.get("product_modules", {})
+    )
+    protocol_map = meta_rules.get("protocol_types", {})
+
+    for block in knowledge_blocks:
+        meta = block.get("metadata", {})
+        content = str(block.get("page_content") or "")
+        lower_text = content.lower()
+        if product_module and product_module != "unknown":
+            meta.setdefault("product_module", product_module)
+        if not meta.get("product_module") or meta["product_module"] == "unknown":
+            for module, keywords in product_modules_map.items():
+                if any(k.lower() in lower_text for k in keywords):
+                    meta["product_module"] = module
+                    break
+        if not meta.get("protocol_type"):
+            found_protocols = _match_protocols_word_boundary(protocol_map, content)
+            if found_protocols:
+                meta["protocol_type"] = found_protocols
+
+    _enhance_metadata_with_function_index(knowledge_blocks)
+    json_path.write_text(
+        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cache_payload = {
+        "source_file": str(pdf),
+        "source_file_fingerprint": _compute_file_fingerprint(pdf),
+        "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
+        "document_category": category,
+        "document_category_confidence": confidence,
+        "product_module": product_module,
+        "record_count": len(knowledge_blocks),
+        "output_json": str(json_path),
+        "fallback_parser": "markitdown",
+        "fallback_reason": reason,
+    }
+    cache_path.write_text(
+        json.dumps(cache_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info(
+        "[pdf-fallback] 完成: %s -> %s (%d 块)",
+        pdf.name,
+        json_path.name,
+        len(knowledge_blocks),
+    )
+    return True
+
+
 def _prompt_continue_on_error(component: str, error: str) -> bool:
-    if os.getenv("AUTO_CONVERT_ASSUME_YES", "").strip().lower() in {
+    if cfg_str("auto_convert.assume_yes", "", env="AUTO_CONVERT_ASSUME_YES").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -1184,7 +1643,7 @@ def _prompt_continue_on_error(component: str, error: str) -> bool:
 
 
 def _target_paths(pdf: Path) -> Tuple[Path, Path]:
-    stem = pdf.stem
+    stem = _output_stem_for_file(pdf)
     json_path = REFERENCE_DIR / f"{stem}.json"
     cache_path = LOG_DIR / f"{stem}.cache.json"
     return json_path, cache_path
@@ -1335,6 +1794,199 @@ def _clean_chunk_text(text: str) -> str:
 def _apply_llm_metadata_extraction(text: str, meta: Dict[str, object], config: Dict) -> None:
     """外部接口，调用内部实现"""
     _apply_llm_metadata_extraction_internal(text, meta, config, allow_fallback=True)
+
+
+# ---------------------------------------------------------------------------
+# Batch LLM metadata extraction  (reduces API calls by ~10x)
+# ---------------------------------------------------------------------------
+
+_BATCH_LLM_SIZE = 40  # chunks per LLM call (was 10; 40 fits within 8K-context models)
+_BATCH_TEXT_LIMIT = 500  # chars per chunk in batch prompt (was 800; trimmed to fit larger batches)
+
+
+def _apply_llm_metadata_extraction_batch(
+    items: List[Tuple[str, Dict[str, object]]],
+    config: Dict,
+) -> None:
+    """Apply LLM metadata extraction for a batch of (clean_text, meta) pairs.
+
+    Merges up to _BATCH_LLM_SIZE chunks into a single prompt, asks the LLM
+    to return a JSON array of metadata objects (one per chunk, in order).
+    Falls back to per-item extraction on any parse failure.
+    """
+    if not items:
+        return
+
+    global _QIANFAN_AVAILABLE, _LLM_METADATA_AVAILABLE
+    if _QIANFAN_AVAILABLE is False or _LLM_METADATA_AVAILABLE is False:
+        return
+
+    selected_api_key, selected_base_url, selected_model = _select_provider_for_thread()
+    if not (selected_api_key and selected_base_url and selected_model):
+        runtime = _get_siliconflow_runtime()
+        selected_api_key = str(runtime.get("api_key") or "")
+        selected_base_url = str(runtime.get("base_url") or "")
+        selected_model = str(runtime.get("model") or "")
+    if not selected_api_key:
+        return
+
+    if OpenAI is None:
+        return
+
+    if _LLM_METADATA_AVAILABLE is None:
+        if not selected_base_url:
+            _LLM_METADATA_AVAILABLE = False
+            return
+        _LLM_METADATA_AVAILABLE = _ensure_urls_reachable(
+            [selected_base_url],
+            attempts=NET_RETRY_ATTEMPTS,
+            delay=NET_RETRY_DELAY,
+            timeout=NET_TIMEOUT,
+            label="llm-metadata-batch",
+            accept_http_error=True,
+        )
+        if not _LLM_METADATA_AVAILABLE:
+            return
+
+    full_config = _load_project_config()
+    meta_rules = full_config.get("metadata_rules", {})
+    valid_intents = list(meta_rules.get("intents", {}).keys())
+    valid_config_modes = list(meta_rules.get("config_modes", {}).keys())
+    product_modules_map = meta_rules.get("product_modules", {})
+    valid_product_modules = list(product_modules_map.keys())
+    valid_protocol_types = list(meta_rules.get("protocol_types", {}).keys())
+    valid_command_prefixes = list(meta_rules.get("command_prefixes", {}).keys())
+    pm_descs = [f"{m} (kw: {', '.join(kws[:3])})" for m, kws in product_modules_map.items()]
+
+    # build per-chunk summaries
+    chunk_lines = []
+    for idx, (text, meta_item) in enumerate(items):
+        sec = str(meta_item.get("section_title") or "").strip()
+        par = str(meta_item.get("parent_section") or "").strip()
+        src = str(meta_item.get("source_file") or "")
+        snippet = text[:_BATCH_TEXT_LIMIT]
+        header = f"[CHUNK {idx}]"
+        if sec:
+            header += f" section={sec}"
+        if par:
+            header += f" parent={par}"
+        if src:
+            header += f" source={src}"
+        chunk_lines.append(f"{header}\n{snippet}")
+
+    chunks_block = "\n---\n".join(chunk_lines)
+
+    prompt = (
+        "You are a batch metadata extractor for technical documentation chunks.\n"
+        "Extract metadata for EACH chunk below. Return a JSON array with one object per chunk, in order.\n\n"
+        "For each chunk, extract:\n"
+        "- product_module (string, feature module like SLB/LLB/基础网络/安全)\n"
+        "- protocol_type (list of strings, e.g. ['HTTP','TCP'])\n"
+        "- intent (string)\n"
+        "- config_mode (string: cli/console/api)\n"
+        "- command_prefix (string, first command word if CLI)\n"
+        "- description (string, max 30 words)\n"
+        "- required_keywords (list of strings)\n"
+        "- section_title (string, no numbering)\n"
+        "- parent_section (string, no numbering)\n"
+        "- scenario_id (string)\n"
+        "- step_type (string)\n"
+        "- function_hierarchy (string, e.g. 'SLB > Health Check > HTTP')\n\n"
+        f"Valid Intents: {valid_intents}\n"
+        f"Valid Config Modes: {valid_config_modes}\n"
+        f"Valid Modules: {', '.join(pm_descs[:20])}\n"
+        f"Valid Protocols: {valid_protocol_types}\n"
+        f"Valid Prefixes: {valid_command_prefixes}\n\n"
+        "Return ONLY a JSON array of objects. No markdown. No explanation.\n\n"
+        f"{chunks_block}"
+    )
+
+    try:
+        client = OpenAI(
+            api_key=selected_api_key,
+            base_url=selected_base_url,
+            timeout=config.get("timeout", 120),
+        )
+        response = _call_llm_with_retry_and_fallback(
+            client=client,
+            base_url=selected_base_url,
+            model=selected_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=_siliconflow_temperature(),
+            response_format={"type": "json_object"},
+            allow_fallback=False,
+            fallback_config=None,
+        )
+        content = response.choices[0].message.content or "[]"
+        if "```" in content:
+            match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+        # The API returns json_object which is a single object. We asked for an
+        # array, but some models wrap it: {"results": [...]} or just [...].
+        if json_repair:
+            parsed = json_repair.loads(content)
+        else:
+            parsed = json.loads(content)
+
+        if isinstance(parsed, dict):
+            # Unwrap {"results": [...]} or {"chunks": [...]} etc.
+            for key in ("results", "chunks", "data", "items", "metadata"):
+                if key in parsed and isinstance(parsed[key], list):
+                    parsed = parsed[key]
+                    break
+            else:
+                # Single dict — wrap as one-element list
+                parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            raise ValueError(f"Expected list, got {type(parsed)}")
+
+    except Exception as e:
+        logger.warning("[batch-llm] Failed to parse batch response (%s); falling back to per-item", e)
+        # Fallback: call per-item extraction
+        for text, meta_item in items:
+            _apply_llm_metadata_extraction_internal(text, meta_item, config, allow_fallback=True)
+        return
+
+    # Merge results back
+    for idx, (text, meta_item) in enumerate(items):
+        if idx < len(parsed) and isinstance(parsed[idx], dict):
+            llm_meta = parsed[idx]
+        else:
+            # Missing entry — do per-item fallback for this chunk
+            _apply_llm_metadata_extraction_internal(text, meta_item, config, allow_fallback=True)
+            continue
+
+        # Apply same merge logic as per-item version
+        if llm_meta.get("intent"):
+            meta_item["intent"] = llm_meta["intent"]
+        if llm_meta.get("config_mode"):
+            meta_item["config_mode"] = llm_meta["config_mode"]
+        if llm_meta.get("required_keywords") and isinstance(llm_meta["required_keywords"], list):
+            meta_item["required_keywords"] = llm_meta["required_keywords"]
+        if llm_meta.get("product_module"):
+            pm = str(llm_meta["product_module"]).strip()
+            pm = {"未知": "unknown", "未知模块": "unknown"}.get(pm, pm)
+            meta_item["product_module"] = "unknown" if pm.lower() in ["unknown", "未知", ""] else pm
+        if llm_meta.get("protocol_type") and isinstance(llm_meta["protocol_type"], list):
+            meta_item["protocol_type"] = llm_meta["protocol_type"]
+        if llm_meta.get("command_prefix"):
+            meta_item["command_prefix"] = llm_meta["command_prefix"]
+        if llm_meta.get("description"):
+            meta_item["description"] = llm_meta["description"]
+        if llm_meta.get("section_title"):
+            meta_item["section_title"] = llm_meta["section_title"]
+        if llm_meta.get("parent_section"):
+            meta_item["parent_section"] = llm_meta["parent_section"]
+        if llm_meta.get("scenario_id"):
+            meta_item["scenario_id"] = llm_meta["scenario_id"]
+        if llm_meta.get("step_type"):
+            meta_item["step_type"] = llm_meta["step_type"]
+        if llm_meta.get("function_hierarchy"):
+            meta_item["function_hierarchy"] = llm_meta["function_hierarchy"]
+        if llm_meta.get("command_structure") and isinstance(llm_meta["command_structure"], dict):
+            meta_item["command_structure"] = llm_meta["command_structure"]
 
 
 def _select_provider_for_thread() -> Tuple[str, str, str]:
@@ -1956,10 +2608,7 @@ def _extract_chunk_metadata(
 
     # Rule-based Protocol Type Extraction (Externalized in mineru.json)
     protocol_map = meta_rules.get("protocol_types", {})
-    found_protocols = []
-    for proto, keywords in protocol_map.items():
-        if any(k.lower() in lower_text for k in keywords):
-            found_protocols.append(proto)
+    found_protocols = _match_protocols_word_boundary(protocol_map, lower_text)
     if found_protocols:
         meta["protocol_type"] = found_protocols
 
@@ -1992,7 +2641,7 @@ def _build_models_url(base_url: str) -> str:
 
 
 def _prompt_continue_without_vllm() -> bool:
-    if os.getenv("AUTO_CONVERT_ASSUME_YES", "").strip().lower() in {
+    if cfg_str("auto_convert.assume_yes", "", env="AUTO_CONVERT_ASSUME_YES").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2534,6 +3183,24 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Classify the PDF document using filename patterns + content preview
+    from INAGENT.data_tools.document_classifier import classify_document, infer_product_module_from_path
+    _content_preview_for_classify = ""
+    if isinstance(blocks, list):
+        _preview_texts = []
+        for _blk in blocks[:10]:
+            if isinstance(_blk, dict):
+                _preview_texts.append(_extract_text_from_block(_blk))
+        _content_preview_for_classify = "\n".join(_preview_texts)[:2000]
+    _pdf_category, _pdf_category_confidence = classify_document(
+        pdf, _content_preview_for_classify
+    )
+    _pdf_product_module = infer_product_module_from_path(pdf)
+    logger.info(
+        "[mineru] 文档分类: %s -> %s (confidence=%.2f, module=%s)",
+        pdf.name, _pdf_category, _pdf_category_confidence, _pdf_product_module,
+    )
+
     knowledge_blocks: List[Dict[str, object]] = []
     if isinstance(blocks, list):
         section_context_map = _build_section_context_map(blocks)
@@ -2558,7 +3225,7 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
             img_path = block.get("img_path", "")
             base_meta = {
                 "source_pdf": str(pdf),
-                "source_file": f"{pdf.stem}.json",
+                "source_file": json_path.name,
                 "page_idx": block.get("page_idx"),
                 "block_type": block.get("type"),
                 "block_id": idx,
@@ -2566,6 +3233,8 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                 "section_title": section_context.get("section_title", ""),
                 "parent_section": section_context.get("parent_section", ""),
                 "section_path": section_context.get("section_path", ""),
+                "document_category": _pdf_category,
+                "product_module": _pdf_product_module or "unknown",
             }
             if img_path:
                 base_meta["img_path"] = img_path
@@ -2575,49 +3244,118 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
         # 如果启用双提供商负载均衡，增加线程数以充分利用两个提供商
         # 默认线程数：单提供商16，双提供商32
         default_workers = 32 if ENABLE_DUAL_PROVIDER_LOAD_BALANCE else 16
-        max_workers = int(os.getenv("AUTO_CONVERT_MAX_WORKERS", str(default_workers)))
+        max_workers = cfg_int(
+            "auto_convert.parallel.max_workers",
+            default_workers,
+            env="AUTO_CONVERT_MAX_WORKERS",
+        )
         if valid_items:
             total = len(valid_items)
             processed = 0
             start_time = time.perf_counter()
             
-            # Helper to run blocking executor map in a thread with progress tracking
+            # Helper to run blocking processing in a thread with progress tracking
+            # Phase 1: rule-based extraction (fast, no LLM)
+            # Phase 2: batch LLM extraction (N chunks per API call)
             def _process_batch_sync(items):
                 nonlocal processed
-                results = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    texts = [item[0] for item in items]
-                    # 使用 submit 和 as_completed 来跟踪进度
-                    future_to_index = {
-                        executor.submit(
-                            _extract_chunk_metadata, text, valid_items[idx][1]
-                        ): idx
-                        for idx, text in enumerate(texts)
-                    }
-                    
-                    # 创建结果列表，按索引排序
-                    temp_results = [None] * len(texts)
-                    
-                    for future in concurrent.futures.as_completed(future_to_index):
-                        idx = future_to_index[future]
-                        try:
-                            temp_results[idx] = future.result()
-                            processed += 1
-                            # 每处理10%或每100个块输出一次进度
-                            if processed % max(1, min(100, total // 10)) == 0 or processed == total:
-                                elapsed = time.perf_counter() - start_time
-                                rate = processed / elapsed if elapsed > 0 else 0
-                                remaining = total - processed
-                                eta = remaining / rate if rate > 0 else 0
+                config = _load_project_config()
+                meta_rules = config.get("metadata_rules", {})
+                llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
+                llm_enabled = llm_config.get("enable", False)
+
+                # Phase 1: rule-based extraction for all items (fast)
+                rule_results = []
+                for text, base in items:
+                    clean_text = _clean_chunk_text(text)
+                    meta_out: Dict[str, object] = {"clean_text": clean_text}
+                    section_title = str(base.get("section_title") or "").strip()
+                    parent_section = str(base.get("parent_section") or "").strip()
+                    if section_title:
+                        meta_out["section_title"] = section_title
+                    if parent_section:
+                        meta_out["parent_section"] = parent_section
+                    section_path = base.get("section_path")
+                    if section_path:
+                        meta_out["section_path"] = section_path
+                    lower_text = clean_text.lower()
+                    lower_section = f"{section_title} {parent_section}".lower()
+                    for intent, keywords in meta_rules.get("intents", {}).items():
+                        if any(k.lower() in lower_text for k in keywords):
+                            meta_out["intent"] = intent
+                            break
+                    product_modules_map = _merge_product_modules_map(meta_rules.get("product_modules", {}))
+                    for module, keywords in product_modules_map.items():
+                        if any(k.lower() in lower_text for k in keywords) or any(k.lower() in lower_section for k in keywords):
+                            meta_out["product_module"] = module
+                            break
+                    for proto in _match_protocols_word_boundary(
+                        meta_rules.get("protocol_types", {}), lower_text
+                    ):
+                        meta_out.setdefault("protocol_type", [])
+                        meta_out["protocol_type"].append(proto)
+                    for prefix, keywords in meta_rules.get("command_prefixes", {}).items():
+                        if any(k.lower() in lower_text for k in keywords):
+                            meta_out["command_prefix"] = prefix
+                            break
+                    for mode, keywords in meta_rules.get("config_modes", {}).items():
+                        if any(k.lower() in lower_text for k in keywords):
+                            meta_out["config_mode"] = mode
+                            break
+                    rule_results.append((clean_text, meta_out))
+
+                processed += len(items)
+                elapsed = time.perf_counter() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0
+                remaining = total - processed
+                eta = remaining / rate if rate > 0 else 0
+                logger.info(
+                    "[parallel] 规则提取完成: %d/%d (%.1f%%) | %.1f 块/秒 | 剩余: %.1f秒",
+                    processed, total, 100.0 * processed / total, rate, eta,
+                )
+
+                # Phase 2: batch LLM extraction (if enabled)
+                # Skip blocks where rule-based extraction already filled key fields
+                if llm_enabled:
+                    _KEY_FIELDS = {"product_module", "protocol_type", "intent", "config_mode"}
+                    needs_llm = []
+                    for ct, m in rule_results:
+                        filled = sum(1 for f in _KEY_FIELDS if m.get(f))
+                        if filled < 3:  # need LLM if <3 of 4 key fields filled
+                            needs_llm.append((ct, m))
+                    skipped = len(rule_results) - len(needs_llm)
+                    if skipped:
+                        logger.info(
+                            "[batch-llm] 跳过 %d/%d 块 (规则已覆盖), LLM处理 %d 块",
+                            skipped, len(rule_results), len(needs_llm),
+                        )
+                    batch_size = _BATCH_LLM_SIZE
+                    llm_batches = []
+                    for i in range(0, len(needs_llm), batch_size):
+                        llm_batches.append(needs_llm[i:i + batch_size])
+
+                    llm_done = 0
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, 32)) as executor:
+                        def _do_batch(batch):
+                            _apply_llm_metadata_extraction_batch(
+                                [(ct, m) for ct, m in batch], llm_config
+                            )
+                        futures = {executor.submit(_do_batch, b): b for b in llm_batches}
+                        for future in concurrent.futures.as_completed(futures):
+                            try:
+                                future.result()
+                            except Exception as e:
+                                logger.warning("[batch-llm] batch failed: %s", e)
+                            llm_done += len(futures[future])
+                            llm_total = len(needs_llm)
+                            if llm_done % max(1, min(500, llm_total // 5)) < batch_size or llm_done >= llm_total:
                                 logger.info(
-                                    "[parallel] 进度: %d/%d (%.1f%%) | 速度: %.1f 块/秒 | 预计剩余: %.1f秒",
-                                    processed, total, 100.0 * processed / total, rate, eta
+                                    "[batch-llm] LLM进度: %d/%d (%.1f%%)",
+                                    llm_done, llm_total,
+                                    100.0 * llm_done / llm_total if llm_total else 100.0,
                                 )
-                        except Exception as e:
-                            logger.warning(f"[parallel] 处理块 {idx} 时出错: {e}")
-                            temp_results[idx] = {}
-                
-                return temp_results
+
+                return [meta_out for _, meta_out in rule_results]
 
             provider_info = ""
             if ENABLE_DUAL_PROVIDER_LOAD_BALANCE:
@@ -2696,6 +3434,9 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
         "frontmatter_pages": frontmatter_pages,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
+        "document_category": _pdf_category,
+        "document_category_confidence": _pdf_category_confidence,
+        "product_module": _pdf_product_module,
         "document_metadata": document_metadata,  # 保存文档识别结果
     }
     cache_path.write_text(
@@ -2924,9 +3665,18 @@ async def main() -> None:
     _setup_logging()
     
     # 调试：输出关键环境变量
-    logger.info("[config] HUNYUAN_API_BASE_URL=%s", os.getenv("HUNYUAN_API_BASE_URL", "NOT SET"))
-    logger.info("[config] HUNYUAN_MODEL=%s", os.getenv("HUNYUAN_MODEL", "NOT SET"))
-    logger.info("[config] LLM_GATEWAY_BASE_URL=%s", os.getenv("LLM_GATEWAY_BASE_URL", "NOT SET"))
+    logger.info(
+        "[config] HUNYUAN_API_BASE_URL=%s",
+        cfg_str("llm.hunyuan.base_url", "NOT SET", env="HUNYUAN_API_BASE_URL"),
+    )
+    logger.info(
+        "[config] HUNYUAN_MODEL=%s",
+        cfg_str("llm.hunyuan.model", "NOT SET", env="HUNYUAN_MODEL"),
+    )
+    logger.info(
+        "[config] LLM_GATEWAY_BASE_URL=%s",
+        cfg_str("llm.gateway.base_url", "NOT SET", env="LLM_GATEWAY_BASE_URL"),
+    )
     
     # 清除 LLM 配置缓存，确保使用最新的环境变量
     try:
@@ -3013,7 +3763,7 @@ async def main() -> None:
             detected_model = _fetch_vllm_model_name(
                 DOCKER_VLLM_URL, timeout=VLLM_MODELS_TIMEOUT
             )
-            if detected_model and not os.getenv("LLM_GATEWAY_CHAT_MODEL", "").strip():
+            if detected_model and not cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL").strip():
                 os.environ["LLM_GATEWAY_CHAT_MODEL"] = detected_model
                 model = detected_model
                 logger.info("[gateway] 检测到 vLLM 模型: %s", detected_model)
@@ -3042,11 +3792,12 @@ async def main() -> None:
 
     pdfs = _iter_pdf_files()
     office_files_early = _iter_office_files()
-    _cleanup_orphan_files(pdfs, office_files_early)
+    text_files_early = _iter_text_files()
+    _cleanup_orphan_files(pdfs, office_files_early + text_files_early)
     _cleanup_old_logs()
 
-    if not pdfs and not office_files_early:
-        logger.info("no pdf/office files found under knowledge_base, nothing to do.")
+    if not pdfs and not office_files_early and not text_files_early:
+        logger.info("no pdf/office/text files found under knowledge_base, nothing to do.")
         return
 
     MINERU_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -3075,13 +3826,17 @@ async def main() -> None:
         #    c. PATH 中的 mineru 命令
         # ============================================================
 
-        mineru_cmd = os.getenv("MINERU_CLI")
+        mineru_cmd = cfg_str("auto_convert.mineru.cli", "", env="MINERU_CLI")
         if not mineru_cmd:
-            candidate = BASE_DIR.parent / "mineru" / "venv" / "Scripts" / "mineru.exe"
-            if candidate.exists():
-                mineru_cmd = str(candidate)
-            else:
-                mineru_cmd = "mineru"
+            # 兼容两种目录布局：
+            # 1) <repo>/INAGENT/mineru/venv/Scripts/mineru.exe
+            # 2) <repo>/mineru/venv/Scripts/mineru.exe
+            candidates = [
+                BASE_DIR.parent / "mineru" / "venv" / "Scripts" / "mineru.exe",
+                BASE_DIR.parent.parent / "mineru" / "venv" / "Scripts" / "mineru.exe",
+            ]
+            picked = next((c for c in candidates if c.exists()), None)
+            mineru_cmd = str(picked) if picked else "mineru"
         reader = LocalMinerUReader(
             output_dir=str(MINERU_OUTPUT_DIR),
             mineru_command=mineru_cmd,
@@ -3096,11 +3851,19 @@ async def main() -> None:
 
         # Semaphore for file-level concurrency
         # Default to 3 concurrent files (assuming average PDF size, this balances memory/CPU)
-        max_concurrent_files = int(os.getenv("AUTO_CONVERT_MAX_FILES", "3"))
+        max_concurrent_files = cfg_int(
+            "auto_convert.parallel.max_files",
+            3,
+            env="AUTO_CONVERT_MAX_FILES",
+        )
         sem = asyncio.Semaphore(max_concurrent_files)
 
         # Support page limit for testing (via environment variable)
-        max_pages_test = os.getenv("AUTO_CONVERT_MAX_PAGES_TEST")
+        max_pages_test = cfg_str(
+            "auto_convert.parallel.max_pages_test",
+            "",
+            env="AUTO_CONVERT_MAX_PAGES_TEST",
+        )
         max_pages_limit = None
         if max_pages_test:
             try:
@@ -3115,6 +3878,8 @@ async def main() -> None:
                      await convert_one(reader, p, max_pages=max_pages_limit)
                  except Exception as e:
                      logger.error("Failed to convert %s: %s", p.name, e)
+                     if not _fallback_convert_pdf_with_markitdown(p, reason=str(e)):
+                         logger.error("[pdf-fallback] 仍失败: %s", p.name)
 
         tasks = [_protected_convert(p) for p in pdfs]
         logger.info("Starting conversion with file_concurrency=%d", max_concurrent_files)
@@ -3139,6 +3904,22 @@ async def main() -> None:
         logger.info("[office] Office 文档处理完成")
     else:
         logger.info("[office] 未发现 Office 文档，跳过")
+
+    # ============================================================
+    # TXT 文档处理
+    # ============================================================
+    text_files = _iter_text_files()
+    if text_files:
+        logger.info("=" * 80)
+        logger.info("[text] 发现 %d 个 TXT 文档，开始处理...", len(text_files))
+        for tfile in text_files:
+            try:
+                convert_text_file(tfile)
+            except Exception as e:
+                logger.error("[text] 处理失败 %s: %s", tfile.name, e)
+        logger.info("[text] TXT 文档处理完成")
+    else:
+        logger.info("[text] 未发现 TXT 文档，跳过")
 
     # Ensure enhanced metadata is applied even when MinerU outputs are reused via cache.
     # When convert_one() is skipped, app.json/cli.json may predate newly added metadata
@@ -3175,10 +3956,9 @@ async def main() -> None:
 
                         # protocol_type (list)
                         if not meta.get("protocol_type"):
-                            found_protocols = []
-                            for proto, keywords in protocol_map.items():
-                                if any(k.lower() in lower_text for k in keywords):
-                                    found_protocols.append(proto)
+                            found_protocols = _match_protocols_word_boundary(
+                                protocol_map, content
+                            )
                             if found_protocols:
                                 meta["protocol_type"] = found_protocols
 

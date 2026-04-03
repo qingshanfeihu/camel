@@ -22,6 +22,8 @@ from typing import Optional, List, Dict, Any, Callable
 
 from dotenv import load_dotenv
 
+from INAGENT.config.project_config import cfg_str
+
 try:
     from langchain_core.documents import Document
 except ImportError:
@@ -106,8 +108,8 @@ def is_placeholder_value(value: Optional[str]) -> bool:
     }
 
 
-def require_siliconflow_api_key() -> str:
-    api_key = os.getenv("SILICONFLOW_API_KEY")
+def require_gateway_api_key() -> str:
+    api_key = cfg_str("llm.siliconflow.api_key", "", env="SILICONFLOW_API_KEY")
     if is_placeholder_value(api_key):
         raise RuntimeError(
             "SILICONFLOW_API_KEY 未配置或仍为占位符。"
@@ -116,13 +118,18 @@ def require_siliconflow_api_key() -> str:
     return api_key
 
 
+def require_siliconflow_api_key() -> str:
+    """兼容旧命名：等价于 require_gateway_api_key。"""
+    return require_gateway_api_key()
+
+
 def get_product_name() -> str:
     r"""Get product display name used by prompts.
 
     Reads ``INAGENT_PRODUCT_NAME`` from environment. If it is missing or
     empty, fall back to the historical default name.
     """
-    name = (os.getenv("INAGENT_PRODUCT_NAME") or "").strip()
+    name = cfg_str("app.product_name", "", env="INAGENT_PRODUCT_NAME").strip()
     if name:
         return name
     return "NSAE (InfosecOS) 负载均衡器"

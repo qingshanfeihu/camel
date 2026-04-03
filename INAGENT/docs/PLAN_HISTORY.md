@@ -1,5 +1,18 @@
 # Plan: 统一测试评审流水线（自主 Agent Pipeline）
 
+> **⚠ 历史文档 (v1/v2 设计)**：此文档描述了 ReviewPipeline 的初始两步式设计
+> （plan → knowledge → review，3 次 LLM 调用）。实际实现已演进至 **v4 — Workforce
+> 多 Agent 架构**，使用 5 个并行 Worker (Coverage / CLI Syntax / Spec Compliance /
+> Load-Stress / Synthesis) + Manager 统一编排。原始的 `_plan()` 和 `_acquire_knowledge()`
+> 已被 `_build_deterministic_plan()` + `ReviewInputBuilder.build()` 取代。
+>
+> 当前架构参见: [ARCHITECTURE.md](ARCHITECTURE.md) § Pipeline B
+>
+> **v0.8.1 (2026-03-29) 基线验证结果**:
+> - Bug 121100 (Cookie会话保持加密): 9 项人工评审基线，AI 命中率 **83%** (7.5/9)
+> - 修复: 横切面模块 Scope 保护 (Fix G) + 配置并存检查 (Fix H)
+> - 详见 [CHANGELOG.md](CHANGELOG.md) v0.8.1
+
 ## TL;DR
 当前 Bug 定向评审和全模块评审都存在：产品知识缺失(DESIGN层被弱化)、协议深度不够(LLM通用知识未引导)、prompt hardcode(NSAE/InfosecOS)。
 方案：设计一个两步式自主 Agent Pipeline，第一步让 LLM 自由分析输入内容并输出结构化"评审计划"（包括需要查什么知识、从什么维度评审），第二步系统自动执行计划（查 RAG、执行评审）。没有任何硬编码的阶段或 query，一切由 LLM 根据输入内容自主决定。
@@ -22,7 +35,7 @@
 
 1. 在 INAGENT/utils/env_utils.py 新增 get_product_name() 函数，读环境变量 INAGENT_PRODUCT_NAME，默认 "NSAE (InfosecOS) 负载均衡器"
 2. 修改 INAGENT/web/routers/chat.py 中 system prompt，用 get_product_name() 替换硬编码
-3. 修改 _run_bug_139213_scoped_review.py 和 _run_test_review.py 中的 prompt，同理
+3. 修改 run_review.py 中的 prompt，同理
 
 ### Phase B: 自主评审 Pipeline 核心框架（重新设计）
 
@@ -92,8 +105,7 @@
 
 ### Phase C: 适配现有脚本
 
-9. 重写 _run_bug_139213_scoped_review.py 的 call_agent()，改为调用 ReviewPipeline
-10. 重写 _run_test_review.py 的 review_module()/call_agent()，改为调用 ReviewPipeline
+9. 重写 run_review.py 的 call_agent()/review_module()，改为调用 ReviewPipeline
 
 ### Phase D: 验证
 
@@ -112,13 +124,12 @@
 - INAGENT/utils/env_utils.py
 - INAGENT/review/__init__.py
 - INAGENT/review/pipeline.py
-- _run_bug_139213_scoped_review.py
-- _run_test_review.py
+- run_review.py
 
 ## Verification
-1. _run_bug_139213_scoped_review.py 输出 Step 1 ReviewPlan JSON
+1. run_review.py 输出 Step 1 ReviewPlan JSON
 2. knowledge_queries 为空时跳过 RAG 且不报错
 3. Step 2 报告引用 Step 1.5 知识与理解
 4. review_dimensions 驱动评审角度合理
 5. 消除硬编码产品名
-6. _run_test_review.py bug_profile=None 路径可工作
+6. run_review.py bug_profile=None 路径可工作

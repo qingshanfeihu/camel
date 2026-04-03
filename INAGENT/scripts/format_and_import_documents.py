@@ -4,11 +4,9 @@
 
 操作：
 1. 清理 graphrag_index 测试产物 (output/, cache/, logs/)
-2. 从 knowledge_base.json 读取全量数据
-3. 按 document_category 分类每个来源文件
-4. 过滤：cli.json / app.json 已由 CLIReferenceRetriever 专门处理，不纳入 GraphRAG
-5. 为每个文档添加完整的 document_category + knowledge_layer 元数据
-6. 写入规范化 documents.json
+2. 从 knowledge_base.json 读取全量数据（当前为 cli_keyword_graph.json 生成的 CLI 叶子节点）
+3. 按来源文件合并，提取 document_category + product_module 元数据
+4. 写入规范化 documents.json，供 graphrag index 消费
 """
 import json
 import logging
@@ -31,21 +29,15 @@ INAGENT_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = INAGENT_ROOT / "graphrag_index"
 KB_PATH = INAGENT_ROOT / "knowledge_base" / "reference" / "knowledge_base.json"
 
-# 来源文件 → 专用检索器（不纳入 GraphRAG）
-EXCLUDED_SOURCES = {
-    "cli.json",   # → CLIReferenceRetriever (10,379 条)
-    "app.json",   # → CLIReferenceRetriever (应用配置参考)
-    "cli.pdf",    # → CLIReferenceRetriever (PDF 版本)
-}
+# 来源文件 → 专用检索器（旧架构排除，新架构全部纳入 GraphRAG）
+# 新统一架构下已不再排除任何文件；所有文档均通过 GraphRAG 索引。
+EXCLUDED_SOURCES: set = set()
 
-# 来源文件 → 知识层映射
+# 来源文件 document_category → knowledge_layer 映射
 KNOWLEDGE_LAYER_MAP = {
-    "spec/prd": "design",
-    "spec/func_spec": "design",
-    "spec/design": "design",
-    "test/test_list": "test",
-    "test/test_strategy": "test",
-    "test/test_template": "rules",
+    "cli/reference": "design",
+    "app/reference": "design",
+    "architecture/design": "design",
 }
 
 
@@ -124,7 +116,7 @@ def format_documents(items: list) -> list:
                 continue
             meta = block.get("metadata", {})
 
-            # 构建元数据前缀
+            # 构建元数据前缀（仅保留通用字段）
             meta_prefix = []
             if category:
                 meta_prefix.append(f"[分类: {category}]")
@@ -132,25 +124,6 @@ def format_documents(items: list) -> list:
             product_module = meta.get("product_module", "")
             if product_module and product_module != "unknown":
                 meta_prefix.append(f"[模块: {product_module}]")
-
-            protocol_type = meta.get("protocol_type", [])
-            if protocol_type:
-                if isinstance(protocol_type, list):
-                    meta_prefix.append(f"[协议: {', '.join(protocol_type)}]")
-                else:
-                    meta_prefix.append(f"[协议: {protocol_type}]")
-
-            feature_name = meta.get("feature_name", "")
-            if feature_name:
-                meta_prefix.append(f"[功能: {feature_name}]")
-
-            step_type = meta.get("step_type", "")
-            if step_type and step_type != "unknown":
-                meta_prefix.append(f"[步骤: {step_type}]")
-
-            section_title = meta.get("section_title", "")
-            if section_title:
-                meta_prefix.append(f"[章节: {section_title}]")
 
             enriched = " ".join(meta_prefix) + "\n" + text if meta_prefix else text
             parts.append(enriched)
@@ -201,37 +174,11 @@ def write_documents(documents: list):
 
 
 def verify_modules(documents: list):
-    """验证各模块能正确加载格式化后的数据。"""
+    """验证 GraphRAG 输入文档内容。"""
     print("\n" + "=" * 60)
-    print("模块验证")
+    print("GraphRAG 输入验证")
     print("=" * 60)
 
-    # 1. CLI Reference
-    from INAGENT.rag.cli_reference import get_cli_retriever
-    cli = get_cli_retriever()
-    print(f"\n[CLI 层] CLIReferenceRetriever: {cli.entry_count} 条命令")
-    results = cli.search("slb virtual http", max_results=3)
-    print(f"  搜索 'slb virtual http': {len(results)} 结果")
-    if results:
-        print(f"  首条: {results[0]['command_prefix']} | {results[0]['text'][:80]}...")
-
-    # 2. Rules Engine
-    from INAGENT.rag.test_rules import get_test_rules_engine
-    rules = get_test_rules_engine()
-    print(f"\n[Rules 层] TestRulesEngine: {rules.test_item_count} 条测试项")
-    print(f"  测试类型: {list(rules.get_test_types().keys())}")
-    ctx = rules.get_rules_context("write")
-    print(f"  规则上下文 (write): {len(ctx)} 字符")
-
-    # 3. Knowledge Router
-    from INAGENT.rag.knowledge_router import classify_query, classify_for_mode
-    layers = classify_query("slb virtual http 配置命令")
-    print(f"\n[Router] classify_query('slb virtual http 配置命令'): {[l.value for l in layers]}")
-    layers = classify_for_mode("test_write")
-    print(f"  classify_for_mode('test_write'): {[l.value for l in layers]}")
-
-    # 4. GraphRAG input 文档统计
-    print(f"\n[GraphRAG 输入] documents.json:")
     total_chars = 0
     for doc in documents:
         meta = doc["metadata"]
@@ -239,6 +186,16 @@ def verify_modules(documents: list):
         total_chars += chars
         print(f"  {doc['id']} | {doc['title']:50s} | {meta['document_category']:20s} | layer={meta['knowledge_layer']:8s} | {chars:>6d} chars")
     print(f"  总计: {len(documents)} 文档, {total_chars:,} 字符")
+
+    # 抽样验证：显示第一个文档的前 3 个片段
+    if documents:
+        sample_text = documents[0]["text"]
+        # 找前3个命令片段
+        segments = sample_text.split("\n\n")[:4]
+        print(f"\n[抽样] {documents[0]['id']} 前 4 段:")
+        for seg in segments:
+            first_line = seg.strip().split("\n")[0][:100]
+            print(f"  · {first_line}")
 
 
 def main():

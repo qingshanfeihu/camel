@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from INAGENT.config.project_config import cfg_int, cfg_str
 from INAGENT.web.deps import (
     INAGENT_DIR, KB_DIR, KB_PATH, INDEX_PATH, LOG_DIR, REPO_ROOT, get_db,
 )
@@ -54,7 +55,7 @@ async def system_status():
     )
 
     # LLM Gateway
-    gw_url = os.getenv("LLM_GATEWAY_BASE_URL", "http://127.0.0.1:9000")
+    gw_url = cfg_str("llm.gateway.base_url", "http://127.0.0.1:9000", env="LLM_GATEWAY_BASE_URL")
     try:
         req = urllib.request.Request(f"{gw_url}/health", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -63,13 +64,13 @@ async def system_status():
         status.llm_gateway = False
 
     # NSAE 设备 SSH
-    device_ip = os.getenv("LB_DEVICE_IP", "")
+    device_ip = cfg_str("system.lb_device_ip", "", env="LB_DEVICE_IP")
     if device_ip:
         status.nsae_device = _tcp_check(device_ip, 22)
 
     # 测试 VM SSH
-    vm_ip = os.getenv("VM_MGMT_IP", "")
-    vm_port = int(os.getenv("VM_SSH_PORT", "22"))
+    vm_ip = cfg_str("system.vm_mgmt_ip", "", env="VM_MGMT_IP")
+    vm_port = cfg_int("system.vm_ssh_port", 22, env="VM_SSH_PORT")
     if vm_ip:
         status.test_vm = _tcp_check(vm_ip, vm_port)
 
@@ -96,8 +97,12 @@ async def probe(target: str):
     elif target == "nsae_device":
         return _probe_ssh("LB_DEVICE_IP", "LB_USERNAME", "LB_PASSWORD", 22)
     elif target == "test_vm":
-        return _probe_ssh("VM_MGMT_IP", "VM_USERNAME", "VM_PASSWORD",
-                          int(os.getenv("VM_SSH_PORT", "22")))
+        return _probe_ssh(
+            "VM_MGMT_IP",
+            "VM_USERNAME",
+            "VM_PASSWORD",
+            cfg_int("system.vm_ssh_port", 22, env="VM_SSH_PORT"),
+        )
     elif target == "rag":
         return _probe_rag()
     elif target == "graphrag":
@@ -107,7 +112,7 @@ async def probe(target: str):
 
 
 def _probe_llm_gateway():
-    gw_url = os.getenv("LLM_GATEWAY_BASE_URL", "http://127.0.0.1:9000")
+    gw_url = cfg_str("llm.gateway.base_url", "http://127.0.0.1:9000", env="LLM_GATEWAY_BASE_URL")
     result = {"target": "llm_gateway", "url": gw_url, "connected": False, "models": {}}
     try:
         req = urllib.request.Request(f"{gw_url}/health", method="GET")
@@ -125,7 +130,12 @@ def _probe_llm_gateway():
 
 
 def _probe_ssh(ip_env, user_env, pass_env, port):
-    host = os.getenv(ip_env, "")
+    ip_key_map = {
+        "LB_DEVICE_IP": "system.lb_device_ip",
+        "VM_MGMT_IP": "system.vm_mgmt_ip",
+    }
+    cfg_key = ip_key_map.get(ip_env, "")
+    host = cfg_str(cfg_key, "", env=ip_env) if cfg_key else ""
     result = {"target": ip_env, "host": host, "port": port, "connected": False}
     if not host:
         result["error"] = f"{ip_env} 未配置"
@@ -167,12 +177,12 @@ def _probe_graphrag():
 async def get_env():
     """获取关键环境变量 (敏感信息隐藏)。"""
     return EnvConfig(
-        llm_gateway_url=os.getenv("LLM_GATEWAY_BASE_URL", ""),
-        llm_chat_model=os.getenv("LLM_GATEWAY_CHAT_MODEL", ""),
-        lb_device_ip=os.getenv("LB_DEVICE_IP", ""),
-        lb_username=os.getenv("LB_USERNAME", ""),
-        vm_mgmt_ip=os.getenv("VM_MGMT_IP", ""),
-        vm_username=os.getenv("VM_USERNAME", ""),
+        llm_gateway_url=cfg_str("llm.gateway.base_url", "", env="LLM_GATEWAY_BASE_URL"),
+        llm_chat_model=cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL"),
+        lb_device_ip=cfg_str("system.lb_device_ip", "", env="LB_DEVICE_IP"),
+        lb_username=cfg_str("system.lb_username", "", env="LB_USERNAME"),
+        vm_mgmt_ip=cfg_str("system.vm_mgmt_ip", "", env="VM_MGMT_IP"),
+        vm_username=cfg_str("system.vm_username", "", env="VM_USERNAME"),
     )
 
 
@@ -273,7 +283,7 @@ def _collect_gateway_output(proc: subprocess.Popen):
 
 
 def _gateway_url() -> str:
-    return os.getenv("LLM_GATEWAY_BASE_URL", "http://127.0.0.1:9000")
+    return cfg_str("llm.gateway.base_url", "http://127.0.0.1:9000", env="LLM_GATEWAY_BASE_URL")
 
 
 def _gateway_request(path: str, method: str = "GET", body=None):

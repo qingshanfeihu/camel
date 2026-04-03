@@ -100,14 +100,20 @@ class QdrantStorage(BaseVectorStorage):
         :obj:`True`.
         """
         # If the client is a local client, decrease count by 1
+        should_close = False
         if self._local_path is not None:
-            # if count decrease to 0, remove it from the map
-            _client, _count = _qdrant_local_client_map.pop(self._local_path)
-            if _count > 1:
-                _qdrant_local_client_map[self._local_path] = (
-                    _client,
-                    _count - 1,
-                )
+            entry = _qdrant_local_client_map.get(self._local_path)
+            if entry is not None:
+                _client, _count = entry
+                # if count decrease to 0, remove it from the map
+                if _count > 1:
+                    _qdrant_local_client_map[self._local_path] = (
+                        _client,
+                        _count - 1,
+                    )
+                else:
+                    _qdrant_local_client_map.pop(self._local_path, None)
+                    should_close = True
 
         if (
             hasattr(self, "delete_collection_on_del")
@@ -120,6 +126,12 @@ class QdrantStorage(BaseVectorStorage):
                     f"Failed to delete collection"
                     f" '{self.collection_name}': {e}"
                 )
+
+        if should_close:
+            try:
+                self._client.close()
+            except Exception:
+                pass
 
     def _create_client(
         self,
@@ -144,7 +156,10 @@ class QdrantStorage(BaseVectorStorage):
                 self._client, count = _qdrant_local_client_map[path]
                 _qdrant_local_client_map[path] = (self._client, count + 1)
             else:
-                self._client = QdrantClient(path=path, **kwargs)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="Local mode is not recommended")
+                    self._client = QdrantClient(path=path, **kwargs)
                 _qdrant_local_client_map[path] = (self._client, 1)
         else:
             self._client = QdrantClient(":memory:", **kwargs)

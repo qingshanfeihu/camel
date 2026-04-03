@@ -109,7 +109,6 @@ async def ask(req: ChatRequest):
     db.commit()
 
     model = get_llm_model()
-    hybrid_retriever, reranker = get_rag()
 
     config_commands: list = []
     verify_commands: list = []
@@ -117,6 +116,7 @@ async def ask(req: ChatRequest):
 
     try:
         if req.mode == "config":
+            hybrid_retriever, reranker = get_rag()
             answer, config_commands, verify_commands, sources = _generate_config(
                 req.message, hybrid_retriever, reranker, model
             )
@@ -126,7 +126,7 @@ async def ask(req: ChatRequest):
             answer, sources = _review_test_cases(req.message, model)
         else:
             answer, sources = _generate_explanation(
-                req.message, hybrid_retriever, reranker, model
+                req.message, None, None, model
             )
     except Exception as e:
         logger.error("问答失败: %s", e, exc_info=True)
@@ -228,7 +228,7 @@ async def ask_stream(req: ChatRequest):
             if mode == "test_write":
                 # 使用知识路由器进行分层检索
                 kr = get_knowledge_router()
-                retrieval = kr.retrieve(req.message, mode=mode, max_context_chars=8000)
+                retrieval = kr.retrieve(req.message, mode=mode, max_context_chars=20000)
                 context = retrieval.get("context", "")
                 layers = retrieval.get("layers_used", [])
                 yield _sse_event("think", f"已查询知识层: {', '.join(layers)}")
@@ -236,21 +236,10 @@ async def ask_stream(req: ChatRequest):
                 system_prompt = _TEST_WRITE_SYSTEM_PROMPT
                 role_name = "测试用例编写专家"
             else:
-                # 原始 RAG 检索逻辑
-                hybrid_retriever, reranker = get_rag()
-                from INAGENT.rag.fallback_retrieval import _adaptive_rag_retrieval
-
-                context, retrieval_info, _ = _adaptive_rag_retrieval(
-                    hybrid_retriever=hybrid_retriever,
-                    reranker=reranker,
-                    job_content=req.message,
-                    top_k_retrieval=10,
-                    top_k_rerank=5,
-                    max_snippet_chars=500,
-                    max_context_chars=3000,
-                )
-                if isinstance(retrieval_info, dict):
-                    snippets = retrieval_info.get("retrieved_snippets", [])
+                # 统一走知识路由器
+                kr = get_knowledge_router()
+                retrieval = kr.retrieve(req.message, mode="explain", max_context_chars=10000)
+                context = retrieval.get("context", "")
 
             cleaned_ctx = _clean_context(context) if context else ""
             if not snippets and cleaned_ctx:
@@ -440,9 +429,9 @@ def _get_stream_model():
     """获取流式输出的 LLM 模型 (与主 model 配置相同，但 stream=True)。"""
     global _stream_model
     if _stream_model is None:
-        from INAGENT.utils.llm_config import get_siliconflow_config
+        from INAGENT.utils.llm_config import get_gateway_config
         from INAGENT.utils import env_utils
-        cfg = get_siliconflow_config()
+        cfg = get_gateway_config()
         api_key = cfg.get("api_key")
         if not api_key or env_utils.is_placeholder_value(api_key):
             raise ValueError("LLM 网关未配置")
@@ -458,24 +447,14 @@ def _get_stream_model():
 
 # ── 内部: 功能解释 (非流式 fallback) ─────────────────────────────────
 def _generate_explanation(query, hybrid_retriever, reranker, model):
-    """RAG 检索 + ChatAgent 解释。"""
-    from INAGENT.rag.fallback_retrieval import _adaptive_rag_retrieval
-
-    context, retrieval_info, _ = _adaptive_rag_retrieval(
-        hybrid_retriever=hybrid_retriever,
-        reranker=reranker,
-        job_content=query,
-        top_k_retrieval=10,
-        top_k_rerank=5,
-        max_snippet_chars=500,
-        max_context_chars=3000,
-    )
+    """通过知识路由器检索 + ChatAgent 解释。"""
+    kr = get_knowledge_router()
+    retrieval = kr.retrieve(query, mode="explain", max_context_chars=10000)
+    context = retrieval.get("context", "")
 
     snippets = []
-    if isinstance(retrieval_info, dict):
-        snippets = retrieval_info.get("retrieved_snippets", [])
     cleaned_ctx = _clean_context(context) if context else ""
-    if not snippets and cleaned_ctx:
+    if cleaned_ctx:
         snippets = [s[:500] for s in cleaned_ctx.split("\n\n") if s.strip()][:5]
 
     agent = ChatAgent(
@@ -554,7 +533,7 @@ _TEST_WRITE_SYSTEM_PROMPT = (
 def _generate_test_cases(query: str, model) -> tuple:
     """通过知识路由器获取分层上下文，调用 Agent 编写测试用例。"""
     router = get_knowledge_router()
-    retrieval = router.retrieve(query, mode="test_write", max_context_chars=8000)
+    retrieval = router.retrieve(query, mode="test_write", max_context_chars=20000)
 
     context = retrieval["context"]
     layers = retrieval["layers_used"]

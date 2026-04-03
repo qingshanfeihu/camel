@@ -4,6 +4,217 @@
 
 ---
 
+## [v10.0] - 2026-03-30
+
+### 🏗️ RAG 基础设施全面升级
+
+向量库、GraphRAG、检索流水线、Gateway 四大组件全面升级，实现 fail-stop 健康检查和并行检索。
+
+#### RAG 检索并行化
+
+| 项目 | 变更前 | 变更后 |
+|------|--------|--------|
+| 检索方式 | GraphRAG → 向量 串行 | ThreadPoolExecutor(2) 并行 |
+| 总延迟 | sum(GraphRAG, Vector) | max(GraphRAG, Vector) |
+| 向量库 Metadata | `document_category` 丢失 | `should_chunk=False` 保留分类 |
+| 向量库规模 | 17,660 points (部分) | 28,933 points (完整) |
+| GraphRAG | 空索引，silent degrade | 3412 entities, 88 communities |
+
+#### 健康检查 (Fail-Stop)
+
+新增 `check_rag_health()` (`web/deps.py`)：
+- Qdrant: collection 存在 + point_count > 0
+- GraphRAG: entities.parquet 可读 + entity_count > 0
+- Gateway: /health 返回 200
+- Reranker: /v1/rerank (可降级)
+- 关键服务不可用 → RuntimeError + sys.exit(1)
+
+#### Qdrant 锁清理
+
+`_find_qdrant_lock_holder()` (`run_review.py`): PowerShell 查找持有 `.lock` 的 PID，交互确认 kill。
+
+#### Gateway 并发 Embedding
+
+`/v1/embeddings` 大批量拆分 → `asyncio.gather` + `Semaphore(5)` 5 路并发。客户端 `embed_batch` 10→50。
+
+#### Gateway 用量统计
+
+新增 `GET /metrics/usage?days=30`：按模型按天统计 token 使用量。
+
+#### 向量库 SHA256 指纹
+
+`rag_meta.json` 记录 knowledge_base.json 的 SHA256，变更时自动触发重建。
+
+#### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `rag/unified_rag.py` | ThreadPoolExecutor 并行检索 |
+| `web/deps.py` | `check_rag_health()` fail-stop 健康检查 |
+| `run_review.py` | Qdrant 锁清理 + 健康检查调用 |
+| `workflow_config_generator.py` | `should_chunk=False` + `embed_batch=50` |
+| `review/review_memory.py` | VectorDBBlock 使用 Gateway embedding |
+| `llm_gateway/gateway.py` | 并发 embedding + 用量统计端点 |
+
+---
+
+## [v0.9.0] - 2026-03-30
+
+### 🔄 Self-Refine 自我改进循环 + 报告清洗
+
+引入 ReviewEvaluator 混合评分和 ReviewRefiner 迭代改进，解决 LLM 自评膨胀问题。
+
+#### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `review/review_evaluator.py` | 混合程序化+LLM 评分：coverage/structural/clarity=程序化，specificity/cross_cutting=LLM(上限0.8) |
+| `review/review_refiner.py` | 1 次迭代改进：first eval → improve → second eval |
+| `review/adversarial_verifier.py` | 对抗性验证器 |
+| `review/spec_decomposer.py` | 规格分解器 |
+
+#### 报告清洗 (5 阶段后处理)
+
+`_strip_internal_markers()` (`run_review.py`):
+1. 剥离 `<adversarial_verification>` 块
+2. 剥离 `[溯源校验摘要]` 块
+3. 内部标签替换为自然中文
+4. 移除 `REQ_xxx` 内部 ID
+5. Synthesis prompt 输出自然语言
+
+#### 效果
+
+Bug 121100 基线：初始评分 0.74 → 改进后 0.85（coverage 0.40→0.85, gap 8/20→17/20）。命中率 78%（+Refiner 后 coverage 不降反升，precision 方面 61%）。
+
+---
+
+## [v0.8.2] - 2026-03-29
+
+### 🔧 代码质量修复 — 命中率稳定 78%
+
+#### 关键修复
+
+| Fix | 文件 | 说明 |
+|-----|------|------|
+| #1 (Critical) | `review/pipeline.py` | KnowledgeToolkit 注入 `unified_rag`+`rules_engine`（不再创建独立 Qdrant 实例） |
+| #3 (Critical) | `review/review_judge.py` | JSON 提取始终 try `{`/`}` |
+| #2 | `review/pipeline.py` | input_builder.build() try/except + degraded ReviewInput fallback |
+| #17 | `review/review_judge.py` | agent.reset() 防上下文污染 |
+| #14 | `review/pipeline.py` | Workforce 1800s 整体超时 |
+| #4-#11 | `run_review.py` | 排序 priority, 空 key_questions 守卫, bracket depth JSON, 模块名 min-4-char 匹配 |
+
+#### CAMEL 框架修复
+
+- `single_agent_worker.py`: max_iteration 15→30（Agent 工具调用耗尽迭代） |
+
+---
+
+## [v0.8.1] - 2026-03-29
+
+### 🎯 评审命中率提升 — 72% → 83%
+
+针对 Bug 121100 (Cookie会话保持加密) 的 9 项人工评审基线，通过修复知识库构建、scope 分类器和 agent 提示词，将 AI 评审命中率从 72% (v0.8.0) 提升至 **83%**，超过 78% 目标线。
+
+#### 修复列表
+
+| Fix | 文件 | 说明 |
+|-----|------|------|
+| G | `run_review.py` | **横切面模块保护守卫**: 新增 `_CROSS_CUTTING_KEYWORDS` 集合，自动将含 ipv6/turbo/ha/stress/语言/主题 等关键词的模块从 out_of_scope 救回 in_scope |
+| G | `run_review.py` | **全局审计 prompt 增强**: 明确指示"横切面测试维度模块不得标为 out_of_scope" |
+| H | `review/pipeline.py` | **CoverageWorker 新增分析维度**: 配置并存/隔离 — 检查 group 与 global、多个 group 并存时互不影响 |
+| A | `workflow_config_generator.py` | GraphRAG `encoding_format` 参数修复 |
+| B1 | `rag/unified_rag.py` | `document_category` 白名单过滤路径修复 |
+| C | `review/product_memory.py` | ProductMemory embedding 模型初始化修复 |
+| D | `run_review.py` | Scope classifier 三项修复 (D1: 置信度阈值, D2: 跳过比例, D3: 安全守卫 ≥5 cases) |
+| E | `run_review.py` | 可观测性日志增强 (benchmark/debug 输出) |
+| F1 | `review/pipeline.py` | `max_iteration` 6→15 解除 Agent 推理限制 |
+| F2 | `run_review.py` | Fallback findings 提取 (Markdown→JSON 降级路径) |
+
+#### Scope 分类改进
+
+| 指标 | v0.8.0 (v3) | v0.8.1 (v4) |
+|------|-------------|-------------|
+| out_of_scope 模块数 | 15 | 6 |
+| 跳过（不评审）模块数 | 3 | 0 |
+| 命中率 | 72% (6.5/9) | **83% (7.5/9)** |
+| 总耗时 | 22 min | **7.7 min** |
+| Findings 数量 | 15 | 10 (更精准) |
+
+#### 知识库重建
+
+- 跳过 MinerU 转换（复用已有输出），仅执行 LLM 元数据提取 + Qdrant 索引
+- 28933 chunks from 26 reference JSONs (app=4493, cli=10386, ustack=382 blocks)
+- Qdrant 路径改为 `QDRANT_LOCAL_DIR` 环境变量指定，避免 Pylance MCP 文件锁冲突
+
+---
+
+## [v0.8.0] - 2026-03-27
+
+### 🧠 评审架构增强 — CAMEL 全模块协作
+
+将评审 pipeline 从"无工具 Agent"升级为"工具+记忆+共享记忆"的全 CAMEL 模块协作架构，使 Agent 能主动查询产品架构知识进行数据驱动的评审。
+
+#### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `scripts/enrich_cli_graph.py` | CLI 图谱 enrichment：为 101 模块自动推导 protocol_stack/address_family/layer/interface_types/related_modules/feature_tags |
+| `toolkits/product_skill_toolkit.py` | ProductSkillToolkit (4 tools): query_module_tech_profile, discover_cross_cutting_concerns, check_spec_constraints, query_module_relationships |
+| `review/product_memory.py` | ProductArchitectureMemory: 从 CLI 图谱构建 LongtermAgentMemory (VectorDBBlock) 预写入 101 模块画像 |
+| `review/review_judge.py` | ReviewJudge (LLM-as-Judge): 5 维度自动评分 (evidence/coverage/spec_alignment/actionability/traceability) |
+
+#### 变更文件
+
+| 文件 | 变更内容 |
+|------|---------|
+| `review/pipeline.py` | Worker Agent 装备工具 (11/5/5/5/6)、CoverageWorker 挂载 ProductMemory、Workforce `share_memory=True`、system prompt 增加工具使用引导 |
+| `rag/cli_graph_store.py` | `format_for_prompt()` 输出 enriched 技术特征 (协议栈/地址族/层级/接口/关联模块/功能标签) |
+| `run_review.py` | `_build_global_audit_prompt()` 每行模块信息附带 `tech=[proto=... | addr=... | layer=...]`；CLI graph 实例复用 |
+| `toolkits/__init__.py` | 新增 ProductSkillToolkit 导出 |
+| `knowledge_base/cli_keyword_graph.json` | 全量 enrichment: 101 模块新增 6 个技术特征字段 |
+
+#### 架构图变更
+
+- Pipeline B 评审图更新：新增 tools/memory/share_memory 说明、ReviewJudge 评估环节
+- 新增 §9 "v0.8.0 评审架构增强"：五层架构图、Agent 工具分配表、数据驱动横切面推理说明
+
+---
+
+## [v0.7.0] - 2026-06-24
+
+### 🏗️ Manager 统一评审架构
+
+将评审系统从"三路径并存"（PATH A=Sheet整体 / PATH B=模块并发 / PATH C=模块顺序）改造为 **Manager 统一控制单路径**。
+
+#### 架构变更
+
+- 废弃 `run_test_review.py`（已删除），重命名 `run_bug_to_case.py` → `run_review.py`
+- 删除 PATH B（ThreadPoolExecutor 并发模块评审）和 PATH C（顺序模块评审）
+- Manager 利用全局审计结果将模块分流为 skip / light / full，仅活跃模块送入 Pipeline
+- LLM 输出按 `### 模块 N/M:` 正则切分到各模块分别输出
+- 输出目录默认改为 `INAGENT/reports/`
+
+#### 删除的配置项
+
+| 配置项 | 原因 |
+|--------|------|
+| `runtime.use_module_process` | 子进程路径已删除 |
+| `concurrency.enable_module_concurrency` | PATH B 已删除 |
+| `concurrency.max_module_workers` | PATH B 已删除 |
+| `concurrency.enable_sheet_concurrency` | 依赖 use_module_process |
+| `concurrency.max_sheet_workers` | 同上 |
+| `manager_first.enabled` | 始终为 Manager 路径 |
+| `global_audit.skip_out_of_scope_modules` | out_scope 始终 skip |
+
+#### 新增函数
+
+| 函数 | 说明 |
+|------|------|
+| `_build_active_modules_text()` | 仅为活跃（非 skip）模块构建评审文本 |
+| `_split_answer_to_modules()` | 按正则切分 LLM 输出到各模块 |
+
+---
+
 ## [v0.6.0] - 2026-03-18
 
 ### 🔍 ReviewPipeline — 自主三步评审

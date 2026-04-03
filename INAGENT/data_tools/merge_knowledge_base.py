@@ -101,23 +101,47 @@ def merge_knowledge_base(
             logger.error("[merge] Failed to process %s: %s", json_file.name, e)
             continue
 
+    # Ingest validation: quality gate + metadata enrichment
+    try:
+        from INAGENT.data_tools.ingest_validator import IngestValidator
+        from INAGENT.rag.cli_graph_store import get_cli_graph_store
+
+        cli_graph = get_cli_graph_store()
+        validator = IngestValidator(cli_graph_store=cli_graph)
+        all_chunks = validator.validate_batch(all_chunks)
+        rpt = validator.report
+        logger.info(
+            "[merge] IngestValidator: %d accepted, %d rejected (short=%d, dup=%d, quarantine=%d), "
+            "rescued=%d, hierarchy=%d, module=%d",
+            rpt.accepted, rpt.rejected_short + rpt.duplicates + rpt.quarantined,
+            rpt.rejected_short, rpt.duplicates, rpt.quarantined,
+            rpt.category_rescued, rpt.hierarchy_backfilled, rpt.module_inferred,
+        )
+        validator.save_report(output_file.parent)
+    except Exception as e:
+        logger.warning("[merge] IngestValidator skipped: %s", e)
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
     logger.info("[merge] Writing merged file: %s", output_file)
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(all_chunks, f, ensure_ascii=False, indent=2)
 
     # Metadata completeness stats
-    stats = {k: 0 for k in ("product_module", "protocol_type", "step_type", "scenario_id")}
+    stats = {k: 0 for k in (
+        "product_module", "protocol_type", "step_type", "scenario_id",
+        "function_hierarchy", "document_category",
+    )}
     for chunk in all_chunks:
         meta = chunk.get("metadata", {})
         for key in stats:
-            if meta.get(key):
+            val = meta.get(key)
+            if val and val != "unknown":
                 stats[key] += 1
 
     logger.info("=" * 60)
     logger.info("[merge] Done")
     logger.info("  Total blocks: %d", len(all_chunks))
-    logger.info("  Deduplicated: %d", total_skipped)
+    logger.info("  Deduplicated (MD5): %d", total_skipped)
     logger.info("  Output: %s", output_file)
     logger.info("  Metadata coverage:")
     for key, count in stats.items():

@@ -398,9 +398,9 @@ class NSAESSHClient:
 
 def create_ssh_client_from_env() -> NSAESSHClient:
     """从环境变量创建 SSH 客户端实例"""
-    host = os.environ.get("LB_DEVICE_IP", "")
+    host = os.environ.get("LB_DEVICE_IP", "172.16.6.215")
     username = os.environ.get("LB_USERNAME", "admin")
-    password = os.environ.get("LB_PASSWORD", "")
+    password = os.environ.get("LB_PASSWORD", "admin")
     port = int(os.environ.get("LB_SSH_PORT", "22"))
 
     return NSAESSHClient(

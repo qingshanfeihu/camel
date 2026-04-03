@@ -118,6 +118,10 @@ MAX_TASK_RETRIES = 3
 MAX_PENDING_TASKS_LIMIT = 20
 TASK_TIMEOUT_SECONDS = 600.0
 DEFAULT_WORKER_POOL_SIZE = 10
+PIPELINE_DETERMINISTIC_ASSIGNMENT = os.getenv(
+    "CAMEL_PIPELINE_DETERMINISTIC_ASSIGNMENT",
+    "1",
+).lower() in {"1", "true", "yes"}
 
 
 class WorkforceState(Enum):
@@ -927,10 +931,26 @@ class Workforce(BaseNode):
         if isinstance(content, Task):
             task_content = content.content
             task_id = content.id
+            # Preserve additional_info: use add() with explicit dependencies
+            if wait_for is None:
+                if builder._last_parallel_tasks:
+                    wait_for = builder._last_parallel_tasks
+                    builder._last_parallel_tasks = []
+                else:
+                    raise ValueError(
+                        "wait_for cannot be empty for sync task and no "
+                        "parallel tasks found"
+                    )
+            builder.add(
+                content=task_content,
+                task_id=task_id,
+                dependencies=wait_for,
+                additional_info=content.additional_info,
+                auto_depend=False,
+            )
         else:
             task_content = content
-
-        builder.add_sync_task(task_content, wait_for, task_id)
+            builder.add_sync_task(task_content, wait_for, task_id)
         return self
 
     def pipeline_fork(
@@ -972,10 +992,30 @@ class Workforce(BaseNode):
 
         # Convert Task objects to content strings if needed
         if task_contents and isinstance(task_contents[0], Task):
-            # Extract content from Task objects
+            # Preserve Task metadata (id, additional_info) through builder
             task_list = cast(List[Task], task_contents)
-            content_list = [task.content for task in task_list]
-            builder.fork(content_list)
+
+            # Determine common dependency (last task in the chain)
+            deps = (
+                [builder._last_task_id]
+                if builder._last_task_id is not None
+                else None
+            )
+
+            parallel_task_ids = []
+            for task_obj in task_list:
+                builder.add(
+                    content=task_obj.content,
+                    task_id=task_obj.id,
+                    dependencies=deps,
+                    additional_info=task_obj.additional_info,
+                    auto_depend=False,
+                )
+                parallel_task_ids.append(task_obj.id)
+
+            # Update builder state for subsequent join
+            builder._last_task_id = None
+            builder._last_parallel_tasks = parallel_task_ids
         else:
             # task_contents is List[str] in else branch
             builder.fork(task_contents)  # type: ignore[arg-type]
@@ -1016,12 +1056,25 @@ class Workforce(BaseNode):
 
         # Convert Task object to parameters if needed
         if isinstance(content, Task):
-            task_content = content.content
-            task_id = content.id
+            # Use builder.add_sync_task logic but preserve additional_info
+            wait_for = None
+            if builder._last_parallel_tasks:
+                wait_for = builder._last_parallel_tasks
+                builder._last_parallel_tasks = []
+            if not wait_for:
+                raise ValueError(
+                    "pipeline_join requires preceding parallel tasks"
+                )
+            builder.add(
+                content=content.content,
+                task_id=content.id,
+                dependencies=wait_for,
+                additional_info=content.additional_info,
+                auto_depend=False,
+            )
         else:
             task_content = content
-
-        builder.join(task_content, task_id)
+            builder.join(task_content, task_id)
         return self
 
     def pipeline_build(self) -> Workforce:
@@ -3319,6 +3372,52 @@ class Workforce(BaseNode):
         valid_worker_ids = {child.node_id for child in self._children}
         return valid_worker_ids
 
+    @staticmethod
+    def _pipeline_task_keywords(task_id: str) -> List[str]:
+        tid = (task_id or "").lower()
+        if "coverage" in tid:
+            return ["coverageanalysisworker", "覆盖度"]
+        if "cli" in tid:
+            return ["clisyntaxcheckworker", "cli"]
+        if "spec" in tid:
+            return ["speccomplianceworker", "规范"]
+        if "load" in tid or "stress" in tid:
+            return ["loadstressworker", "负载", "压力"]
+        if "synthesis" in tid or "review" in tid:
+            return ["reviewsynthesisworker", "综合"]
+        return []
+
+    def _find_pipeline_assignee_id(self, task: Task) -> Optional[str]:
+        keywords = self._pipeline_task_keywords(task.id)
+        for child in self._children:
+            desc = (getattr(child, "description", "") or "").lower()
+            if keywords and any(k in desc for k in keywords):
+                return child.node_id
+        for child in self._children:
+            desc = (getattr(child, "description", "") or "").lower()
+            if (task.id or "").lower() in desc:
+                return child.node_id
+        if self._children:
+            return self._children[0].node_id
+        return None
+
+    def _assign_pipeline_tasks_deterministically(
+        self, tasks: List[Task]
+    ) -> TaskAssignResult:
+        assignments: List[TaskAssignment] = []
+        for task in tasks:
+            assignee_id = self._find_pipeline_assignee_id(task)
+            if not assignee_id:
+                continue
+            assignments.append(
+                TaskAssignment(
+                    task_id=task.id,
+                    assignee_id=assignee_id,
+                    dependencies=self._task_dependencies.get(task.id, []),
+                )
+            )
+        return TaskAssignResult(assignments=assignments)
+
     def _call_coordinator_for_assignment(
         self, tasks: List[Task], invalid_ids: Optional[List[str]] = None
     ) -> TaskAssignResult:
@@ -3962,7 +4061,15 @@ class Workforce(BaseNode):
                 f"Found {len(tasks_to_assign)} new tasks. "
                 f"Requesting assignment..."
             )
-            batch_result = await self._find_assignee(tasks_to_assign)
+            if (
+                self.mode == WorkforceMode.PIPELINE
+                and PIPELINE_DETERMINISTIC_ASSIGNMENT
+            ):
+                batch_result = self._assign_pipeline_tasks_deterministically(
+                    tasks_to_assign
+                )
+            else:
+                batch_result = await self._find_assignee(tasks_to_assign)
             logger.debug(
                 f"Coordinator returned assignments:\n"
                 f"{json.dumps(batch_result.model_dump(), indent=2)}"
@@ -4179,6 +4286,9 @@ class Workforce(BaseNode):
             bool: True if workforce should halt, False otherwise
         """
         task.failure_count += 1
+        max_retries = (
+            1 if self.mode == WorkforceMode.PIPELINE else MAX_TASK_RETRIES
+        )
 
         # Determine detailed failure information
         failure_reason = task.result or "Unknown error"
@@ -4187,14 +4297,18 @@ class Workforce(BaseNode):
 
         logger.error(
             f"Task {task.id} failed (attempt "
-            f"{task.failure_count}/{MAX_TASK_RETRIES}): {detailed_error}"
+            f"{task.failure_count}/{max_retries}): {detailed_error}"
         )
 
-        print(
-            f"{Fore.RED}❌ Task {task.id} failed "
-            f"(attempt {task.failure_count}/{MAX_TASK_RETRIES}): "
+        failed_msg = (
+            f"{Fore.RED}[Task Failed] {task.id} "
+            f"(attempt {task.failure_count}/{max_retries}): "
             f"{failure_reason}{Fore.RESET}"
         )
+        try:
+            print(failed_msg)
+        except UnicodeEncodeError:
+            print(f"[Task Failed] {task.id} (attempt {task.failure_count}/{max_retries})")
 
         task_failed_event = TaskFailedEvent(
             task_id=task.id,
@@ -4210,7 +4324,7 @@ class Workforce(BaseNode):
             cb.log_task_failed(task_failed_event)
 
         # Check for immediate halt conditions after max retries.
-        if task.failure_count >= MAX_TASK_RETRIES:
+        if task.failure_count >= max_retries:
             # Intent: handle max retry failures differently per mode.
             # Pipeline mode continues to allow downstream recovery.
             # Auto-decompose mode halts to avoid cascading errors.
@@ -4219,7 +4333,7 @@ class Workforce(BaseNode):
                 # PIPELINE: Mark as failed but continue workflow
                 # Intent: Failed tasks pass error info to downstream tasks
                 logger.warning(
-                    f"Task {task.id} failed after {MAX_TASK_RETRIES} retries "
+                    f"Task {task.id} failed after {max_retries} retries "
                     f"in PIPELINE mode. Marking as failed and allowing the "
                     f"workflow to continue. Error: {failure_reason}"
                 )
@@ -4238,7 +4352,7 @@ class Workforce(BaseNode):
             # Intent: Stop execution to prevent cascading failures
             logger.error(
                 f"Task {task.id} has exceeded maximum retry attempts "
-                f"({MAX_TASK_RETRIES}). Final failure reason: "
+                f"({max_retries}). Final failure reason: "
                 f"{detailed_error}. "
                 f"Task content: '{task.content}'"
             )
@@ -4269,7 +4383,7 @@ class Workforce(BaseNode):
             # Intent: Fast recovery for predefined workflows
             logger.info(
                 f"Task {task.id} failed in PIPELINE mode. Will retry "
-                f"(attempt {task.failure_count}/{MAX_TASK_RETRIES})"
+                f"(attempt {task.failure_count}/{max_retries})"
             )
             # Reset task to pending and retry with same configuration
             task.state = TaskState.OPEN
@@ -4317,7 +4431,7 @@ class Workforce(BaseNode):
                 exc_info=True,
             )
             # If max retries reached, halt the workforce
-            if task.failure_count >= MAX_TASK_RETRIES:
+            if task.failure_count >= max_retries:
                 self._completed_tasks.append(task)
                 return True
             self._completed_tasks.append(task)
@@ -4814,6 +4928,12 @@ class Workforce(BaseNode):
 
                 # Process the returned task based on its state
                 if returned_task.state == TaskState.DONE:
+                    # PIPELINE mode follows fixed DAG execution and should
+                    # avoid adaptive retries that can cause long loops.
+                    if self.mode == WorkforceMode.PIPELINE:
+                        await self._handle_completed_task(returned_task)
+                        continue
+
                     # Check if the "completed" task actually failed to provide
                     # useful results
                     if is_task_result_insufficient(returned_task):

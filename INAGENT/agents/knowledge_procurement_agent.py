@@ -1,0 +1,567 @@
+# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+"""
+采购员 Agent (Knowledge Procurement Agent)
+
+职责：对 auto_convert 产出的 chunk 进行三层筛查，
+决定每个 chunk 是否进入知识库，以及以什么形态进入。
+
+三层：
+  Layer 1: 机械检查（长度 / 空白内容）— 无 LLM，零代价
+  Layer 2: 采购员 LLM 判断（理解 CLI 树的需求，按 source_file 批处理）
+  Layer 3: 元数据合法性检查 — 无 LLM
+
+输出 action：
+  accept         → 正常入库
+  reject         → 不入库，写 reject_log.jsonl
+  pending_review → 置信度不足，待人工确认，写 pending_review.jsonl
+  staging        → 元数据 schema gap，暂存等 patch，写 schema_gaps.jsonl
+
+职责或契约变更时，请同步更新：
+  INAGENT/docs/agents/sessions/03-procurement.md
+  与 .cursor/rules/kb-session-procurement.mdc
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Tuple
+
+from camel.agents import ChatAgent
+from camel.messages import BaseMessage
+from camel.models import BaseModelBackend
+
+from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
+from INAGENT.utils.env_utils import load_inagent_env
+
+logger = logging.getLogger(__name__)
+
+_INAGENT_ROOT = Path(__file__).resolve().parent.parent
+_KB_LOGS_DIR = _INAGENT_ROOT / "knowledge_base" / "logs"
+
+ActionType = Literal["accept", "reject", "pending_review", "staging"]
+TargetKB = Literal["product", "test", "unknown"]
+SchemaGapType = Literal["new_category", "new_module", "new_entity", "new_entity_attribute"]
+
+
+# ── Data types ────────────────────────────────────────────────────────────────
+
+@dataclass
+class ProcurementDecision:
+    action: ActionType
+    target_kb: TargetKB
+    confidence: float
+    reason: str
+    schema_gap: Optional[SchemaGapType] = None
+    suggested_value: Optional[str] = None
+
+
+@dataclass
+class ChunkDecision:
+    chunk: Dict
+    decision: ProcurementDecision
+    source_file: str = ""
+    chunk_index: int = 0
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+
+_KB_REFERENCE_PATH = _INAGENT_ROOT / "knowledge_base" / "reference" / "knowledge_base.json"
+_MODULE_COUNT_THRESHOLD = 10
+
+
+def _load_known_modules(min_count: int = _MODULE_COUNT_THRESHOLD) -> List[str]:
+    """Read product_module distribution from knowledge_base.json.
+
+    Returns sorted list of modules appearing >= min_count times.
+    Falls back to empty list if file is missing or unreadable.
+    """
+    if not _KB_REFERENCE_PATH.exists():
+        return []
+    try:
+        data = json.loads(_KB_REFERENCE_PATH.read_text(encoding="utf-8"))
+        counts: Dict[str, int] = {}
+        for item in data:
+            m = item.get("metadata", {}).get("product_module", "")
+            if m and m not in ("unknown", ""):
+                counts[m] = counts.get(m, 0) + 1
+        return sorted(k for k, v in counts.items() if v >= min_count)
+    except Exception:
+        return []
+
+
+def _build_system_prompt(
+    product_name: str,
+    known_modules: Optional[List[str]] = None,
+) -> str:
+    categories_str = "\n".join(f"  - {c}" for c in DOCUMENT_CATEGORIES)
+    if known_modules:
+        modules_str = "、".join(known_modules)
+        modules_section = (
+            "\n【当前知识库已有功能模块（自动同步）】\n"
+            f"  {modules_str}\n"
+            "  — 若内容涉及以上模块，优先标记为 product。\n"
+            "  — 若内容属于某模块但该模块不在列表中，照常 accept，reason 中注明模块名。\n"
+        )
+    else:
+        modules_section = ""
+    return f"""\
+你是 {product_name} 知识库的内容质量过滤器（采购员）。
+
+你的职责是判断每段内容是否值得进入知识库，以及属于哪类知识。
+你不需要了解具体的命令树结构，只需判断内容本身的质量和归属。
+
+【判断标准 — 只有一个核心问题】
+  这段内容，对理解/配置/测试该产品有实质价值吗？
+  即：它包含功能说明、命令语法、配置示例、测试步骤、或架构原理吗？
+
+【接受的内容（标注 target_kb）】
+  product（产品知识）：功能说明、配置示例、架构原理、CLI 语法参考、设计规格、接口描述
+  test（测试知识）：测试用例、测试策略、Bug 修复说明、评审规则、缺陷分析
+
+【必须拒绝的内容】
+  - 纯目录页（只有标题和页码，无实质内容）
+  - 版权声明、商标声明、法律合规声明
+  - 修订历史表（仅有版本号和日期）
+  - 空白页、图表列表、纯缩略词/术语表（无解释）
+  - 占位模板内容（如 "XXX子功能"、"YYY子功能"）
+
+【注意】：标题看似"附录"或"说明"，但内容含具体命令语法、配置参数或行为描述 → 应接受。
+{modules_section}
+【已知文档分类体系】
+{categories_str}
+
+【输出格式】
+对每个 chunk 输出一个 JSON 对象：
+{{
+  "idx": <chunk索引>,
+  "action": "accept" | "reject" | "pending_review" | "staging",
+  "target_kb": "product" | "test" | "unknown",
+  "confidence": 0.0~1.0,
+  "reason": "一句话说明原因",
+  "suggested_category": "建议的分类（来自已知分类体系；若为 staging 则填建议的新分类名）"
+}}
+
+规则：
+- confidence < 0.6 时使用 "pending_review"，不武断判定
+- "staging" 仅用于内容有价值但分类不在已知体系中的情况
+- 返回 JSON 数组，按 idx 顺序排列，不输出其他文字
+"""
+
+
+# ── Agent builder ─────────────────────────────────────────────────────────────
+
+def build_procurement_agent(model: BaseModelBackend, product_name: str) -> ChatAgent:
+    """Build the procurement agent (采购员).
+
+    Dynamically loads known product modules from knowledge_base.json so the
+    prompt reflects the current knowledge base state without manual maintenance.
+    """
+    load_inagent_env()
+    known_modules = _load_known_modules()
+    return ChatAgent(
+        system_message=BaseMessage.make_assistant_message(
+            role_name="Knowledge Procurement Agent",
+            content=_build_system_prompt(product_name, known_modules),
+        ),
+        model=model,
+    )
+
+
+def build_procurement_prompt(source_file: str, chunks: List[Dict]) -> str:
+    """Build per-source-file evaluation prompt for Layer 2."""
+    lines = [
+        f"来源文档：{source_file}",
+        f"共 {len(chunks)} 个片段，请逐一评估。",
+        "",
+        "以下是各片段内容（格式：[IDX] section_title / 内容前500字）：",
+        "",
+    ]
+    for i, chunk in enumerate(chunks):
+        meta = chunk.get("metadata", {})
+        sec = meta.get("section_title", "")
+        content = (chunk.get("page_content") or chunk.get("text") or "")[:500]
+        header = f"[{i}] {sec}" if sec else f"[{i}]"
+        lines.append(header)
+        lines.append(content)
+        lines.append("---")
+    lines += [
+        "",
+        "请返回 JSON 数组，每个元素对应一个片段（按 idx 顺序）。",
+        '格式：[{"idx":0,"action":"...","target_kb":"...","confidence":0.9,"reason":"...","suggested_category":"..."},...]',
+        "只返回 JSON，不要输出其他文字。",
+    ]
+    return "\n".join(lines)
+
+
+# ── Main class ────────────────────────────────────────────────────────────────
+
+class KnowledgeProcurementAgent:
+    """
+    采购员：对 auto_convert 输出的 chunk 进行三层筛查。
+
+    用法::
+
+        agent = KnowledgeProcurementAgent(model=model)
+        decisions = agent.evaluate_batch(chunks)
+        agent.write_logs(decisions)
+        accepted = agent.filter_accepted(decisions)
+    """
+
+    def __init__(
+        self,
+        model: BaseModelBackend,
+        product_name: str = "NSAE (InfosecOS) 负载均衡器",
+        registry_path: Optional[Path] = None,
+        _chat_agent=None,
+    ):
+        self._chat_agent = (
+            _chat_agent if _chat_agent is not None
+            else build_procurement_agent(model, product_name)
+        )
+        self._registry = self._load_registry(registry_path)
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    def evaluate_batch(self, chunks: List[Dict]) -> List[ChunkDecision]:
+        """
+        Evaluate all chunks through three layers.
+
+        Chunks are grouped by source_file so Layer 2 LLM calls are
+        batched per document (not per chunk), reducing token usage.
+        """
+        decisions: List[ChunkDecision] = []
+        pending_for_llm: Dict[str, List[Tuple[int, Dict]]] = defaultdict(list)
+
+        for global_idx, chunk in enumerate(chunks):
+            meta = chunk.get("metadata", {})
+            source_file = meta.get("source_file", "unknown")
+            result = self._layer1_mechanical(chunk)
+            if result is not None:
+                decisions.append(ChunkDecision(
+                    chunk=chunk,
+                    decision=result,
+                    source_file=source_file,
+                    chunk_index=global_idx,
+                ))
+            else:
+                pending_for_llm[source_file].append((global_idx, chunk))
+
+        layer2_map: Dict[int, ProcurementDecision] = {}
+        for source_file, indexed in pending_for_llm.items():
+            batch = self._layer2_llm_batch(source_file, indexed)
+            layer2_map.update(batch)
+
+        for sublist in pending_for_llm.values():
+            for global_idx, chunk in sublist:
+                l2 = layer2_map.get(global_idx) or ProcurementDecision(
+                    action="pending_review",
+                    target_kb="unknown",
+                    confidence=0.0,
+                    reason="Layer 2 未返回结果，默认待审",
+                )
+                final = self._layer3_schema(chunk, l2)
+                meta = chunk.get("metadata", {})
+                decisions.append(ChunkDecision(
+                    chunk=chunk,
+                    decision=final,
+                    source_file=meta.get("source_file", "unknown"),
+                    chunk_index=global_idx,
+                ))
+
+        decisions.sort(key=lambda d: d.chunk_index)
+        return decisions
+
+    def filter_accepted(self, decisions: List[ChunkDecision]) -> List[Dict]:
+        """Return accepted chunks with corrected metadata applied."""
+        result = []
+        for cd in decisions:
+            if cd.decision.action != "accept":
+                continue
+            chunk = {**cd.chunk}
+            if cd.decision.suggested_value and cd.decision.suggested_value in DOCUMENT_CATEGORIES:
+                chunk.setdefault("metadata", {})["document_category"] = cd.decision.suggested_value
+            result.append(chunk)
+        return result
+
+    def write_logs(
+        self,
+        decisions: List[ChunkDecision],
+        log_dir: Optional[Path] = None,
+    ) -> Dict[str, int]:
+        """Write per-action JSONL logs. Returns counts per action."""
+        log_dir = log_dir or _KB_LOGS_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        buckets: Dict[str, List[Dict]] = defaultdict(list)
+        for cd in decisions:
+            entry = {
+                "chunk_index": cd.chunk_index,
+                "source_file": cd.source_file,
+                "section_title": cd.chunk.get("metadata", {}).get("section_title", ""),
+                "content_preview": (
+                    cd.chunk.get("page_content") or cd.chunk.get("text") or ""
+                )[:200],
+                "action": cd.decision.action,
+                "target_kb": cd.decision.target_kb,
+                "confidence": cd.decision.confidence,
+                "reason": cd.decision.reason,
+                "schema_gap": cd.decision.schema_gap,
+                "suggested_value": cd.decision.suggested_value,
+                "timestamp": datetime.now().isoformat(),
+            }
+            buckets[cd.decision.action].append(entry)
+
+        file_map = {
+            "reject": "reject_log.jsonl",
+            "pending_review": "pending_review.jsonl",
+            "staging": "schema_gaps.jsonl",
+        }
+        counts: Dict[str, int] = {}
+        for action, entries in buckets.items():
+            counts[action] = len(entries)
+            if action == "accept":
+                continue
+            fname = file_map.get(action, f"{action}.jsonl")
+            out_path = log_dir / fname
+            with out_path.open("a", encoding="utf-8") as fh:
+                for entry in entries:
+                    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            logger.info("[采购员] 写入日志 %s: %d 条", fname, len(entries))
+
+        counts.setdefault("accept", len(buckets.get("accept", [])))
+        return counts
+
+    # ── layers ────────────────────────────────────────────────────────────────
+
+    def _layer1_mechanical(self, chunk: Dict) -> Optional[ProcurementDecision]:
+        """Cheap checks. Returns None to pass to Layer 2."""
+        content = (chunk.get("page_content") or chunk.get("text") or "").strip()
+        if len(content) < 50:
+            return ProcurementDecision(
+                action="reject",
+                target_kb="unknown",
+                confidence=1.0,
+                reason=f"内容长度 {len(content)} 字符，低于 50 字符最低门槛",
+            )
+        return None
+
+    def _layer2_llm_batch(
+        self,
+        source_file: str,
+        indexed_chunks: List[Tuple[int, Dict]],
+    ) -> Dict[int, ProcurementDecision]:
+        """One LLM call per source_file. Returns {global_idx: decision}."""
+        results: Dict[int, ProcurementDecision] = {}
+        if not indexed_chunks:
+            return results
+
+        local_chunks = [chunk for _, chunk in indexed_chunks]
+        prompt = build_procurement_prompt(source_file, local_chunks)
+
+        try:
+            msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
+            response = self._chat_agent.step(msg)
+            raw = response.msgs[0].content if response.msgs else ""
+            parsed = self._parse_llm_json(raw, len(local_chunks))
+        except Exception as exc:
+            logger.warning("[采购员] Layer 2 LLM 失败 (%s): %s", source_file, exc)
+            for global_idx, _ in indexed_chunks:
+                results[global_idx] = ProcurementDecision(
+                    action="pending_review",
+                    target_kb="unknown",
+                    confidence=0.0,
+                    reason=f"LLM 调用异常: {exc}",
+                )
+            return results
+
+        for local_idx, (global_idx, _) in enumerate(indexed_chunks):
+            item = parsed.get(local_idx)
+            if item is None:
+                results[global_idx] = ProcurementDecision(
+                    action="pending_review",
+                    target_kb="unknown",
+                    confidence=0.0,
+                    reason="LLM 未返回该片段评估结果",
+                )
+                continue
+            confidence = float(item.get("confidence", 0.5))
+            action: ActionType = item.get("action", "pending_review")
+            if action not in ("accept", "reject", "pending_review", "staging"):
+                action = "pending_review"
+            if confidence < 0.6 and action in ("accept", "reject"):
+                action = "pending_review"
+            results[global_idx] = ProcurementDecision(
+                action=action,
+                target_kb=item.get("target_kb", "unknown"),
+                confidence=confidence,
+                reason=item.get("reason", ""),
+                suggested_value=item.get("suggested_category"),
+            )
+        return results
+
+    def _layer3_schema(
+        self, chunk: Dict, decision: ProcurementDecision
+    ) -> ProcurementDecision:
+        """Schema compatibility check. May promote action to 'staging'."""
+        if decision.action in ("reject", "pending_review"):
+            return decision
+
+        meta = chunk.get("metadata", {})
+        category = decision.suggested_value or meta.get("document_category", "")
+        product_module = meta.get("product_module", "")
+
+        if category and category not in DOCUMENT_CATEGORIES:
+            return ProcurementDecision(
+                action="staging",
+                target_kb=decision.target_kb,
+                confidence=decision.confidence,
+                reason=f"document_category '{category}' 不在已知分类体系，等待 schema patch",
+                schema_gap="new_category",
+                suggested_value=category,
+            )
+
+        known_modules = set(self._registry.get("modules", {}).keys())
+        if (
+            product_module
+            and product_module not in ("unknown", "")
+            and known_modules
+            and product_module not in known_modules
+        ):
+            return ProcurementDecision(
+                action="staging",
+                target_kb=decision.target_kb,
+                confidence=decision.confidence,
+                reason=f"product_module '{product_module}' 不在产品模块注册表，等待 schema patch",
+                schema_gap="new_module",
+                suggested_value=product_module,
+            )
+
+        return decision
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _parse_llm_json(self, raw: str, expected: int) -> Dict[int, Dict]:
+        """Parse LLM JSON array → {local_idx: item_dict}."""
+        raw = raw.strip()
+        fence = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
+        if fence:
+            raw = fence.group(1).strip()
+        start, end = raw.find("["), raw.rfind("]")
+        if start == -1 or end == -1:
+            logger.warning("[采购员] LLM 响应中未找到 JSON 数组")
+            return {}
+        try:
+            data = json.loads(raw[start: end + 1])
+        except json.JSONDecodeError:
+            try:
+                import json_repair  # type: ignore
+                data = json_repair.loads(raw[start: end + 1])
+            except Exception:
+                logger.warning("[采购员] LLM JSON 解析失败")
+                return {}
+        if not isinstance(data, list):
+            return {}
+        return {
+            int(item["idx"]): item
+            for item in data
+            if isinstance(item, dict) and "idx" in item
+        }
+
+    def _load_registry(self, path: Optional[Path]) -> Dict:
+        candidates = [
+            path,
+            _INAGENT_ROOT / "knowledge_base" / "product_modules_registry.json",
+        ]
+        for p in candidates:
+            if p and p.exists():
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+        return {}
+
+
+# ── CLI smoke test ────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    """
+    快速冒烟测试：使用真实 LLM 跑一批样本 chunk，观察采购员的判断。
+    运行方式：
+        cd c:\\SynologyDrive\\INFOAGEN
+        python -m INAGENT.agents.knowledge_procurement_agent
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+    from INAGENT.utils.env_utils import load_inagent_env
+    from INAGENT.web.deps import get_llm_model
+
+    load_inagent_env()
+    model = get_llm_model()
+
+    SAMPLE_CHUNKS = [
+        {
+            "page_content": "slb virtual http <name> <vip> <port>\n配置 HTTP 类型的虚拟服务。参数 name 为服务名称，vip 为虚拟 IP 地址，port 为监听端口（1-65535）。",
+            "metadata": {"source_file": "cli.pdf", "section_title": "SLB 虚拟服务配置", "document_category": "cli/reference", "product_module": "SLB"},
+        },
+        {
+            "page_content": "测试用例 #101：配置 HTTP 虚拟服务后，验证流量正常转发。步骤：1. 配置 VIP 2. 绑定 real server 3. 发起 HTTP 请求。预期结果：返回 200 OK。",
+            "metadata": {"source_file": "Test_List_HTTP2.xlsx", "section_title": "HTTP SLB 基础功能", "document_category": "test/test_list", "product_module": "SLB"},
+        },
+        {
+            "page_content": "目录\n1. 概述 ........ 1\n2. 配置说明 ........ 5\n3. 故障排查 ........ 12",
+            "metadata": {"source_file": "app.pdf", "section_title": "目录", "document_category": "spec/design"},
+        },
+        {
+            "page_content": "Copyright © 2024 InfosecOS. All Rights Reserved. 本文档所含信息属于保密信息，未经授权不得复制或传播。",
+            "metadata": {"source_file": "cli.pdf", "section_title": "版权声明"},
+        },
+        {
+            "page_content": "XXX子功能 CLI 测试用例模板\n用例编号：XXX-001\n测试功能：XXX\n测试步骤：YYY",
+            "metadata": {"source_file": "XXX子功能 CLI 测试用例.xlsx", "section_title": "模板"},
+        },
+        {
+            "page_content": "见第3章",
+            "metadata": {"source_file": "app.pdf"},
+        },
+        {
+            "page_content": "NSAE 设备支持通过 SNMP v3 进行监控集成，可配置 trap 接收端点，支持 MIB-II 标准对象标识符查询。",
+            "metadata": {"source_file": "monitoring_guide.pdf", "section_title": "SNMP 监控集成", "document_category": "monitoring/integration", "product_module": "SLB"},
+        },
+    ]
+
+    agent = KnowledgeProcurementAgent(model=model)
+    decisions = agent.evaluate_batch(SAMPLE_CHUNKS)
+
+    print("\n========== 采购员判断结果 ==========")
+    for cd in decisions:
+        d = cd.decision
+        content_preview = (cd.chunk.get("page_content") or "")[:60].replace("\n", " ")
+        print(f"[{cd.chunk_index}] {d.action:15s} | {d.target_kb:8s} | conf={d.confidence:.2f} | {d.reason}")
+        print(f"     内容: {content_preview}...")
+        if d.schema_gap:
+            print(f"     schema_gap={d.schema_gap}, suggested={d.suggested_value}")
+        print()
+
+    import tempfile
+    counts = agent.write_logs(decisions, log_dir=Path(tempfile.mkdtemp()))
+    print("日志统计:", counts)
+    accepted = agent.filter_accepted(decisions)
+    print(f"通过入库: {len(accepted)} 个 chunk")

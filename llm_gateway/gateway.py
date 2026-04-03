@@ -19,6 +19,7 @@ import httpx
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -48,6 +49,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from llm_gateway.rate_limiter import UnifiedRateLimiter
 from llm_gateway.multi_model_caller import MultiModelCaller
+
+
+def _force_utf8_console() -> None:
+    """Force UTF-8 stdout/stderr on Windows terminals."""
+    if os.name != "nt":
+        return
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_force_utf8_console()
 
 # Configure logging
 logging.basicConfig(
@@ -117,6 +134,8 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0
     logit_bias: Optional[Dict[str, float]] = None
     response_format: Optional[Dict[str, str]] = None  # e.g. {"type": "json_object"}
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None
     user: Optional[str] = None
 
 
@@ -146,14 +165,37 @@ reranker_clients: Dict[str, AsyncOpenAI] = {}
 reranker_http_clients: Dict[str, httpx.AsyncClient] = {}
 reranker_configs: Dict[str, Dict[str, Any]] = {}
 
+from datetime import datetime, date, timedelta
+from collections import defaultdict
+
 request_stats = {
     "chat": {"count": 0, "errors": 0, "latencies": deque(maxlen=2000)},
     "embeddings": {"count": 0, "errors": 0, "latencies": deque(maxlen=2000)},
     "rerank": {"count": 0, "errors": 0, "latencies": deque(maxlen=2000)},
 }
 
+_usage_by_day: Dict[str, Dict[str, Any]] = defaultdict(lambda: defaultdict(lambda: {
+    "count": 0, "errors": 0,
+    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+}))
 
-def _record_request(metric_key: str, elapsed: float, is_error: bool = False) -> None:
+_usage_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {
+    "count": 0, "errors": 0,
+    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+})
+
+_gateway_start_time: float = time.time()
+
+
+def _record_request(
+    metric_key: str,
+    elapsed: float,
+    is_error: bool = False,
+    model_id: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+) -> None:
     stats = request_stats.get(metric_key)
     if stats is None:
         return
@@ -161,6 +203,25 @@ def _record_request(metric_key: str, elapsed: float, is_error: bool = False) -> 
     if is_error:
         stats["errors"] += 1
     stats["latencies"].append(elapsed)
+
+    bucket = model_id or metric_key
+    today = date.today().isoformat()
+
+    day_entry = _usage_by_day[today][bucket]
+    day_entry["count"] += 1
+    if is_error:
+        day_entry["errors"] += 1
+    day_entry["prompt_tokens"] += prompt_tokens
+    day_entry["completion_tokens"] += completion_tokens
+    day_entry["total_tokens"] += total_tokens
+
+    totals = _usage_totals[bucket]
+    totals["count"] += 1
+    if is_error:
+        totals["errors"] += 1
+    totals["prompt_tokens"] += prompt_tokens
+    totals["completion_tokens"] += completion_tokens
+    totals["total_tokens"] += total_tokens
 
 
 def _mask_api_key(api_key: str) -> str:
@@ -363,7 +424,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"[Gateway] Registered reranker model: {model_id} ({model_config['model']})")
     
     logger.info("=" * 80)
-    logger.info(f"[Gateway] ✓ Initialization complete")
+    logger.info("[Gateway] Initialization complete")
     logger.info(f"[Gateway] Mode: {calling_mode}")
     logger.info(f"[Gateway] Chat models: {len(chat_caller.models)}")
     logger.info(f"[Gateway] Embedding models: {len(embedding_clients)}")
@@ -442,6 +503,48 @@ async def request_metrics():
     return JSONResponse(content=payload)
 
 
+@app.get("/metrics/usage")
+async def usage_metrics(days: int = 30):
+    """Token usage breakdown by model and day.
+
+    Query params:
+        days: number of past days to include (default 30)
+    """
+    today = date.today()
+    start_date = today - timedelta(days=days - 1)
+
+    daily: Dict[str, Dict[str, Any]] = {}
+    weekly: Dict[str, Dict[str, int]] = defaultdict(lambda: {
+        "count": 0, "errors": 0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+    })
+
+    for day_str, models in sorted(_usage_by_day.items()):
+        try:
+            d = date.fromisoformat(day_str)
+        except ValueError:
+            continue
+        if d < start_date:
+            continue
+        daily[day_str] = dict(models)
+
+        week_key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+        for _model, stats in models.items():
+            w = weekly[week_key]
+            for k in ("count", "errors", "prompt_tokens", "completion_tokens", "total_tokens"):
+                w[k] += stats.get(k, 0)
+
+    uptime_s = time.time() - _gateway_start_time
+    uptime_h = round(uptime_s / 3600, 2)
+
+    return JSONResponse(content={
+        "uptime_hours": uptime_h,
+        "totals_by_model": dict(_usage_totals),
+        "daily": daily,
+        "weekly": dict(weekly),
+    })
+
+
 class ModeUpdateRequest(BaseModel):
     """Update calling mode for chat models."""
     mode: str
@@ -487,10 +590,10 @@ async def chat_completions(request: ChatCompletionRequest):
     try:
         # Log detailed request information
         logger.info(
-            f"[Gateway] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            "[Gateway] ------------------------------------------------------------------"
         )
         logger.info(
-            f"[Gateway] 📥 INCOMING REQUEST: {len(request.messages)} messages, "
+            f"[Gateway] INCOMING REQUEST: {len(request.messages)} messages, "
             f"model={request.model}, stream={request.stream}"
         )
         
@@ -509,7 +612,7 @@ async def chat_completions(request: ChatCompletionRequest):
         estimated_tokens = sum(
             len(str(msg.get("content", ""))) for msg in request.messages
         ) // 4 + 100
-        logger.info(f"[Gateway] 📊 Estimated input tokens: {estimated_tokens}")
+        logger.info(f"[Gateway] Estimated input tokens: {estimated_tokens}")
         
         # Check rate limits for all models (they'll be checked individually too)
         # This is just a pre-check
@@ -526,6 +629,10 @@ async def chat_completions(request: ChatCompletionRequest):
         )
         if request.response_format is not None:
             call_kwargs["response_format"] = request.response_format
+        if request.tools is not None:
+            call_kwargs["tools"] = request.tools
+        if request.tool_choice is not None:
+            call_kwargs["tool_choice"] = request.tool_choice
         result = await chat_caller.call(**call_kwargs)
         
         if not result["success"]:
@@ -552,7 +659,7 @@ async def chat_completions(request: ChatCompletionRequest):
                     error_chunk = {"error": str(e)}
                     yield f"data: {json.dumps(error_chunk)}\n\n"
                 finally:
-                    _record_request("chat", time.time() - start_time)
+                    _record_request("chat", time.time() - start_time, model_id=result.get("model_id", ""))
             
             return StreamingResponse(
                 stream_generator(),
@@ -578,24 +685,24 @@ async def chat_completions(request: ChatCompletionRequest):
                 content_preview = response_content[:500] + f"... (total {len(response_content)} chars)"
             else:
                 content_preview = response_content
-            logger.info(f"[Gateway] 📤 RESPONSE CONTENT: {content_preview}")
+            logger.info(f"[Gateway] RESPONSE CONTENT: {content_preview}")
         
         # Log token usage if available
         if hasattr(response, 'usage') and response.usage:
             logger.info(
-                f"[Gateway] 📊 TOKEN USAGE: "
+                        f"[Gateway] TOKEN USAGE: "
                 f"prompt={response.usage.prompt_tokens}, "
                 f"completion={response.usage.completion_tokens}, "
                 f"total={response.usage.total_tokens}"
             )
         
         logger.info(
-            f"[Gateway] ⏱️  TOTAL TIME: {elapsed_time:.3f}s | "
+            f"[Gateway] TOTAL TIME: {elapsed_time:.3f}s | "
             f"Model: {result['model_id']} ({result['model_name']}) | "
             f"Provider: {result['provider']}"
         )
         logger.info(
-            f"[Gateway] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            "[Gateway] ------------------------------------------------------------------"
         )
         
         response_data = response.model_dump()
@@ -610,6 +717,9 @@ async def chat_completions(request: ChatCompletionRequest):
                 )
                 choice["finish_reason"] = "stop" if has_content else "length"
 
+        _p_tok = response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0
+        _c_tok = response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0
+        _t_tok = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
         response_payload = JSONResponse(
             content=response_data,
             headers={
@@ -619,14 +729,16 @@ async def chat_completions(request: ChatCompletionRequest):
                 "X-Elapsed-Time": str(result["elapsed_time"])
             }
         )
-        _record_request("chat", time.time() - start_time)
+        _record_request("chat", time.time() - start_time,
+                         model_id=result.get("model_id", ""),
+                         prompt_tokens=_p_tok, completion_tokens=_c_tok, total_tokens=_t_tok)
         return response_payload
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[Gateway] Error in chat_completions: {e}", exc_info=True)
-        _record_request("chat", time.time() - start_time, is_error=True)
+        _record_request("chat", time.time() - start_time, is_error=True, model_id=request.model)
         err_str = str(e)
         # Return 504 when upstream timed out (e.g. "Model call failed: Request timed out.")
         if "timed out" in err_str.lower() or "timeout" in err_str.lower():
@@ -654,9 +766,28 @@ async def embeddings(request: EmbeddingRequest):
                     break
             
             if not model_id:
-                raise HTTPException(status_code=404, detail=f"Embedding model not found: {request.model}")
+                if embedding_clients:
+                    model_id = next(iter(embedding_clients.keys()))
+                    logger.warning(
+                        "[Gateway] Embedding model '%s' not found, fallback to '%s'",
+                        request.model,
+                        model_id,
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail=f"Embedding model not found: {request.model}")
         else:
             model_id = request.model
+        if model_id not in embedding_clients:
+            if embedding_clients:
+                fallback_model_id = next(iter(embedding_clients.keys()))
+                logger.warning(
+                    "[Gateway] Embedding model id '%s' unavailable, fallback to '%s'",
+                    model_id,
+                    fallback_model_id,
+                )
+                model_id = fallback_model_id
+            else:
+                raise HTTPException(status_code=404, detail=f"Embedding model not found: {request.model}")
         
         client = embedding_clients[model_id]
         
@@ -671,22 +802,56 @@ async def embeddings(request: EmbeddingRequest):
         
         # Call embedding API with upstream model name (id like "bge-m3" -> "BAAI/bge-m3")
         upstream_model = embedding_configs[model_id].get("model", request.model)
-        # Force float encoding to avoid base64 serialization issues
-        response = await client.embeddings.create(
-            model=upstream_model,
-            input=request.input,
-            encoding_format="float"  # Always request float arrays, not base64
-        )
-        
-        logger.info(f"[Gateway] ✓ Embedding generated: {len(response.data)} vectors")
-        
+        # DashScope text-embedding-v4 limits batch size to 10 per request.
+        # Split large batches and merge results transparently.
+        MAX_EMBED_BATCH = 10
+        inputs = request.input if isinstance(request.input, list) else [request.input]
+        if len(inputs) <= MAX_EMBED_BATCH:
+            response = await client.embeddings.create(
+                model=upstream_model,
+                input=inputs,
+                encoding_format="float",
+            )
+        else:
+            MAX_EMBED_CONCURRENCY = 5
+            batches = [inputs[i : i + MAX_EMBED_BATCH] for i in range(0, len(inputs), MAX_EMBED_BATCH)]
+            sem = asyncio.Semaphore(MAX_EMBED_CONCURRENCY)
+
+            async def _embed_batch(batch):
+                async with sem:
+                    return await client.embeddings.create(
+                        model=upstream_model,
+                        input=batch,
+                        encoding_format="float",
+                    )
+
+            resps = await asyncio.gather(*[_embed_batch(b) for b in batches])
+            all_data = []
+            total_tokens = 0
+            for resp in resps:
+                for item in resp.data:
+                    item.index = len(all_data)
+                    all_data.append(item)
+                if resp.usage:
+                    total_tokens += resp.usage.total_tokens
+            last_resp = resps[-1]
+            last_resp.data = all_data
+            if last_resp.usage:
+                last_resp.usage.total_tokens = total_tokens
+                last_resp.usage.prompt_tokens = total_tokens
+            response = last_resp
+
+        logger.info(f"[Gateway] Embedding generated: {len(response.data)} vectors")
+
+        _e_tok = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
         response_payload = JSONResponse(content=response.model_dump())
-        _record_request("embeddings", time.time() - start_time)
+        _record_request("embeddings", time.time() - start_time,
+                         model_id=model_id, total_tokens=_e_tok, prompt_tokens=_e_tok)
         return response_payload
-        
+
     except Exception as e:
         logger.error(f"[Gateway] Error in embeddings: {e}", exc_info=True)
-        _record_request("embeddings", time.time() - start_time, is_error=True)
+        _record_request("embeddings", time.time() - start_time, is_error=True, model_id=request.model)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -708,12 +873,34 @@ async def rerank(request: RerankRequest):
                 if model_id:
                     break
             if not model_id:
+                if reranker_configs:
+                    model_id = next(iter(reranker_configs.keys()))
+                    logger.warning(
+                        "[Gateway] Reranker model '%s' not found, fallback to '%s'",
+                        request.model,
+                        model_id,
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Reranker model not found: {request.model}",
+                    )
+        else:
+            model_id = request.model
+        if model_id not in reranker_configs:
+            if reranker_configs:
+                fallback_model_id = next(iter(reranker_configs.keys()))
+                logger.warning(
+                    "[Gateway] Reranker model id '%s' unavailable, fallback to '%s'",
+                    model_id,
+                    fallback_model_id,
+                )
+                model_id = fallback_model_id
+            else:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Reranker model not found: {request.model}",
                 )
-        else:
-            model_id = request.model
 
         model_config = reranker_configs[model_id]
         provider_name = model_config.get("provider", "siliconflow")
@@ -726,34 +913,65 @@ async def rerank(request: RerankRequest):
         # Use upstream model name from config (never send id to API)
         upstream_model = model_config.get("model", model_id)
         client = reranker_http_clients[model_id]
-        payload = {
-            "model": upstream_model,
-            "query": request.query,
-            "documents": request.documents,
-        }
-        if request.top_n is not None:
-            payload["top_n"] = request.top_n
-
         headers = {
             "Authorization": f"Bearer {model_config.get('api_key', '')}",
             "Content-Type": "application/json",
         }
-
-        response = await client.post(
-            f"{model_config['base_url']}/rerank",
-            json=payload,
-            headers=headers,
-            timeout=30.0,
-        )
-        response.raise_for_status()
-
-        response_payload = JSONResponse(content=response.json())
-        _record_request("rerank", time.time() - start_time)
+        if provider_name == "dashscope":
+            # DashScope 原生重排接口（非 OpenAI 兼容路径）
+            base = model_config["base_url"].rstrip("/")
+            base = re.sub(r"/compatible-mode/v1/?$", "", base)
+            endpoint = f"{base}/api/v1/services/rerank/text-rerank/text-rerank"
+            payload = {
+                "model": upstream_model,
+                "input": {
+                    "query": request.query,
+                    "documents": request.documents,
+                },
+                "parameters": {
+                    "top_n": request.top_n or len(request.documents),
+                },
+            }
+            response = await client.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            raw = response.json()
+            # 统一成当前 retriever 可识别的结果结构
+            response_payload = JSONResponse(
+                content={
+                    "results": (raw.get("output") or {}).get("results", []),
+                    "request_id": raw.get("request_id", ""),
+                    "usage": raw.get("usage", {}),
+                }
+            )
+        else:
+            payload = {
+                "model": upstream_model,
+                "query": request.query,
+                "documents": request.documents,
+            }
+            if request.top_n is not None:
+                payload["top_n"] = request.top_n
+            response = await client.post(
+                f"{model_config['base_url']}/rerank",
+                json=payload,
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            response_payload = JSONResponse(content=response.json())
+        _r_tok = estimated_tokens
+        _record_request("rerank", time.time() - start_time,
+                         model_id=model_id, total_tokens=_r_tok, prompt_tokens=_r_tok)
         return response_payload
 
     except Exception as e:
         logger.error(f"[Gateway] Error in rerank: {e}", exc_info=True)
-        _record_request("rerank", time.time() - start_time, is_error=True)
+        _record_request("rerank", time.time() - start_time, is_error=True, model_id=request.model)
         raise HTTPException(status_code=500, detail=str(e))
 
 

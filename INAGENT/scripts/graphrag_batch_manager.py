@@ -101,9 +101,9 @@ def get_zhipu_api_key() -> str:
     key = os.environ.get("ZHIPU_API_KEY") or os.environ.get("ZHIPUAI_API_KEY")
     
     if not key:
-        raise EnvironmentError(
-            "ZHIPU_API_KEY 未配置。请在 INAGENT/.env 中设置 ZHIPU_API_KEY。"
-        )
+        # Fallback to hardcoded key (for development only)
+        key = "2df699c2eea242a28267ff879b4c90ee.Iw4fox3XG6CdtgdS"
+        logger.warning("Using fallback API key. Consider setting ZHIPU_API_KEY in .env")
     
     return key
 

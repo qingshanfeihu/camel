@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set
 
@@ -26,6 +27,15 @@ from camel.societies.workforce.utils import check_if_running
 from camel.tasks.task import Task, TaskState
 
 logger = logging.getLogger(__name__)
+DEP_TASK_INFO_LIMIT = max(
+    200,
+    int(os.getenv("CAMEL_DEP_TASK_INFO_LIMIT", "1200")),
+)
+WORKFORCE_VERBOSE_OUTPUT = os.getenv("WORKFORCE_VERBOSE_OUTPUT", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 class Worker(BaseNode, ABC):
@@ -67,9 +77,15 @@ class Worker(BaseNode, ABC):
 
     @staticmethod
     def _get_dep_tasks_info(dependencies: List[Task]) -> str:
+        def _trim(text: str) -> str:
+            raw = text or ""
+            if len(raw) <= DEP_TASK_INFO_LIMIT:
+                return raw
+            return raw[:DEP_TASK_INFO_LIMIT] + "\n...[truncated]..."
+
         result_lines = [
-            f"id: {dep_task.id}, content: {dep_task.content}. "
-            f"result: {dep_task.result}."
+            f"id: {dep_task.id}, content: {_trim(dep_task.content)}. "
+            f"result: {_trim(dep_task.result)}."
             for dep_task in dependencies
         ]
         result_str = "\n".join(result_lines)
@@ -83,10 +99,11 @@ class Worker(BaseNode, ABC):
         r"""Process a single task and handle its completion/failure."""
         try:
             self._active_task_ids.add(task.id)
-            print(
-                f"{Fore.YELLOW}{self} get task {task.id}: {task.content}"
-                f"{Fore.RESET}"
-            )
+            if WORKFORCE_VERBOSE_OUTPUT:
+                preview = (task.content or "")[:300]
+                if len(task.content or "") > 300:
+                    preview += " ...[truncated]"
+                print(f"{Fore.YELLOW}{self} get task {task.id}: {preview}{Fore.RESET}")
 
             # Process the task
             task_state = await self._process_task(task, task.dependencies)

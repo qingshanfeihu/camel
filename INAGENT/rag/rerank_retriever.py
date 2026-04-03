@@ -4,12 +4,12 @@
 
 使用 LLM 网关的重排序模型对检索结果进行重排序
 """
-import os
 import logging
 from typing import List, Dict, Any, Optional
 import requests
 
 from camel.retrievers.base import BaseRetriever
+from INAGENT.config.project_config import cfg_str
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class SiliconFlowRerankRetriever(BaseRetriever):
     
     def __init__(
         self,
-        model_name: str = "BAAI/bge-reranker-v2-m3",
+        model_name: str = "qwen3-rerank",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ) -> None:
@@ -29,17 +29,27 @@ class SiliconFlowRerankRetriever(BaseRetriever):
         初始化网关重排序检索器
         
         Args:
-            model_name: 重排序模型名称，默认：BAAI/bge-reranker-v2-m3
+            model_name: 重排序模型名称，默认：qwen3-rerank
             api_key: API密钥，如果未提供则从环境变量读取
             base_url: API基础URL，默认来自 LLM 网关
         """
-        gateway_base_url = os.getenv("LLM_GATEWAY_BASE_URL")
+        gateway_base_url = cfg_str(
+            "llm.gateway.base_url",
+            "",
+            env="LLM_GATEWAY_BASE_URL",
+        )
         if gateway_base_url and not gateway_base_url.rstrip("/").endswith("/v1"):
             gateway_base_url = f"{gateway_base_url.rstrip('/')}/v1"
-        gateway_api_key = os.getenv("LLM_GATEWAY_API_KEY")
+        gateway_api_key = cfg_str(
+            "llm.gateway.api_key",
+            "",
+            env="LLM_GATEWAY_API_KEY",
+        )
 
-        self.api_key = api_key or gateway_api_key or os.getenv(
-            "SILICONFLOW_API_KEY"
+        self.api_key = api_key or gateway_api_key or cfg_str(
+            "llm.siliconflow.api_key",
+            "",
+            env="SILICONFLOW_API_KEY",
         )
         if not gateway_base_url and not base_url:
             raise ValueError(
@@ -90,7 +100,7 @@ class SiliconFlowRerankRetriever(BaseRetriever):
         
         # 调用网关重排序 API
         try:
-            url = f"{self.base_url}/rerank"
+            url = f"{self.base_url}/reranks"
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -107,16 +117,19 @@ class SiliconFlowRerankRetriever(BaseRetriever):
             
             result_data = response.json()
             
-            # 解析结果
+            rerank_results = (
+                result_data.get("results")
+                or result_data.get("output", {}).get("results")
+            )
+
             formatted_results = []
-            if "results" in result_data:
-                # 按相关性分数排序
+            if rerank_results:
                 results = sorted(
-                    result_data["results"],
+                    rerank_results,
                     key=lambda x: x.get("relevance_score", 0.0),
                     reverse=True
                 )
-                
+
                 for result in results[:top_k]:
                     index = result.get("index", 0)
                     if 0 <= index < len(retrieved_result):
@@ -124,8 +137,12 @@ class SiliconFlowRerankRetriever(BaseRetriever):
                         selected_chunk["similarity score"] = result.get("relevance_score", 0.0)
                         formatted_results.append(selected_chunk)
             else:
-                # 如果没有results字段，返回原始结果
-                logger.warning("重排序API返回格式异常，返回原始结果")
+                # 如果没有 results 字段，返回原始结果
+                logger.warning("重排序API返回格式异常，缺少 results 字段，返回原始结果")
+                formatted_results = retrieved_result[:top_k]
+
+            if not formatted_results:
+                logger.warning("重排序结果为空，返回原始结果")
                 formatted_results = retrieved_result[:top_k]
             
             return formatted_results

@@ -15,7 +15,6 @@ Pipeline topology::
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -36,7 +35,11 @@ from camel.societies.workforce.events import (
 )
 from camel.tasks import Task
 
+from camel.toolkits.note_taking_toolkit import NoteTakingToolkit
+
 from INAGENT.toolkits import NSAEDeviceToolkit, VMControllerToolkit, TrafficVerifyToolkit
+from INAGENT.toolkits.knowledge_toolkit import KnowledgeToolkit
+from INAGENT.config.project_config import cfg_float
 from INAGENT.utils.ssh_client import create_ssh_client_from_env
 from INAGENT.utils.vm_controller import VMController
 
@@ -45,10 +48,10 @@ logger = logging.getLogger(__name__)
 
 # Tunable timeouts for long-running verify/traffic stages.
 _VERIFY_SHOW_WORKER_TIMEOUT_SECONDS = float(
-    os.getenv("INAGENT_VERIFY_WORKER_TIMEOUT", "420")
+    cfg_float("workforce.verify_worker_timeout_seconds", 420.0, env="INAGENT_VERIFY_WORKER_TIMEOUT")
 )
 _TRAFFIC_WORKER_TIMEOUT_SECONDS = float(
-    os.getenv("INAGENT_TRAFFIC_WORKER_TIMEOUT", "600")
+    cfg_float("workforce.traffic_worker_timeout_seconds", 600.0, env="INAGENT_TRAFFIC_WORKER_TIMEOUT")
 )
 _PIPELINE_TASK_TIMEOUT_SECONDS = max(
     _VERIFY_SHOW_WORKER_TIMEOUT_SECONDS,
@@ -179,6 +182,16 @@ async def run_workforce_pipeline_async(
         timeout=_TRAFFIC_WORKER_TIMEOUT_SECONDS,
     )
 
+    # ── 知识协作工具 ─────────────────────────────────────────────────
+    import uuid as _uuid
+    from pathlib import Path as _Path
+    _work_dir = _Path(__file__).resolve().parent / "working_dir" / _uuid.uuid4().hex[:12]
+    _work_dir.mkdir(parents=True, exist_ok=True)
+
+    knowledge_tk_config = KnowledgeToolkit(mode="config")
+    knowledge_tk_explain = KnowledgeToolkit(mode="explain")
+    note_tk = NoteTakingToolkit(working_directory=str(_work_dir))
+
     # ── 1. Coordinator & Task Agents ───────────────────────────────────
     coordinator_agent = ChatAgent(
         BaseMessage.make_assistant_message(
@@ -189,10 +202,13 @@ async def run_workforce_pipeline_async(
                 "- 如果 Worker 报告的验证信息不充分（例如 show 命令输出不足），"
                 "请标记质量不合格并建议 retry，让 Worker 主动补充更多数据。\n"
                 "- 评判标准：Deploy 无 error；VerifyShow 提供了配置生效的正面证据；"
-                "Traffic 的 HTTP 探测成功率合理；Analysis 给出了有理有据的 Verdict。"
+                "Traffic 的 HTTP 探测成功率合理；Analysis 给出了有理有据的 Verdict。\n"
+                "你可以使用知识检索工具查询产品文档，了解预期行为和验证标准。\n"
+                "你可以使用笔记工具查看各 Worker 写入的结果笔记。"
             ),
         ),
         model=model,
+        tools=knowledge_tk_explain.get_tools() + note_tk.get_tools(),
     )
 
     task_agent = ChatAgent(
@@ -230,11 +246,15 @@ async def run_workforce_pipeline_async(
                 "使用 execute_config_commands 工具将配置命令逐条下发到设备。\n"
                 "命令格式：每行一条命令，用换行符分隔。\n"
                 "如果某条命令返回 error，记录错误并继续后续命令。\n"
+                "你还拥有知识检索工具（search_product_knowledge），\n"
+                "当遇到不确定的CLI命令语法时可以查询 cli/reference 或 app/reference。\n"
+                "你还拥有笔记工具，请将配置下发结果摘要写入笔记 'deploy_result'，\n"
+                "供后续 Worker 参考。\n"
                 "返回时请列出成功/失败的命令统计。"
             ),
         ),
         model=model,
-        tools=nsae_tk.get_tools(),
+        tools=nsae_tk.get_tools() + knowledge_tk_config.get_tools() + note_tk.get_tools(),
     )
 
     verify_show_agent = ChatAgent(
@@ -248,6 +268,8 @@ async def run_workforce_pipeline_async(
                 "可补充执行 show slb group health、show slb policy default 等。\n"
                 "若 show slb virtual http / show slb real http 返回 '^' 语法错误，"
                 "应改用兼容命令 show slb virtual / show slb real 再次验证。\n"
+                "你还拥有知识检索工具，可以查询CLI命令语法来理解验证命令的含义和预期输出。\n"
+                "请将验证结果摘要写入笔记 'verify_result'，供 AnalysisWorker 参考。\n"
                 "你的输出必须包含所有已执行命令及其输出。\n"
                 "\n"
                 "【严禁幻觉】你只能输出设备通过 SSH 实际返回的命令输出，"
@@ -256,7 +278,7 @@ async def run_workforce_pipeline_async(
             ),
         ),
         model=model,
-        tools=nsae_tk.get_tools(),
+        tools=nsae_tk.get_tools() + knowledge_tk_config.get_tools() + note_tk.get_tools(),
         tool_execution_timeout=_VERIFY_SHOW_WORKER_TIMEOUT_SECONDS,
         step_timeout=_VERIFY_SHOW_WORKER_TIMEOUT_SECONDS,
     )
@@ -295,6 +317,8 @@ async def run_workforce_pipeline_async(
                 "- show 命令确认配置已生效（存在正面证据）\n"
                 "- VIP 流量可达\n"
                 "- 故障注入后设备正确切换服务器状态\n"
+                "你可以使用知识检索工具查询产品文档，理解预期行为来辅助判定。\n"
+                "你可以使用 read_note 读取 'deploy_result' 和 'verify_result' 笔记。\n"
                 "你的最终输出必须包含 'Verdict: PASS' 或 'Verdict: FAIL' 并附详细理由。\n"
                 "【注意】show slb health 仅显示策略摘要，末尾的 GET \"/\" \"200\" "
                 "是固定默认显示值，不能据此判定内容健康检查未生效。\n"
@@ -305,6 +329,7 @@ async def run_workforce_pipeline_async(
             ),
         ),
         model=model,
+        tools=knowledge_tk_explain.get_tools() + note_tk.get_tools(),
     )
 
     cleanup_agent = ChatAgent(
@@ -314,12 +339,13 @@ async def run_workforce_pipeline_async(
                 "你是测试环境清理专家。\n"
                 "根据提供的配置命令列表，生成对应的 no/delete 删除命令并下发到设备。\n"
                 f"{_NSAE_DELETE_REFERENCE}\n"
+                "你还拥有知识检索工具，当不确定删除命令语法时可以查询 cli/reference。\n"
                 "同时使用 stop_http_server 停止 VM 上的 HTTP 服务。\n"
                 "返回清理结果统计。"
             ),
         ),
         model=model,
-        tools=nsae_tk.get_tools() + vm_tk.get_tools(),
+        tools=nsae_tk.get_tools() + vm_tk.get_tools() + knowledge_tk_config.get_tools(),
     )
 
     # 注册 Workers
@@ -435,6 +461,13 @@ async def run_workforce_pipeline_async(
             tk.disconnect()
         except Exception:
             pass
+
+    # 清理笔记工作目录
+    import shutil
+    try:
+        shutil.rmtree(_work_dir, ignore_errors=True)
+    except Exception:
+        pass
 
     # 从 workforce 的 completed_tasks 中提取每阶段结果（供 MD 报告使用）
     task_results: Dict[str, str] = {}

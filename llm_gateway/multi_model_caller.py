@@ -59,7 +59,7 @@ class MultiModelCaller:
         logger.info(
             f"[MultiModelCaller] Initialized with mode={mode}, timeout={default_timeout}s, "
             f"max_retries=0 (SDK retries disabled). "
-            f"⏱️ Timeout buffer from SiliconFlow p99 latency (~60.15s): {default_timeout - 60:.1f}s"
+            f"Timeout buffer from SiliconFlow p99 latency (~60.15s): {default_timeout - 60:.1f}s"
         )
     
     def add_model(self, model_config: Dict[str, Any]):
@@ -137,13 +137,13 @@ class MultiModelCaller:
             
             # Log detailed model call information
             logger.info(
-                f"[MultiModelCaller] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                "[MultiModelCaller] ------------------------------------------------------"
             )
             logger.info(
-                f"[MultiModelCaller] 🚀 CALLING MODEL: {model_id} ({model_config['model']})"
+                f"[MultiModelCaller] CALLING MODEL: {model_id} ({model_config['model']})"
             )
             logger.info(
-                f"[MultiModelCaller] 📍 Provider: {model_config['provider']} | "
+                f"[MultiModelCaller] Provider: {model_config['provider']} | "
                 f"Messages: {len(messages)} | Stream: {kwargs.get('stream', False)}"
             )
             
@@ -160,13 +160,13 @@ class MultiModelCaller:
             is_streaming = kwargs.get("stream", False)
             if is_streaming:
                 logger.info(
-                    f"[MultiModelCaller] ✓ Stream started in {elapsed:.3f}s"
+                    f"[MultiModelCaller] Stream started in {elapsed:.3f}s"
                 )
             else:
                 # Log detailed response information for non-streaming
                 if hasattr(response, 'usage') and response.usage:
                     logger.info(
-                        f"[MultiModelCaller] 📊 TOKENS: "
+                        f"[MultiModelCaller] TOKENS: "
                         f"prompt={response.usage.prompt_tokens}, "
                         f"completion={response.usage.completion_tokens}, "
                         f"total={response.usage.total_tokens}"
@@ -179,14 +179,14 @@ class MultiModelCaller:
                         content_preview = content[:200] + f"... ({len(content)} chars)"
                     else:
                         content_preview = content
-                    logger.info(f"[MultiModelCaller] 📤 RESPONSE: {content_preview}")
+                    logger.info(f"[MultiModelCaller] RESPONSE: {content_preview}")
                 
                 logger.info(
-                    f"[MultiModelCaller] ⏱️  MODEL LATENCY: {elapsed:.3f}s"
+                    f"[MultiModelCaller] MODEL LATENCY: {elapsed:.3f}s"
                 )
             
             logger.info(
-                f"[MultiModelCaller] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                "[MultiModelCaller] ------------------------------------------------------"
             )
             
             return {
@@ -201,7 +201,7 @@ class MultiModelCaller:
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error(
-                f"[MultiModelCaller] ✗ Model {model_id} failed "
+                f"[MultiModelCaller] Model {model_id} failed "
                 f"after {elapsed:.2f}s: {e}"
             )
             return {
@@ -228,7 +228,7 @@ class MultiModelCaller:
             Response from the fastest model
         """
         logger.info(
-            f"[MultiModelCaller] 🏁 Race mode: Starting {len(self.models)} models"
+            f"[MultiModelCaller] Race mode: Starting {len(self.models)} models"
         )
         
         # Create tasks for all models
@@ -253,7 +253,7 @@ class MultiModelCaller:
                     pending_task.cancel()
                 logger.debug("[MultiModelCaller] Cancelled pending tasks")
                 logger.info(
-                    f"[MultiModelCaller] 🏆 Winner: {result['model_id']} "
+                    f"[MultiModelCaller] Winner: {result['model_id']} "
                     f"({result['elapsed_time']:.2f}s)"
                 )
                 return result
@@ -300,7 +300,7 @@ class MultiModelCaller:
             attempts += 1
 
             logger.info(
-                f"[MultiModelCaller] ⚖️ Balance mode: Selected {model_config['id']} "
+                f"[MultiModelCaller] Balance mode: Selected {model_config['id']} "
                 f"(attempt {attempts}/{len(self.models)})"
             )
 
@@ -312,7 +312,7 @@ class MultiModelCaller:
                 total_time = time.time() - start_time
                 if attempts > 1:
                     logger.info(
-                        f"[MultiModelCaller] ✓ Success after {attempts} attempts, "
+                        f"[MultiModelCaller] Success after {attempts} attempts, "
                         f"total time: {total_time:.2f}s"
                     )
                 return result
@@ -339,7 +339,7 @@ class MultiModelCaller:
         Returns:
             Response from selected model
         """
-        logger.info("[MultiModelCaller] 🔀 Hybrid mode: Using balance (single model per request)")
+        logger.info("[MultiModelCaller] Hybrid mode: Using balance (single model per request)")
         return await self.call_balance_mode(messages, **kwargs)
     
     async def call(

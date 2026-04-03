@@ -3,6 +3,7 @@
 文档分类器：根据文件名模式和内容自动分类文档
 
 分类体系：
+- architecture/design: 产品架构设计文档
 - spec/prd: 产品需求文档
 - spec/func_spec: 软件功能规格书
 - spec/design: 软件设计文档
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 # 文件名 → 分类规则（按优先级排序, 先匹配先命中）
 _FILENAME_PATTERNS: list[Tuple[str, str]] = [
+    # architecture 类
+    (r"architect|架构", "architecture/design"),
+    # cli/app 类
+    (r"^cli$|^cli\b|command.*ref", "cli/reference"),
+    (r"^app$|^app\b|application.*ref", "app/reference"),
     # test 类
     (r"test.*list|测试.*列表|测试.*清单", "test/test_list"),
     (r"test.*template|测试.*模板|用例.*模板", "test/test_template"),
@@ -27,10 +33,21 @@ _FILENAME_PATTERNS: list[Tuple[str, str]] = [
     (r"func.*spec|功能.*规格|sw.*functional", "spec/func_spec"),
     (r"prd|product.*require|产品.*需求", "spec/prd"),
     (r"design|设计.*文档|sw.*design|软件.*设计", "spec/design"),
+    # review 类
+    (r"bug.*fix|bug.*detail|fix.*detail|patch.*detail|hotfix", "review/bug_fix"),
+    (r"review.*rule|评审.*规则|评审.*标准|check.*list", "review/rules"),
 ]
 
 # 内容关键词 → 分类（当文件名无法判断时，用内容辅助）
 _CONTENT_KEYWORDS: Dict[str, list[str]] = {
+    "architecture/design": [
+        "Architecture",
+        "协议栈",
+        "Protocol Stack",
+        "Faststack",
+        "ustack",
+        "分层设计",
+    ],
     "spec/func_spec": [
         "Function Specification",
         "Testing Consideration",
@@ -68,6 +85,21 @@ _CONTENT_KEYWORDS: Dict[str, list[str]] = {
         "XXX子功能",
         "YYY子功能",
         "测试用例模板",
+    ],
+    "review/bug_fix": [
+        "Root Cause",
+        "Fixed Details",
+        "Bug",
+        "Condition of Occurrence",
+        "Testing Suggestions",
+        "Affected Release",
+    ],
+    "review/rules": [
+        "评审规则",
+        "评审标准",
+        "Review Rule",
+        "质量门",
+        "Checklist",
     ],
 }
 

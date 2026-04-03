@@ -36,7 +36,7 @@ class HybridRetriever(BaseRetriever):
         self.vr = VectorRetriever(embedding_model, vector_storage)
         self.bm25 = BM25Retriever()
 
-    def process(self, content_input_path: Union[str, Any]) -> None:
+    def process(self, content_input_path: Union[str, Any], **kwargs) -> None:
         r"""Processes the content input path for both vector and BM25
         retrievers.
 
@@ -51,7 +51,22 @@ class HybridRetriever(BaseRetriever):
             raise ValueError("content_input_path cannot be empty.")
 
         self.content_input_path = str(content_input_path)
-        self.vr.process(content=content_input_path)
+        self.vr.process(content=content_input_path, **kwargs)
+        self.bm25.process(content_input_path=content_input_path)
+
+    def build_bm25_only(self, content_input_path: Union[str, Any]) -> None:
+        r"""Only builds the BM25 index without writing to vector storage.
+
+        Use this when the vector store already has data and only the
+        in-memory BM25 index needs to be rebuilt.
+
+        Args:
+            content_input_path (Union[str, Any]): File path, URL, or content
+                object to be processed.
+        """
+        if not content_input_path:
+            raise ValueError("content_input_path cannot be empty.")
+        self.content_input_path = str(content_input_path)
         self.bm25.process(content_input_path=content_input_path)
 
     def _sort_rrf_scores(
@@ -108,7 +123,13 @@ class HybridRetriever(BaseRetriever):
 
             if text not in text_to_id:
                 text_to_id[text] = current_id
-                id_to_info[current_id] = {'text': text, 'vector_rank': rank}
+                info: Dict[str, Any] = {'text': text, 'vector_rank': rank}
+                # Preserve metadata and extra_info from vector results
+                if result.get('metadata'):
+                    info['metadata'] = result['metadata']
+                if result.get('extra_info'):
+                    info['extra_info'] = result['extra_info']
+                id_to_info[current_id] = info
                 current_id += 1
             else:
                 id_to_info[text_to_id[text]]['vector_rank'] = rank
@@ -118,7 +139,11 @@ class HybridRetriever(BaseRetriever):
             text = result['text']
             if text not in text_to_id:
                 text_to_id[text] = current_id
-                id_to_info[current_id] = {'text': text, 'bm25_rank': rank}
+                info_bm25: Dict[str, Any] = {'text': text, 'bm25_rank': rank}
+                # BM25 results carry metadata but no extra_info
+                if result.get('metadata'):
+                    info_bm25['metadata'] = result['metadata']
+                id_to_info[current_id] = info_bm25
                 current_id += 1
             else:
                 id_to_info[text_to_id[text]].setdefault('bm25_rank', rank)

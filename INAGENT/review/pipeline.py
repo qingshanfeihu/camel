@@ -12,11 +12,12 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 
-"""Autonomous review pipeline (v4 — structured input + workforce)."""
+"""Autonomous review pipeline (v5 — structured input + workforce + adversarial verification)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -26,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from INAGENT.config.project_config import cfg_bool, cfg_int
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
 from camel.societies.workforce import Workforce, WorkforceMode
@@ -45,6 +47,12 @@ from camel.tasks import Task
 from camel.toolkits.note_taking_toolkit import NoteTakingToolkit
 
 from INAGENT.review.input_builder import ReviewInputBuilder
+from INAGENT.review.product_memory import build_product_memory
+from INAGENT.review.review_memory import ReviewMemory
+from INAGENT.review.spec_decomposer import SpecDecomposer
+from INAGENT.review.adversarial_verifier import AdversarialVerifier
+from INAGENT.review.review_refiner import ReviewRefiner
+from INAGENT.toolkits.product_skill_toolkit import ProductSkillToolkit
 from INAGENT.toolkits.knowledge_toolkit import KnowledgeToolkit
 
 logger = logging.getLogger(__name__)
@@ -106,14 +114,65 @@ class ReviewResult:
 _OUTPUT_REQUIREMENTS = """\
 输出要求:
 1. 全部使用中文输出。
-2. 禁止输出 emoji。
+2. 禁止输出 emoji 字符（包括但不限于 ✅❌⚠💡，用文字替代）。
 3. 报告仅输出清晰 Markdown，不输出 JSON 代码块。
-4. 问题必须定位到用例编号（# 列），格式如: '用例 #3'。
-5. 每个问题需标注规则编号（R01-R18）和严重度（High/Medium/Low）。
-6. 必须包含 Load/Stress 充分性结论。
-7. 若是 Bug-to-Case，必须逐条回答 key_questions。
-8. 报告按固定分节输出：总体结论、逐行问题、覆盖缺口、格式问题、综合建议。
-9. 信息不足时明确写出不确定点。"""
+4. 禁止使用术语：横切面维度、结构性建议、未覆盖、覆盖缺口、预期明确性。用被评审人能直接执行的自然语言描述。
+5. 引用规则时只写规则原文描述，禁止输出 Rxx 编号（如 R01、R05 等内部编号）。
+6. 若是 Bug-to-Case，必须逐条回答 key_questions。
+7. 信息不足时明确写出不确定点，不要作绝对化结论。
+8. 严禁重复：同一用例的同类问题只列一次。
+9. CLI 命令可追溯：命令若无法在测试用例文本或 CLI 参考中定位字面证据，必须标注"待确认"，不得作为既有事实。
+10. 每条发现必须使用表格格式:
+### 发现 N: <简要标题>
+| 项目 | 内容 |
+|------|------|
+| 涉及用例 | 模块名 > 用例 #A, #B, #C（列出具体编号） |
+| 问题描述 | 因为[原因]，[用例#A]的[哪个字段]存在[什么问题] |
+| 修改建议 | 用例 #A 的 Expected Result 从"配置成功"改为"xxx具体内容" |
+| 优先级 | High/Medium/Low |
+11. "涉及用例"必须列出具体用例编号（#N），禁止写"case编号区间"或"共N条"等模糊描述。
+12. "修改建议"必须可直接操作：写清用例编号 + 字段（Description/Expected Result/Test Type）+ 从什么改为什么。如果建议新增用例，给出完整的 Description + Expected Result 示例。
+13. 若建议新增用例且当前无相关用例可引用，"涉及用例"写为 "全局缺失（当前无相关用例）"。"""
+
+# ── 数据源隔离约束 ──────────────────────────────────────────────
+# Phase 1: 通过 XML 标签边界声明，防止 similar_tests / product_knowledge 污染评审结论
+
+_DATA_ISOLATION_PREAMBLE = """\
+<data_source_boundary_rules>
+【数据源隔离声明 — 违反以下规则视为严重错误】
+
+1. 你的评审对象仅限于 <target_test_cases> 标签内的测试用例。
+2. <product_knowledge> 标签内的内容是"参考背景"，用于理解业务意图，不是评审对象。
+3. <similar_tests> 标签内的内容是"历史参考"，仅供风格对比，绝不能作为评审证据。
+4. 你在评审输出中引用的 Case ID（如 用例 #3、case118 等）必须来自 <target_test_cases> 内部。
+   若你引用了 <similar_tests> 中的 Case ID，这是严重幻觉，必须删除。
+5. 你提出的"覆盖缺口"必须有 <product_knowledge> 中的明确文本支撑。
+   如果产品知识中未定义某功能/约束，你不得凭经验推测该功能应被测试。
+6. 禁止将 <similar_tests> 中的用例描述、预期结果与 <target_test_cases> 混淆。
+</data_source_boundary_rules>
+"""
+
+_BUSINESS_COT_TEMPLATE = """\
+<mandatory_thinking_process>
+【业务逻辑逆向分析 — 必须在输出评审意见前完成】
+
+在给出任何评审意见之前，你必须先输出以下分析区块（用 Markdown 引用块格式）：
+
+> **[业务逻辑逆向分析]**
+> 1. **核心触发动作**: 本模块/本组用例测试的核心操作是什么？（从 <target_test_cases> 归纳）
+> 2. **前置条件**: 在 <product_knowledge> 中，该操作需要哪些前置配置？（必须引用具体章节/段落）
+> 3. **目标状态**: 操作成功后系统应达到什么状态？失败时应如何表现？
+> 4. **影响范围**: 该操作是否影响其他模块/协议？（基于 <product_knowledge> 中的关联描述）
+
+只有在完成上述推导后，你才能基于推导出的"业务意图"去对比 <target_test_cases>：
+- 找出 <product_knowledge> 中有明确定义但用例未覆盖的边界条件或异常分支
+- 找出用例的预期结果与 <product_knowledge> 定义不一致的情况
+- 找出 <product_knowledge> 定义的前置条件/约束未被用例验证的情况
+
+禁止提出没有 <product_knowledge> 文本支撑的"通用测试经验"建议（如"应测试超长输入"、"应增加并发测试"等），
+除非 <product_knowledge> 中明确要求了该项能力。
+</mandatory_thinking_process>
+"""
 
 
 # ── Helper ──────────────────────────────────────────────────────────
@@ -124,18 +183,38 @@ def _to_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _summarize_text(text: str, limit: int = 800) -> str:
-    compact = re.sub(r"\s+", " ", text or "").strip()
-    return compact[:limit] if len(compact) > limit else compact
+_WORKER_ALIAS_MAP = {
+    "coverage": "coverage",
+    "cover": "coverage",
+    "webui": "coverage",
+    "ui": "coverage",
+    "cli": "cli",
+    "syntax": "cli",
+    "spec": "spec",
+    "spec_compliance": "spec",
+    "compliance": "spec",
+    "load": "load",
+    "load_stress": "load",
+    "loadstress": "load",
+}
+
+
+def _normalize_worker_name(name: str) -> str:
+    token = str(name or "").strip().lower()
+    if not token:
+        return ""
+    return _WORKER_ALIAS_MAP.get(token, "")
+
 
 
 # ── ReviewPipeline ──────────────────────────────────────────────────
 
 class ReviewPipeline:
-    """Multi-agent autonomous review pipeline (v3).
+    """Multi-agent autonomous review pipeline (v4 — structured input + workforce).
 
     Internally uses a CAMEL :class:`Workforce` in ``PIPELINE`` mode with
-    five specialised workers.  The external API is identical to v1/v2:
+    five specialised workers (Coverage, CLI Syntax, Spec Compliance,
+    Load/Stress, Synthesis).  The external API is identical to v1/v2:
 
     * ``__init__(router, model, product_name)``
     * ``run(test_cases_text, bug_profile) -> ReviewResult``
@@ -150,12 +229,13 @@ class ReviewPipeline:
             if isinstance(product_name, str) and product_name.strip()
             else "NSAE (InfosecOS) 负载均衡器"
         )
-        # Extract unified_rag and rules_engine from router for KnowledgeToolkit
+        # Extract unified_rag and rules_engine from router for ReviewInputBuilder
         self._unified_rag = getattr(router, "unified_rag", None)
         self._rules_engine = getattr(router, "rules_engine", None)
         self._input_builder = ReviewInputBuilder(
             unified_rag=self._unified_rag,
             rules_engine=self._rules_engine,
+            knowledge_router=router,
         )
 
     # ── public API (unchanged signature) ────────────────────────
@@ -164,6 +244,7 @@ class ReviewPipeline:
         self,
         test_cases_text: str,
         bug_profile: Optional[Dict[str, Any]] = None,
+        input_cache: Optional[Dict[str, str]] = None,
     ) -> ReviewResult:
         if not (test_cases_text or "").strip():
             raise ValueError("test_cases_text cannot be empty")
@@ -175,7 +256,7 @@ class ReviewPipeline:
 
         # Run the multi-agent Workforce pipeline
         review, knowledge_summary, rag_status = self._run_workforce(
-            test_cases_text, plan, bug_profile,
+            test_cases_text, plan, bug_profile, input_cache,
         )
 
         return ReviewResult(
@@ -187,7 +268,7 @@ class ReviewPipeline:
         )
 
     def clear_knowledge_cache(self):
-        """Clear cached knowledge context (no-op in v3, kept for API compat)."""
+        """Clear cached knowledge context (no-op in v4, kept for API compat)."""
         pass
 
     # ── deterministic plan (no LLM call) ──────────────────────
@@ -210,7 +291,7 @@ class ReviewPipeline:
                 "scope_rationale": "基于 Bug/变更描述自动推断",
             }
         return ReviewPlan(
-            understanding="(多Agent协作评审 v3)",
+            understanding="(多Agent协作评审 v4)",
             scope_analysis=scope_analysis,
             knowledge_queries=[],
             review_dimensions=list(_DEFAULT_REVIEW_DIMENSIONS),
@@ -223,6 +304,7 @@ class ReviewPipeline:
         test_cases_text: str,
         plan: ReviewPlan,
         bug_profile: Optional[Dict[str, Any]],
+        input_cache: Optional[Dict[str, str]] = None,
     ) -> tuple:
         """Build and run the review workforce pipeline.
 
@@ -235,7 +317,7 @@ class ReviewPipeline:
 
         try:
             result = self._execute_workforce(
-                test_cases_text, plan, bug_profile, work_dir,
+                test_cases_text, plan, bug_profile, work_dir, input_cache,
             )
         finally:
             # Clean up working directory
@@ -252,18 +334,117 @@ class ReviewPipeline:
         plan: ReviewPlan,
         bug_profile: Optional[Dict[str, Any]],
         work_dir: Path,
+        input_cache: Optional[Dict[str, str]] = None,
     ) -> tuple:
         """Create Workforce, build pipeline, execute, and return results."""
+
+        def _clip(text: str, limit: int) -> str:
+            if not text:
+                return ""
+            if len(text) <= limit:
+                return text
+            return text[:limit] + "\n...[truncated]..."
+
         note_tk = NoteTakingToolkit(working_directory=str(work_dir))
-        knowledge_tk = KnowledgeToolkit(
-            mode="test_review",
-            unified_rag=self._unified_rag,
-            rules_engine=self._rules_engine,
+
+        # ── Parallel initialization (input + ReviewMemory + ProductMemory) ──
+        _mem_tags: List[str] = []
+        if bug_profile:
+            _title = str(bug_profile.get("title") or bug_profile.get("Title") or "")
+            _mem_tags.extend([w for w in _title.lower().split() if len(w) >= 3])
+        _mem_tags.extend(["ircookie", "cookie", "slb", "group", "global"])
+
+        from camel.utils.token_counting import OpenAITokenCounter
+        from camel.types import ModelType as _MT
+        from camel.embeddings import OpenAICompatibleEmbedding
+        from INAGENT.utils.llm_config import get_gateway_config
+        from concurrent.futures import ThreadPoolExecutor
+        _tc = OpenAITokenCounter(_MT.GPT_4O)
+        _gw = get_gateway_config()
+        _emb = OpenAICompatibleEmbedding(
+            model_type=_gw["embedding_model"],
+            api_key=_gw["api_key"],
+            url=_gw["base_url"],
         )
-        review_input = self._input_builder.build(test_cases_text, bug_profile)
+
+        def _par_build_input():
+            return self._input_builder.build(
+                test_cases_text, bug_profile, cache=input_cache,
+            )
+
+        def _par_build_review_memory():
+            _rm = ReviewMemory()
+            return _rm.format_for_prompt(tags=_mem_tags, max_chars=3000)
+
+        def _par_build_product_memory():
+            return build_product_memory(
+                token_counter=_tc, token_limit=4096,
+                retrieve_limit=5, embedding=_emb,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _fut_input = _pool.submit(_par_build_input)
+            _fut_rmem = _pool.submit(_par_build_review_memory)
+            _fut_pmem = _pool.submit(_par_build_product_memory)
+            review_input = _fut_input.result()
+            _experience_ctx = _fut_rmem.result()
+            _product_memory = _fut_pmem.result()
+
+        # ── Phase 2: SpecDecomposer — 规格分解 + 覆盖矩阵 ────────
+        _bug_ctx_for_spec = ""
+        if bug_profile:
+            _spec_parts = [
+                f"Bug: {bug_profile.get('title', '')}",
+                f"Root Cause: {bug_profile.get('root_cause', '')}",
+                f"Fixed Details: {bug_profile.get('fixed_details', '')}",
+            ]
+            _bug_ctx_for_spec = "\n".join(p for p in _spec_parts if p.split(": ", 1)[-1].strip())
+        _change_impact = self._build_change_impact(bug_profile)
+        _tech_context = self._build_tech_context(bug_profile)
+        _decomposer = SpecDecomposer(model=self.model)
+        _matrix = _decomposer.decompose(
+            product_knowledge=review_input.product_knowledge,
+            bug_context=_bug_ctx_for_spec,
+            change_impact=_change_impact,
+            test_cases_text=review_input.test_cases_text,
+            tech_context=_tech_context,
+        )
+        _traceability_text = _matrix.to_prompt_text(max_chars=6000)
+        logger.info(
+            "SpecDecomposer: reqs=%d, covered=%d, gaps=%d",
+            _matrix.total_requirements, _matrix.covered_count, _matrix.gap_count,
+        )
+
+        # ── 解析模块数量（用于 synthesis prompt 引用）──────────────
+        _mod_header_re = re.compile(
+            r"^###\s*模块\s*\d+\s*/\s*\d+\s*[:：\s]\s*(.+)",
+            re.MULTILINE,
+        )
+        _mod_headers = _mod_header_re.findall(review_input.test_cases_text or "")
+        _module_count = len(_mod_headers) or 1
+
+        rule_map_ctx = ""
+        if self._rules_engine and hasattr(self._rules_engine, "get_rule_map"):
+            try:
+                rule_map = self._rules_engine.get_rule_map()
+                lines = ["# 规则映射字典（强约束）"]
+                for rid in sorted(rule_map.keys()):
+                    item = rule_map[rid]
+                    lines.append(
+                        f"- {rid}: [{item.get('severity', '')}] "
+                        f"{item.get('category', '')} - {item.get('check', '')}"
+                    )
+                lines.append(
+                    "- 规则引用要求: 必须写 'Rxx - 规则原文'，不得只写编号。"
+                )
+                rule_map_ctx = "\n".join(lines)
+            except Exception:
+                rule_map_ctx = ""
 
         # 预注入共享笔记，避免前置 LLM 知识准备阶段不稳定
         note_tk.create_note("review_rules", review_input.review_rules, overwrite=True)
+        if rule_map_ctx:
+            note_tk.create_note("rule_map", rule_map_ctx, overwrite=True)
         note_tk.create_note("product_knowledge", review_input.product_knowledge, overwrite=True)
         note_tk.create_note("similar_tests", review_input.similar_tests, overwrite=True)
         note_tk.create_note("cli_reference", review_input.cli_reference, overwrite=True)
@@ -281,6 +462,10 @@ class ReviewPipeline:
                     f"- Sheet Role: {review_input.sheet_role}",
                 ]
             )
+            raw_detail = (review_input.bug_info.bug_detail_raw or "").strip()
+            if raw_detail:
+                bug_ctx_lines.append("- Bug Detail Raw (excerpt):")
+                bug_ctx_lines.append(_clip(raw_detail, 800))
             if review_input.key_questions:
                 bug_ctx_lines.append("- Key Questions:")
                 bug_ctx_lines.extend([f"  - {q}" for q in review_input.key_questions])
@@ -294,6 +479,14 @@ class ReviewPipeline:
             "待分析",
             overwrite=True,
         )
+
+        # Store Phase 1A/2/3A context in shared notes for cross-agent access
+        if _experience_ctx:
+            note_tk.create_note("review_experience", _experience_ctx, overwrite=True)
+        if _traceability_text:
+            note_tk.create_note("traceability_matrix", _traceability_text, overwrite=True)
+        if _change_impact:
+            note_tk.create_note("change_impact", _change_impact, overwrite=True)
 
         # Bug/change context string for prompts
         change_ctx = ""
@@ -315,6 +508,40 @@ class ReviewPipeline:
                 f"out_of_scope: {s.get('out_of_scope', '')}"
             )
 
+        # ── Toolkits — 赋予 Agent 主动查询能力 ────────────────────
+        product_skill_tk = ProductSkillToolkit()
+        knowledge_tk = KnowledgeToolkit(
+            mode="test_review",
+            unified_rag=self._unified_rag,
+            rules_engine=self._rules_engine,
+            hierarchy_prefix=review_input.function_hierarchy_prefix,
+        )
+
+        # Tool sets per agent role (plan Layer 2.3)
+        _coverage_tools = (
+            product_skill_tk.get_tools() + knowledge_tk.get_tools()
+            + note_tk.get_tools()
+        )
+        _cli_tools = [
+            t for t in knowledge_tk.get_tools()
+            if "search_product_knowledge" in t.get_function_name()
+        ] + note_tk.get_tools()
+        _spec_tools = [
+            t for t in knowledge_tk.get_tools()
+            if "get_review_rules" in t.get_function_name()
+        ] + note_tk.get_tools()
+        _load_tools = [
+            t for t in knowledge_tk.get_tools()
+            if "search_product_knowledge" in t.get_function_name()
+        ] + note_tk.get_tools()
+        _synthesis_tools = [
+            t for t in product_skill_tk.get_tools()
+            if any(
+                kw in t.get_function_name()
+                for kw in ("check_spec_constraints", "discover_cross_cutting")
+            )
+        ] + note_tk.get_tools()
+
         # ── Worker Agents ────────────────────────────────────────
         coverage_agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
@@ -322,25 +549,49 @@ class ReviewPipeline:
                 content=(
                     f"你是 {self.product_name} 测试评审的覆盖度分析专家。\n"
                     f"你的职责是评估测试用例的功能覆盖是否充分。\n\n"
+                    f"{_DATA_ISOLATION_PREAMBLE}\n"
+                    f"{_BUSINESS_COT_TEMPLATE}\n"
                     f"{change_ctx}\n{scope_ctx}\n\n"
                     f"<mandatory_instructions>\n"
-                    f"1. 先使用 read_note 读取 'product_knowledge' 和 'similar_tests' 笔记获取知识上下文\n"
-                    f"2. 读取 'bug_context'（若存在）并将 key_questions 逐条纳入分析\n"
-                    f"3. 基于笔记中的知识进行分析\n"
-                    f"4. 若知识不足，可使用 search_product_knowledge 进行补充检索\n"
+                    f"1. 你的评审对象仅限 <target_test_cases> 标签内的用例\n"
+                    f"2. 必须先完成 [业务逻辑逆向分析] 区块，再输出评审意见\n"
                     f"3. 分析维度:\n"
-                    f"   - 功能点遗漏: 产品功能规格中的需求是否都有对应测试用例\n"
-                    f"   - 边界条件: 关键参数的边界值/上下限是否覆盖\n"
-                    f"   - 异常场景: 错误输入、异常状态、容错场景是否覆盖\n"
+                    f"   - 功能点遗漏: <product_knowledge> 中已定义的需求是否都有对应用例\n"
+                    f"   - 边界条件: <product_knowledge> 中明确的参数范围/约束是否被覆盖\n"
+                    f"   - 异常场景: <product_knowledge> 中定义的错误状态/容错要求是否覆盖\n"
+                    f"   - 预期结果校验: 用例的预期结果是否与 <product_knowledge> 的定义一致\n"
                     f"   - 测试类型分布: Configuration/Boundary/Negative/Functional/Load 是否合理\n"
-                    f"5. 将覆盖度分析结论写入笔记 'coverage_analysis'\n"
-                    f"6. 在输出中给出规则编号与严重度\n"
+                    f"   - 配置并存/隔离: 当存在多种配置维度（如group与global、多个group）时，\n"
+                    f"     检查是否有用例验证不同配置并存时互不影响\n"
+                    f"   - 预期结果明确性: Expected Result 是否具体可验证，\n"
+                    f"     '配置成功'/'显示成功' 等模糊表述是否需要细化为具体效果和可验证标准\n"
+                    f"     CLI configure 用例还需说明配置是否可 save/restore（持久化验证）\n"
+                    f"   - 变更影响拓扑: 结合 <change_impact> 区分新增/已有功能，\n"
+                    f"     判断用例权重是否合理（新功能深度覆盖 > 已有功能基本覆盖）\n"
+                    f"4. 每个覆盖缺口必须引用 <product_knowledge> 中的具体段落作为证据\n"
+                    f"5. 若 <product_knowledge> 中无相关定义，可使用 search_product_knowledge 工具主动检索\n"
+                    f"6. 使用 query_module_tech_profile / discover_cross_cutting_concerns 工具推导横切面维度\n"
+                    f"7. 输出时先写问题与修改建议，再给严重度；规则编号放句末辅助说明\n"
+                    f"8. 如果 <target_test_cases> 内容以 '...[truncated]...' 结尾，\n"
+                    f"   必须先使用 read_note(\"test_cases\") 获取完整用例列表再评审。\n"
+                    f"   不要基于不完整的用例列表得出\"缺少某类用例\"的结论。\n"
+                    f"9. 预期结果验证原则:\n"
+                    f"   - 在声称\"用例仅验证配置成功/失败\"之前，必须逐条阅读相关用例的 Expected Result 字段\n"
+                    f"   - 如果 Expected Result 已描述了具体的加密/功能验证行为，不得声称\"未验证\"该行为\n"
+                    f"   - 不要仅凭 Description 判断用例是否覆盖某场景，必须同时阅读 Expected Result\n"
+                    f"   - 如不确定某个 CLI 参数的语义（如 plainname、global、default），应标注\"待确认\"\n"
+                    f"10. CLI 参数语义注意:\n"
+                    f"   - 不要假设所有参数值都是合法的 group_name（global、default 可能是保留字/特殊层级）\n"
+                    f"   - clear 命令的\"恢复默认\"与\"设为某模式\"可能语义等价，需查阅产品知识确认后才能判定\n"
+                    f"   - 测试用例的预期结果如\"删除失败\"可能是正确的（如未配置时删除操作应报错）\n"
                     f"</mandatory_instructions>\n\n"
                     f"{_OUTPUT_REQUIREMENTS}"
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
+            tools=_coverage_tools,
+            memory=_product_memory,
+            step_timeout=600.0,
         )
 
         cli_syntax_agent = ChatAgent(
@@ -348,24 +599,27 @@ class ReviewPipeline:
                 role_name="CLISyntaxCheckWorker",
                 content=(
                     f"你是 {self.product_name} 的CLI命令语法审核专家。\n"
-                    f"你的职责是验证测试用例步骤中的CLI命令是否语法正确。\n\n"
+                    f"你的职责是验证 <target_test_cases> 中测试步骤的CLI命令是否语法正确。\n\n"
+                    f"{_DATA_ISOLATION_PREAMBLE}\n"
                     f"<mandatory_instructions>\n"
-                    f"1. 先使用 read_note 读取 'cli_reference' 笔记获取CLI语法参考\n"
-                    f"2. 基于笔记中的CLI参考进行语法对照检查（所有CLI参考已由前序阶段准备完毕）\n"
-                    f"   如信息不足，可使用 search_product_knowledge(category_filter='cli/reference') 补充检索\n"
-                    f"3. 逐条检查测试步骤中出现的CLI命令:\n"
-                    f"   - 命令是否存在（非虚构的命令）\n"
+                    f"1. 基于 <cli_reference> 和 <product_knowledge> 进行语法与语义对照检查\n"
+                    f"2. 逐条检查 <target_test_cases> 中出现的CLI命令:\n"
+                    f"   - 命令是否在 <cli_reference> 中有定义（非虚构的命令）\n"
                     f"   - 参数格式是否正确（引号、空格、关键字拼写）\n"
                     f"   - 命令层级/模式是否正确（config mode vs show mode）\n"
-                    f"4. 将CLI语法检查结论写入笔记 'cli_syntax_check'\n"
-                    f"5. 如果所有命令语法正确，可简要说明通过\n"
-                    f"6. 在输出中给出规则编号与严重度\n"
+                    f"   - 预期结果是否与 <product_knowledge> 中的行为描述一致\n"
+                    f"3. 对 <cli_reference> 中未找到的命令用\u201c待确认\u201d标记\n"
+                    f"4. 如果所有命令语法正确，可简要说明通过依据\n"
+                    f"5. 输出时先写问题与修正建议，再给严重度；规则编号放句末辅助说明\n"
+                    f"6. 如果 <target_test_cases> 内容以 '...[truncated]...' 结尾，\n"
+                    f"   必须先使用 read_note(\"test_cases\") 获取完整用例列表再评审。\n"
                     f"</mandatory_instructions>\n\n"
                     f"{_OUTPUT_REQUIREMENTS}"
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
+            tools=_cli_tools,
+            step_timeout=300.0,
         )
 
         spec_compliance_agent = ChatAgent(
@@ -373,9 +627,10 @@ class ReviewPipeline:
                 role_name="SpecComplianceWorker",
                 content=(
                     f"你是 {self.product_name} 测试评审的规范符合度检查专家。\n"
-                    f"你的职责是检查测试用例是否符合编写规范和评审标准。\n\n"
+                    f"你的职责是检查 <target_test_cases> 中的测试用例是否符合编写规范。\n\n"
+                    f"{_DATA_ISOLATION_PREAMBLE}\n"
                     f"<mandatory_instructions>\n"
-                    f"1. 先使用 read_note 读取 'review_rules' 笔记获取评审规范（R01-R18检查清单）\n"
+                    f"1. 你的检查对象仅限 <target_test_cases> 标签内的用例\n"
                     f"2. 检查维度:\n"
                     f"   - 格式规范: 必填字段是否齐全，Case ID 格式是否正确\n"
                     f"   - Description 格式: 是否符合 '<功能点>: <行为描述>' 格式\n"
@@ -383,14 +638,15 @@ class ReviewPipeline:
                     f"   - 步骤与结果对应: 测试步骤与预期结果是否一一对应\n"
                     f"   - 优先级分布: 同一功能的用例优先级是否合理（不全为 High）\n"
                     f"   - 重复检查: 是否存在高度相似/重复的测试用例\n"
-                    f"3. 将规范检查结论写入笔记 'spec_compliance'\n"
-                    f"4. 在输出中给出规则编号与严重度\n"
+                    f"   - 预期结果与规格一致性: 用例的预期结果是否与 <product_knowledge> 定义吻合\n"
+                    f"3. 每个问题必须包含：问题、建议、证据；引用规则时只写规则原文描述\n"
+                    f"4. 若信息不足，写'待确认'并说明需要补充什么\n"
                     f"</mandatory_instructions>\n\n"
                     f"{_OUTPUT_REQUIREMENTS}"
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools(),
+            tools=_spec_tools,
         )
 
         load_stress_agent = ChatAgent(
@@ -398,45 +654,78 @@ class ReviewPipeline:
                 role_name="LoadStressWorker",
                 content=(
                     f"你是 {self.product_name} 的负载与压力测试评审专家。\n"
-                    f"请读取 'test_cases'、'product_knowledge'、'bug_context'（如有），"
-                    f"评估 Load/Stress 用例充分性，并按 R15/R16 给出结论。\n"
-                    f"将结果写入笔记 'load_stress_analysis'。\n\n"
+                    f"请基于任务正文提供的测试用例、产品知识与 bug 上下文，"
+                    f"评估 Load/Stress 用例充分性并给出结论。\n\n"
+                    f"{_DATA_ISOLATION_PREAMBLE}\n"
                     f"{_OUTPUT_REQUIREMENTS}"
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
+            tools=_load_tools,
         )
 
         synthesis_agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
                 role_name="ReviewSynthesisWorker",
                 content=(
-                    f"你是 {self.product_name} 测试评审的最终综合报告撰写者。\n"
-                    f"你的职责是综合所有专项分析结论，生成最终评审报告。\n\n"
+                    f"你是 {self.product_name} 测试评审的质量审计员（严苛模式）。\n"
+                    f"你的双重职责：综合各专项分析 + 过滤无中生有的评审意见。\n\n"
+                    f"{_DATA_ISOLATION_PREAMBLE}\n"
                     f"{change_ctx}\n{scope_ctx}\n\n"
                     f"<mandatory_instructions>\n"
-                    f"1. 使用 read_note 读取以下笔记:\n"
-                    f"   - 'coverage_analysis' (覆盖度分析)\n"
-                    f"   - 'cli_syntax_check' (CLI语法检查)\n"
-                    f"   - 'spec_compliance' (规范符合度)\n"
-                    f"   - 'load_stress_analysis' (负载/压力评估)\n"
-                    f"   - 'bug_context' (Bug 定向上下文，如有)\n"
-                    f"2. 综合三个维度的分析，去重合并，生成统一评审报告\n"
-                    f"3. 报告分节顺序固定为：\n"
-                    f"   - 总体结论\n"
-                    f"   - 逐行问题（含规则编号、严重度）\n"
-                    f"   - 覆盖缺口（含增删改建议）\n"
-                    f"   - Load/Stress 评估\n"
-                    f"   - 格式问题\n"
-                    f"   - 综合建议\n"
-                    f"   - [问题摘要]\n"
+                    f"【第一步：溯源校验 — 在整合前完成】\n"
+                    f"对 CoverageAnalysisWorker 提出的每一个\u201c覆盖缺口\u201d进行盘问：\n"
+                    f"  a) 这个缺口在 <product_knowledge> 中是否有明确的文本支撑？\n"
+                    f"  b) 如果仅仅是\u201c常规软件测试经验\u201d（如\u201c应测试超长输入\u201d、\u201c应增加并发场景\u201d），\n"
+                    f"     但 <product_knowledge> 中并未定义该约束/能力 → 剔除该意见\n"
+                    f"  c) 被引用的 Case ID 是否确实出现在 <target_test_cases> 中？\n"
+                    f"     如果是 <similar_tests> 中的 ID → 标记为幻觉并剔除\n\n"
+                    f"【溯源校验的证据来源扩展】\n"
+                    f"除 <product_knowledge> 外，以下来源也构成有效证据：\n"
+                    f"  - <target_test_cases> 自身已体现的技术特征（如用例中出现的协议、地址族、配置层级）\n"
+                    f"  - <cli_reference> 中命令的参数结构和层级关系\n"
+                    f"  - <bug_context> 中修复描述涉及的技术栈\n"
+                    f"当从这些来源可推导出测试对象的技术特征时，基于该特征提出的横切面覆盖建议\n"
+                    f"（如协议版本兼容性、地址族支持、多配置共存、配置可恢复性）不应被视为\u201c通用测试经验\u201d而剔除。\n"
+                    f"关键判断标准：该建议是否可从当前评审数据中推导出来，而非凭空臆测。\n\n"
+                    f"【第二步：输出整体评审意见（5-15条）】\n"
+                    f"不要按模块逐个输出。请作为资深测试架构师，输出全局性的评审发现。\n"
+                    f"每条发现必须使用表格格式：\n"
+                    f"### 发现 N: <简要标题>\n"
+                    f"| 项目 | 内容 |\n"
+                    f"|------|------|\n"
+                    f"| 涉及用例 | 模块名 > 用例 #A, #B, #C（列出具体编号） |\n"
+                    f"| 问题描述 | 因为[原因]，[用例#A]的[哪个字段]存在[什么问题] |\n"
+                    f"| 修改建议 | 用例 #A 的 Expected Result 从\"配置成功\"改为\"xxx具体内容\" |\n"
+                    f"| 优先级 | High/Medium/Low |\n\n"
+                    f"评审视角要求：\n"
+                    f"1. 特性级思维：理解什么是已有功能、什么是本次变更范围，据此判断测试重心\n"
+                    f"   - 已有功能：保证基本功能正常即可\n"
+                    f"   - 本次变更：需深入覆盖，用例以此为主\n"
+                    f"2. Spec驱动：从<product_knowledge>推导预期结果，特别是章节引用推导 case 预期\n"
+                    f"3. 每条建议必须定位到具体用例编号和字段，写清从什么改为什么\n"
+                    f"4. 使用 discover_cross_cutting_concerns 工具分析技术特征，检查是否存在测试盲区\n"
+                    f"5. 规格校验：对存疑的模块使用 check_spec_constraints 工具查询产品规格约束\n"
+                    f"6. 回归价值：评估已有回归用例是否覆盖了修复影响范围的基础路径\n"
+                    f"7. CLI预期明确性：CLI用例的预期结果是否具体可验证（非模糊表述）\n"
+                    f"   - '配置成功' -> 建议改为具体效果和可验证标准\n"
+                    f"   - CLI configure 用例还需说明配置是否可 save/restore\n"
+                    f"8. 在声称某需求未覆盖前，必须用 read_note(\"test_cases\") 搜索所有可能相关的用例编号，\n"
+                    f"   列出你检查过的用例，说明为什么它们不满足覆盖条件\n"
+                    f"9. 集成点审视: 检查新功能与已有功能的集成 case 是否反映新功能的影响\n\n"
+                    f"【重要】在进行溯源校验时，如果需要验证某个 Case ID 是否存在于测试用例中，\n"
+                    f"请使用 read_note(\"test_cases\") 读取完整的测试用例列表进行确认，\n"
+                    f"不要仅依赖 <target_test_cases> 中可能被截断的内容。\n\n"
+                    f"来自不同 Worker 的重复发现必须合并。\n"
+                    f"溯源校验过程仅作为内部质量控制，不要在报告正文中输出 [溯源校验摘要] 段落。\n"
+                    f"报告面向被评审人，只需呈现最终结论：哪里有问题、为什么、如何改进。\n"
                     f"</mandatory_instructions>\n\n"
                     f"{_OUTPUT_REQUIREMENTS}"
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools(),
+            tools=_synthesis_tools,
+            step_timeout=600.0,
         )
 
         # ── Coordinator & Task Agent ─────────────────────────────
@@ -456,7 +745,7 @@ class ReviewPipeline:
                 ),
             ),
             model=self.model,
-            tools=note_tk.get_tools(),
+            tools=[],
         )
 
         task_agent = ChatAgent(
@@ -477,13 +766,15 @@ class ReviewPipeline:
 
         # ── Workforce ───────────────────────────────────────────
 
+        pipeline_callback = ReviewPipelineCallback()
         workforce = Workforce(
             "ReviewPipeline Workforce",
             coordinator_agent=coordinator_agent,
             task_agent=task_agent,
             mode=WorkforceMode.PIPELINE,
-            task_timeout_seconds=240.0,  # avoid hanging a module indefinitely
-            callbacks=[ReviewPipelineCallback()],
+            task_timeout_seconds=700.0,  # must exceed step_timeout (600s)
+            callbacks=[pipeline_callback],
+            share_memory=True,  # Workers share discoveries across agents
         )
 
         workforce.add_single_agent_worker(
@@ -510,55 +801,354 @@ class ReviewPipeline:
         # ── Pipeline topology ────────────────────────────────────
         # fork[Coverage, CLISyntax, SpecCompliance, LoadStress] → join Synthesis
 
-        coverage_task = Task(
-            content=(
-                f"【覆盖度分析】\n"
-                f"请从共享笔记读取 test_cases、product_knowledge、similar_tests、bug_context，"
-                f"输出覆盖度问题并写入 coverage_analysis。"
-            ),
-            id="coverage_analysis",
+        def _budget(env_name: str, default: int) -> int:
+            env_to_cfg = {
+                "REVIEW_CASES_CTX_COVERAGE": "review.budgets.cases_coverage",
+                "REVIEW_CASES_CTX_CLI": "review.budgets.cases_cli",
+                "REVIEW_CASES_CTX_SPEC": "review.budgets.cases_spec",
+                "REVIEW_CASES_CTX_LOAD": "review.budgets.cases_load",
+                "REVIEW_CASES_CTX_SHARED": "review.budgets.cases_shared",
+                "REVIEW_RULES_CTX": "review.budgets.rules",
+                "REVIEW_RULE_MAP_CTX": "review.budgets.rule_map",
+                "REVIEW_PRODUCT_CTX": "review.budgets.product",
+                "REVIEW_SIMILAR_CTX": "review.budgets.similar",
+                "REVIEW_CLI_CTX": "review.budgets.cli",
+                "REVIEW_BUG_CTX": "review.budgets.bug",
+                "REVIEW_SYNTHESIS_OUTPUT_CHARS": "review.budgets.synthesis_output_chars",
+            }
+            cfg_key = env_to_cfg.get(env_name)
+            if not cfg_key:
+                return default
+            return max(200, cfg_int(cfg_key, default, env=env_name))
+
+        compact_mode = cfg_bool(
+            "review.context.compact_mode",
+            False,
+            env="REVIEW_CONTEXT_COMPACT_MODE",
+        )
+        if compact_mode:
+            shared_cases_ctx = _clip(
+                review_input.test_cases_text,
+                _budget("REVIEW_CASES_CTX_SHARED", 28000),
+            )
+            cases_coverage_ctx = shared_cases_ctx
+            cases_cli_ctx = shared_cases_ctx
+            cases_spec_ctx = shared_cases_ctx
+            cases_load_ctx = shared_cases_ctx
+        else:
+            cases_coverage_ctx = _clip(
+                review_input.test_cases_text,
+                _budget("REVIEW_CASES_CTX_COVERAGE", 48000),
+            )
+            cases_cli_ctx = _clip(
+                review_input.test_cases_text,
+                _budget("REVIEW_CASES_CTX_CLI", 32000),
+            )
+            cases_spec_ctx = _clip(
+                review_input.test_cases_text,
+                _budget("REVIEW_CASES_CTX_SPEC", 20000),
+            )
+            cases_load_ctx = _clip(
+                review_input.test_cases_text,
+                _budget("REVIEW_CASES_CTX_LOAD", 20000),
+            )
+        rules_ctx = _clip(
+            review_input.review_rules,
+            _budget("REVIEW_RULES_CTX", 2200),
+        )
+        rule_map_clip = _clip(
+            rule_map_ctx,
+            _budget("REVIEW_RULE_MAP_CTX", 1800),
+        )
+        product_ctx = _clip(
+            review_input.product_knowledge,
+            _budget("REVIEW_PRODUCT_CTX", 4000),
+        )
+        similar_ctx = _clip(
+            review_input.similar_tests,
+            _budget("REVIEW_SIMILAR_CTX", 1400),
+        )
+        cli_ctx = _clip(
+            review_input.cli_reference,
+            _budget("REVIEW_CLI_CTX", 8000),
         )
 
-        cli_task = Task(
-            content=(
-                f"【CLI语法检查】\n"
-                f"请从共享笔记读取 test_cases、cli_reference，检查 CLI 命令语法并写入 cli_syntax_check。"
-            ),
-            id="cli_syntax_check",
+        # ── 解析模块列表（用于 synthesis 逐模块输出要求）───────────
+        _module_list: list[tuple[str, int]] = []
+        _mod_header_re = re.compile(
+            r"^###\s*模块\s*\d+\s*/\s*\d+\s*[:：\s]\s*(.+)",
+            re.MULTILINE,
         )
+        _case_count_re = re.compile(r"-\s*用例数:\s*(\d+)")
+        for _mh in _mod_header_re.finditer(review_input.test_cases_text or ""):
+            _mod_name = _mh.group(1).strip()
+            # 尝试在紧随其后的几行中找到用例数
+            _after = (review_input.test_cases_text or "")[_mh.end():_mh.end() + 120]
+            _cc_m = _case_count_re.search(_after)
+            _cc = int(_cc_m.group(1)) if _cc_m else 0
+            _module_list.append((_mod_name, _cc))
+        _module_count = len(_module_list) or 1
 
-        spec_task = Task(
-            content=(
-                f"【规范符合度】\n"
-                f"请从共享笔记读取 test_cases、review_rules，检查规范符合度并写入 spec_compliance。"
-            ),
-            id="spec_compliance",
+        bug_ctx = _clip(
+            "\n".join([ln for ln in bug_ctx_lines if ln.strip()]) or "(无 bug 定向上下文)",
+            _budget("REVIEW_BUG_CTX", 2200),
         )
-        load_task = Task(
-            content=(
-                "【Load/Stress 评估】\n"
-                "请从共享笔记读取 test_cases、product_knowledge、bug_context，"
-                "评估负载和压力测试充分性并写入 load_stress_analysis。"
-            ),
-            id="load_stress_analysis",
-        )
+        manager_taskpack = {}
+        if isinstance(bug_profile, dict):
+            maybe_pack = bug_profile.get("__manager_taskpack__")
+            if isinstance(maybe_pack, dict):
+                manager_taskpack = maybe_pack
+        selected_workers_raw = manager_taskpack.get("selected_workers") if isinstance(manager_taskpack, dict) else None
+        selected_workers: List[str] = []
+        unknown_requested_workers: List[str] = []
+        worker_alias_mappings: List[Dict[str, str]] = []
+        if isinstance(selected_workers_raw, list):
+            for name in selected_workers_raw:
+                raw_worker = str(name or "").strip().lower()
+                normalized = _normalize_worker_name(raw_worker)
+                if not normalized:
+                    if raw_worker and raw_worker not in unknown_requested_workers:
+                        unknown_requested_workers.append(raw_worker)
+                    continue
+                if normalized != raw_worker:
+                    worker_alias_mappings.append({"requested": raw_worker, "mapped": normalized})
+                if normalized not in selected_workers:
+                    selected_workers.append(normalized)
+
+        worker_tasks_raw = manager_taskpack.get("worker_tasks") if isinstance(manager_taskpack, dict) else None
+        canonical_worker_tasks: Dict[str, Dict[str, Any]] = {}
+        if isinstance(worker_tasks_raw, dict):
+            for raw_name, payload in worker_tasks_raw.items():
+                normalized = _normalize_worker_name(str(raw_name or "").strip().lower())
+                if not normalized:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                merged = dict(canonical_worker_tasks.get(normalized) or {})
+                if payload.get("objective") and not merged.get("objective"):
+                    merged["objective"] = str(payload.get("objective")).strip()
+                old_focus = [str(x).strip() for x in (merged.get("focus_points") or []) if str(x).strip()]
+                new_focus = [str(x).strip() for x in (payload.get("focus_points") or []) if str(x).strip()]
+                if old_focus or new_focus:
+                    merged["focus_points"] = list(dict.fromkeys(old_focus + new_focus))
+                for k, v in payload.items():
+                    if k in ("objective", "focus_points"):
+                        continue
+                    merged[k] = v
+                canonical_worker_tasks[normalized] = merged
+
+        scheduler_warnings: List[str] = []
+        if unknown_requested_workers:
+            warning = (
+                "manager 请求了未注册 worker: "
+                + ", ".join(unknown_requested_workers)
+                + "；已忽略并使用已注册 worker/默认策略"
+            )
+            scheduler_warnings.append(warning)
+            logger.warning(warning)
+
+        # Manager 产品知识概要：让 Worker 理解产品功能后再评审
+        manager_product_ctx = ""
+        manager_plan = manager_taskpack.get("manager_plan") if isinstance(manager_taskpack, dict) else {}
+        if isinstance(manager_plan, dict):
+            manager_product_ctx = str(manager_plan.get("product_context") or "").strip()
+        if manager_product_ctx:
+            manager_product_ctx = _clip(manager_product_ctx, 2000)
+
+        def _taskpack_for(worker_type: str) -> str:
+            payload = canonical_worker_tasks.get(worker_type) or {}
+            if payload:
+                try:
+                    text = json.dumps(payload, ensure_ascii=False)
+                    return _clip(text, 1800)
+                except Exception:
+                    return ""
+            return ""
+
+        coverage_taskpack = _taskpack_for("coverage")
+        cli_taskpack = _taskpack_for("cli")
+        spec_taskpack = _taskpack_for("spec")
+        load_taskpack = _taskpack_for("load")
+        worker_task_defs = {
+            "coverage": {
+                "task": Task(
+                    content="".join(
+                        [
+                            "【覆盖度分析】\n",
+                            "请基于以下上下文输出覆盖度问题。\n\n",
+                            f"### Manager任务包\n{coverage_taskpack}\n\n" if coverage_taskpack else "",
+                            f"### 产品功能概要\n{manager_product_ctx}\n\n" if manager_product_ctx else "",
+                            f"<change_impact>\n{_change_impact}\n</change_impact>\n\n" if _change_impact else "",
+                            f"{_experience_ctx}\n\n" if _experience_ctx else "",
+                            f"{_traceability_text}\n\n" if _traceability_text else "",
+                            f"<target_test_cases>\n{cases_coverage_ctx}\n</target_test_cases>\n\n",
+                            f"<product_knowledge>\n{product_ctx}\n</product_knowledge>\n\n",
+                            f"<similar_tests>\n{similar_ctx}\n</similar_tests>\n\n",
+                            f"<bug_context>\n{bug_ctx}\n</bug_context>\n\n",
+                            "请在最后追加一行 WORKER_RESULT_JSON: {...}，字段: "
+                            "worker_type, findings, evidence_refs, confidence, unresolved, quality_flags\n",
+                        ]
+                    ),
+                    id="coverage_analysis",
+                ),
+                "read_hint": "coverage_analysis",
+            },
+            "cli": {
+                "task": Task(
+                    content="".join(
+                        [
+                            "【CLI语法检查】\n",
+                            "请基于以下上下文检查 CLI 命令语法。\n\n",
+                            f"### Manager任务包\n{cli_taskpack}\n\n" if cli_taskpack else "",
+                            f"### 产品功能概要\n{manager_product_ctx}\n\n" if manager_product_ctx else "",
+                            f"<change_impact>\n{_change_impact}\n</change_impact>\n\n" if _change_impact else "",
+                            f"{_experience_ctx}\n\n" if _experience_ctx else "",
+                            f"<target_test_cases>\n{cases_cli_ctx}\n</target_test_cases>\n\n",
+                            f"<cli_reference>\n{cli_ctx}\n</cli_reference>\n\n",
+                            f"<product_knowledge>\n{product_ctx}\n</product_knowledge>\n\n",
+                            f"<bug_context>\n{bug_ctx}\n</bug_context>\n\n",
+                            "请在最后追加一行 WORKER_RESULT_JSON: {...}，字段: "
+                            "worker_type, findings, evidence_refs, confidence, unresolved, quality_flags\n",
+                        ]
+                    ),
+                    id="cli_syntax_check",
+                ),
+                "read_hint": "cli_syntax_check",
+            },
+            "spec": {
+                "task": Task(
+                    content="".join(
+                        [
+                            "【规范符合度】\n",
+                            "请基于以下上下文检查规范符合度。\n\n",
+                            f"### Manager任务包\n{spec_taskpack}\n\n" if spec_taskpack else "",
+                            f"<target_test_cases>\n{cases_spec_ctx}\n</target_test_cases>\n\n",
+                            f"<product_knowledge>\n{product_ctx}\n</product_knowledge>\n\n",
+                            f"<review_rules>\n{rules_ctx}\n</review_rules>\n\n",
+                            f"<rule_map>\n{rule_map_clip}\n</rule_map>\n\n",
+                            "请在最后追加一行 WORKER_RESULT_JSON: {...}，字段: "
+                            "worker_type, findings, evidence_refs, confidence, unresolved, quality_flags\n",
+                        ]
+                    ),
+                    id="spec_compliance",
+                ),
+                "read_hint": "spec_compliance",
+            },
+            "load": {
+                "task": Task(
+                    content="".join(
+                        [
+                            "【Load/Stress 评估】\n",
+                            "请基于以下上下文评估负载和压力测试充分性。\n\n",
+                            f"### Manager任务包\n{load_taskpack}\n\n" if load_taskpack else "",
+                            f"<target_test_cases>\n{cases_load_ctx}\n</target_test_cases>\n\n",
+                            f"<product_knowledge>\n{product_ctx}\n</product_knowledge>\n\n",
+                            f"<bug_context>\n{bug_ctx}\n</bug_context>\n\n",
+                            "请在最后追加一行 WORKER_RESULT_JSON: {...}，字段: "
+                            "worker_type, findings, evidence_refs, confidence, unresolved, quality_flags\n",
+                        ]
+                    ),
+                    id="load_stress_analysis",
+                ),
+                "read_hint": "load_stress_analysis",
+            },
+        }
+        default_worker_order = ["coverage", "cli", "spec", "load"]
+        # Default to 2-worker mode (coverage+cli); synthesis absorbs spec/load dimensions.
+        # Override via __manager_taskpack__["selected_workers"] to restore 4-worker mode.
+        if not selected_workers:
+            selected_workers = ["coverage", "cli"]
+            if isinstance(selected_workers_raw, list) and selected_workers_raw:
+                scheduler_warnings.append(
+                    "manager 指定 worker 全部不可用，已回退默认 worker: coverage, cli"
+                )
+        active_worker_order = [
+            w for w in default_worker_order if w in selected_workers
+        ]
+        if not active_worker_order:
+            active_worker_order = list(default_worker_order)
+        active_tasks = [worker_task_defs[w]["task"] for w in active_worker_order]
+        read_hints = ", ".join(worker_task_defs[w]["read_hint"] for w in active_worker_order)
+
+        # ── 构建模块列表字符串 ──────────────────────────
+        _module_list_str = ""
+        if _module_list:
+            _module_list_str = "\n".join(
+                f"  - 模块 {i+1}/{_module_count}: {name} ({count} 条)"
+                for i, (name, count) in enumerate(_module_list)
+            )
+
+        # Synthesis worker receives fork worker outputs via pipeline_join,
+        # so it only needs clipped copies of data sources for traceability checks.
+        _synth_product_ctx = _clip(product_ctx, 3000)
+        _synth_cases_ctx = _clip(cases_coverage_ctx, 32000)
+        _synth_rule_map = _clip(rule_map_clip, 800)
 
         synthesis_task = Task(
             content=(
-                f"【综合评审报告】\n"
-                f"请读取 coverage_analysis、cli_syntax_check、spec_compliance、load_stress_analysis、bug_context，"
-                f"综合生成最终报告。"
+                f"【综合评审报告 — 整体评审模式】\n"
+                f"请读取 {read_hints}、bug_context，"
+                f"综合生成最终评审意见（5-15条全局性发现）。\n\n"
+                + (f"<change_impact>\n{_change_impact}\n</change_impact>\n\n" if _change_impact else "")
+                + (f"{_experience_ctx}\n\n" if _experience_ctx else "")
+                + (f"{_traceability_text}\n\n" if _traceability_text else "")
+                + f"【溯源校验要求 — 必须使用工具验证】在整合前，对每条覆盖缺口进行工具辅助校验：\n"
+                f"1. 使用 read_note(\"test_cases\") 获取完整测试用例列表（不要仅依赖下面的 <target_test_cases>）\n"
+                f"2. 对于声称\"用例缺失某功能\"的意见，在完整列表中搜索相关关键词确认\n"
+                f"3. 如果在完整用例中找到了原始 Worker 遗漏的覆盖用例 → 剔除该意见\n"
+                f"4. 引用的 Case ID 是否出现在完整测试用例列表中？非目标 ID 则剔除\n"
+                f"5. 该缺口是否有 <product_knowledge> 文本支撑？无支撑则剔除\n"
+                f"6. 仅基于\u201c通用测试经验\u201d的建议（如\u201c应测试超长输入\u201d）在 <product_knowledge> 无定义时剔除\n"
+                f"7. 证据来源扩展：除 <product_knowledge> 外，<target_test_cases> 自身体现的技术特征、\n"
+                f"  <cli_reference> 的命令结构、<bug_context> 涉及的技术栈也构成有效证据。\n"
+                f"  从这些来源可推导出的横切面覆盖建议不应被视为\u201c通用测试经验\u201d而剔除。\n"
+                + (f"\n【规格覆盖矩阵参考】\n"
+                   f"上方 <traceability_matrix> 展示了需求-用例覆盖缺口。\n"
+                   f"请重点关注'未覆盖的需求缺口'部分，这些是经过规格分解后确认未被测试覆盖的功能点。\n"
+                   f"但仍需通过 read_note(\"test_cases\") 二次确认缺口的真实性。\n\n"
+                   if _traceability_text else "")
+                + f"\n【输出格式要求 — 必须遵守】\n"
+                f"不要按模块逐个输出，而是输出 5-15 条全局性评审发现。\n"
+                f"报告面向被评审人（测试工程师），使用自然中文描述，不要暴露内部标签名。\n"
+                f"每条发现必须使用表格格式：\n"
+                f"### 发现 N: <简要标题>\n"
+                f"| 项目 | 内容 |\n"
+                f"|------|------|\n"
+                f"| 涉及用例 | 模块名 > 用例 #A, #B, #C（列出具体编号） |\n"
+                f"| 问题描述 | 因为[原因]，[用例#A]的[哪个字段]存在[什么问题] |\n"
+                f"| 修改建议 | 用例 #A 的 Expected Result 从\"配置成功\"改为\"xxx具体内容\" |\n"
+                f"| 优先级 | High/Medium/Low |\n\n"
+                f"格式约束：\n"
+                f"- 禁止使用术语：横切面维度、结构性建议、未覆盖、覆盖缺口、预期明确性\n"
+                f"- \"涉及用例\"必须列出具体用例编号（#N），禁止写\"case编号区间\"或\"共N条\"\n"
+                f"- \"修改建议\"必须可直接操作：用例编号 + 字段 + 从什么改为什么\n"
+                f"- 如果建议新增用例，给出完整的 Description + Expected Result 示例\n"
+                f"- 如果 Worker 声称大量需求未覆盖但无法列出具体用例编号对照，应剔除该发现\n\n"
+                f"在声称\"用例仅验证配置成功/失败\"前，必须逐条阅读该模块用例的 Expected Result。\n"
+                f"如果 Expected Result 已描述了具体的功能验证行为，不得声称\"未验证\"该行为。\n\n"
+                f"溯源校验过程仅作内部质量控制，不要在最终报告正文中输出 [溯源校验摘要]。\n\n"
+                f"<bug_context>\n{bug_ctx}\n</bug_context>\n\n"
+                f"<product_knowledge>\n{_synth_product_ctx}\n</product_knowledge>\n\n"
+                f"<target_test_cases>\n{_synth_cases_ctx}\n</target_test_cases>\n\n"
+                f"<rule_map>\n{_synth_rule_map}\n</rule_map>\n\n"
+                "请在报告末尾追加一行 MANAGER_JUDGEMENT_JSON: {...}，字段必须包含:\n"
+                "- pass (bool)\n- confidence (0-1)\n- failed_gates (list)\n"
+                "- unresolved (list)\n- consistency_alert (bool)\n"
+                "- supplement_tasks (list[{worker_type, objective, focus_points}])\n"
+                "- final_findings (list)\n"
+                "- hallucination_removed (list) — 被溯源校验剔除的意见列表\n"
             ),
             id="review_synthesis",
         )
 
-        workforce.pipeline_fork([coverage_task, cli_task, spec_task, load_task]) \
+        workforce.pipeline_fork(active_tasks) \
                  .pipeline_join(synthesis_task) \
                  .pipeline_build()
 
         logger.info(
             "Review Workforce Pipeline 已构建: "
-            "fork(Coverage, CLISyntax, SpecCompliance, LoadStress) → join(Synthesis)"
+            "fork(%s) → join(Synthesis)",
+            ", ".join(active_worker_order),
         )
 
         # ── Execute ──────────────────────────────────────────────
@@ -572,6 +1162,100 @@ class ReviewPipeline:
 
         # Extract final review text from the result
         review_text = result.result or "评审失败: Workforce 无返回"
+        result_state = str(getattr(result, "state", "") or "")
+        pipeline_had_failures = (
+            pipeline_callback.task_failed_count > 0
+            or "FAILED" in result_state.upper()
+        )
+
+        # ── Phase: Self-Refine Loop ─────────────────────────────────
+        # Evaluate → Feedback → Improve loop (SELF-REFINE pattern)
+        # Feedback grounded on traceability gaps + review experience (not pure introspection)
+        try:
+            if _traceability_text and review_text:
+                _refiner = ReviewRefiner(
+                    model=self.model,
+                    tools=_synthesis_tools,
+                    max_iterations=1,
+                    quality_threshold=0.75,
+                )
+                _refine_result = _refiner.refine(
+                    review_text=review_text,
+                    traceability_text=_traceability_text,
+                    experience_ctx=_experience_ctx,
+                    test_cases_text=review_input.test_cases_text,
+                    product_knowledge=review_input.product_knowledge,
+                )
+                review_text = _refine_result.improved_text
+                logger.info(
+                    "ReviewRefiner: %d iterations, initial=%.2f -> final=%.2f",
+                    _refine_result.iterations,
+                    _refine_result.initial_scores.get("overall", 0),
+                    _refine_result.final_scores.get("overall", 0),
+                )
+        except Exception as e:
+            raise RuntimeError("ReviewRefiner failed") from e
+
+        # ── Phase 1B: AdversarialVerifier — 对抗验证 ────────────────
+        verification_summary = ""
+        refuted_ids: List[str] = []
+        _MIN_REFUTE_CONFIDENCE = 0.8  # 只移除高置信度驳回
+        try:
+            findings_for_verify = self._extract_findings_for_verification(review_text)
+            if findings_for_verify:
+                from INAGENT.rag.cli_graph_store import get_cli_graph_store
+                verifier = AdversarialVerifier(
+                    model=self.model,
+                    cli_graph=get_cli_graph_store(),
+                )
+                v_report = verifier.verify(
+                    findings=findings_for_verify,
+                    test_cases_text=review_input.test_cases_text,
+                    product_knowledge=review_input.product_knowledge,
+                    review_experience=_experience_ctx,
+                )
+                # Only remove refuted findings with high confidence
+                refuted_ids = [
+                    r.finding_id for r in v_report.results
+                    if r.verdict == "refuted" and r.confidence >= _MIN_REFUTE_CONFIDENCE
+                ]
+                if refuted_ids:
+                    review_text = self._remove_refuted_findings(review_text, refuted_ids)
+                    logger.info(
+                        "AdversarialVerifier: removed %d high-confidence refuted findings: %s",
+                        len(refuted_ids), refuted_ids,
+                    )
+                uncertain_ids = [
+                    r.finding_id for r in v_report.results
+                    if r.verdict == "uncertain"
+                ]
+                if uncertain_ids:
+                    review_text = self._annotate_uncertain_findings(review_text, uncertain_ids)
+                # Log low-confidence refuted that were kept
+                low_conf_refuted = [
+                    r.finding_id for r in v_report.results
+                    if r.verdict == "refuted" and r.confidence < _MIN_REFUTE_CONFIDENCE
+                ]
+                if low_conf_refuted:
+                    logger.info(
+                        "AdversarialVerifier: kept %d low-confidence refuted findings: %s",
+                        len(low_conf_refuted), low_conf_refuted,
+                    )
+                verification_summary = v_report.to_prompt_text()
+                # Log verification summary but do NOT append to report
+                # (internal QA detail, not for reviewee)
+                logger.info(
+                    "AdversarialVerifier summary:\n%s", verification_summary,
+                )
+                logger.info(
+                    "AdversarialVerifier: %d confirmed, %d refuted (removed %d), %d uncertain",
+                    v_report.confirmed_count, v_report.refuted_count,
+                    len(refuted_ids), v_report.uncertain_count,
+                )
+        except Exception as e:
+            logger.warning(
+                "AdversarialVerifier failed (degraded — keeping all findings): %s", e,
+            )
 
         # Try to read knowledge summary from notes for backward compat
         knowledge_summary = ""
@@ -580,13 +1264,283 @@ class ReviewPipeline:
         except Exception:
             pass
 
+        # ── Phase 1C: ReviewJudge — LLM-as-Judge quality scoring ──────
+        judge_result: Dict[str, Any] = {}
+        try:
+            from INAGENT.review.review_judge import ReviewJudge
+
+            judge = ReviewJudge(model=self.model)
+            judge_result = judge.evaluate(
+                review_text=review_text,
+                test_cases_text=(review_input.test_cases_text or "")[:3000],
+                product_knowledge=(review_input.product_knowledge or "")[:3000],
+            )
+            if "error" not in judge_result:
+                logger.info(
+                    "ReviewJudge: overall=%.1f scores=%s",
+                    judge_result.get("overall", 0),
+                    judge_result.get("scores", {}),
+                )
+        except Exception as e:
+            logger.warning("ReviewJudge skipped: %s", e)
+
+        # ── Phase 1D: Retrieval usage tracking ────────────────────────
+        retrieval_usage: Dict[str, Any] = {}
+        try:
+            retrieval_usage = knowledge_tk.compute_retrieval_usage(review_text)
+            if retrieval_usage.get("total", 0) > 0:
+                logger.info(
+                    "Retrieval usage: total=%d cited=%d waste_ratio=%.2f",
+                    retrieval_usage["total"],
+                    retrieval_usage["cited"],
+                    retrieval_usage["waste_ratio"],
+                )
+        except Exception as e:
+            logger.debug("Retrieval usage tracking failed: %s", e)
+
         rag_status = {
             "graphrag_available": bool(getattr(self._unified_rag, "graphrag_retriever", None)),
             "graphrag_results_count": 0,
             "vector_results_count": 0,
             "rerank_applied": bool(getattr(self._unified_rag, "reranker", None)),
+            "requested_workers": list(selected_workers_raw) if isinstance(selected_workers_raw, list) else [],
+            "active_workers": list(active_worker_order),
+            "unknown_requested_workers": unknown_requested_workers,
+            "worker_alias_mappings": worker_alias_mappings,
+            "scheduler_warnings": scheduler_warnings,
+            "pipeline_state": result_state,
+            "pipeline_had_failures": pipeline_had_failures,
+            "task_failed_count": pipeline_callback.task_failed_count,
+            "task_completed_count": pipeline_callback.task_completed_count,
+            "failed_tasks": pipeline_callback.failed_tasks[:8],
+            "adversarial_refuted": refuted_ids,
+            "traceability_matrix": {
+                "total_requirements": _matrix.total_requirements if _traceability_text else 0,
+                "covered": _matrix.covered_count if _traceability_text else 0,
+                "gaps": _matrix.gap_count if _traceability_text else 0,
+            } if _traceability_text else {},
+            "judge_result": judge_result,
+            "retrieval_usage": retrieval_usage,
         }
         return review_text, knowledge_summary, rag_status
+
+    @staticmethod
+    def _extract_findings_for_verification(review_text: str) -> List[Dict[str, Any]]:
+        """Extract structured findings from review text for adversarial verification."""
+        findings: List[Dict[str, Any]] = []
+        # Match "### 发现 N: <title>" blocks
+        pattern = re.compile(
+            r"###\s*发现\s*(\d+)\s*[:：]\s*(.+?)(?=\n###\s*发现|\n---|\n\[溯源|\Z)",
+            re.DOTALL,
+        )
+        for m in pattern.finditer(review_text):
+            fid = f"F{int(m.group(1)):03d}"
+            block = m.group(2).strip()
+            title_line = block.split("\n", 1)[0].strip()
+
+            # Extract sub-fields (support both old bold-label and new table format)
+            scope_m = (
+                re.search(r"\|\s*涉及用例\s*\|\s*(.+?)\s*\|", block)
+                or re.search(r"\*\*涉及范围\*\*\s*[:：]\s*(.+)", block)
+                or re.search(r"\*\*涉及用例\*\*\s*[:：]\s*(.+)", block)
+            )
+            issue_m = (
+                re.search(r"\|\s*问题描述\s*\|\s*(.+?)\s*\|", block)
+                or re.search(r"\*\*问题或建议\*\*\s*[:：]\s*(.+?)(?=\n-\s*\*\*|\Z)", block, re.DOTALL)
+                or re.search(r"\*\*问题描述\*\*\s*[:：]\s*(.+?)(?=\n-\s*\*\*|\Z)", block, re.DOTALL)
+            )
+            evidence_m = (
+                re.search(r"\|\s*修改建议\s*\|\s*(.+?)\s*\|", block)
+                or re.search(r"\*\*依据\*\*\s*[:：]\s*(.+?)(?=\n-\s*\*\*|\Z)", block, re.DOTALL)
+                or re.search(r"\*\*修改建议\*\*\s*[:：]\s*(.+?)(?=\n-\s*\*\*|\Z)", block, re.DOTALL)
+            )
+            priority_m = (
+                re.search(r"\|\s*优先级\s*\|\s*(\w+)", block)
+                or re.search(r"\*\*优先级\*\*\s*[:：]\s*(\w+)", block)
+            )
+
+            findings.append({
+                "id": fid,
+                "title": title_line,
+                "scope": (scope_m.group(1).strip() if scope_m else ""),
+                "issue_or_suggestion": (issue_m.group(1).strip() if issue_m else ""),
+                "evidence": (evidence_m.group(1).strip() if evidence_m else ""),
+                "priority": (priority_m.group(1).strip() if priority_m else "Medium"),
+            })
+        return findings
+
+    @staticmethod
+    def _remove_refuted_findings(review_text: str, refuted_ids: List[str]) -> str:
+        """Remove refuted findings from the review text and renumber remaining."""
+        if not refuted_ids:
+            return review_text
+
+        # Map F001→1, F002→2, etc.
+        refuted_nums = set()
+        for fid in refuted_ids:
+            m = re.match(r"F(\d+)", fid)
+            if m:
+                refuted_nums.add(int(m.group(1)))
+
+        if not refuted_nums:
+            return review_text
+
+        # Split into finding blocks and non-finding parts
+        pattern = re.compile(
+            r"(###\s*发现\s*(\d+)\s*[:：].+?)(?=\n###\s*发现|\n---|\n\[溯源|\Z)",
+            re.DOTALL,
+        )
+        result_parts: List[str] = []
+        last_end = 0
+        new_num = 0
+        for m in pattern.finditer(review_text):
+            # Add text between findings
+            result_parts.append(review_text[last_end:m.start()])
+            finding_num = int(m.group(2))
+            if finding_num not in refuted_nums:
+                new_num += 1
+                # Renumber the finding
+                block = m.group(1)
+                block = re.sub(
+                    r"###\s*发现\s*\d+",
+                    f"### 发现 {new_num}",
+                    block,
+                    count=1,
+                )
+                result_parts.append(block)
+            else:
+                # Silently skip refuted findings (removal logged elsewhere)
+                pass
+            last_end = m.end()
+
+        result_parts.append(review_text[last_end:])
+        return "".join(result_parts)
+
+    @staticmethod
+    def _annotate_uncertain_findings(review_text: str, uncertain_ids: List[str]) -> str:
+        """对 uncertain 发现追加 [待确认] 标记行。"""
+        if not uncertain_ids:
+            return review_text
+        uncertain_nums = set()
+        for fid in uncertain_ids:
+            m = re.match(r"F(\d+)", fid)
+            if m:
+                uncertain_nums.add(int(m.group(1)))
+        if not uncertain_nums:
+            return review_text
+
+        pattern = re.compile(
+            r"(###\s*发现\s*(\d+)\s*[:：].+?)(?=\n###\s*发现|\n---|\n\[溯源|\Z)",
+            re.DOTALL,
+        )
+        parts: List[str] = []
+        last_end = 0
+        for m in pattern.finditer(review_text):
+            parts.append(review_text[last_end:m.start()])
+            finding_num = int(m.group(2))
+            block = m.group(1)
+            if finding_num in uncertain_nums and "| 验证状态 |" not in block:
+                block = block.rstrip() + "\n| 验证状态 | 待确认 |\n"
+            parts.append(block)
+            last_end = m.end()
+        parts.append(review_text[last_end:])
+        return "".join(parts)
+
+    def _build_change_impact(self, bug_profile: Optional[Dict[str, Any]]) -> str:
+        """Build change-impact topology text distinguishing new vs existing features.
+
+        Extracts from bug_profile the change scope (new features vs existing
+        features) so downstream agents can calibrate review depth accordingly.
+        """
+        if not bug_profile:
+            return ""
+        parts: List[str] = []
+        title = str(bug_profile.get("title") or bug_profile.get("Title") or "")
+        root_cause = str(bug_profile.get("root_cause") or "")
+        fixed_details = str(bug_profile.get("fixed_details") or "")
+        description = str(bug_profile.get("description") or bug_profile.get("Description") or "")
+
+        # Combine all textual signals
+        combined = f"{title}\n{root_cause}\n{fixed_details}\n{description}".lower()
+
+        # Heuristic extraction of new vs existing feature signals
+        new_feature_keywords = []
+        existing_feature_keywords = []
+
+        # Look for specific patterns in combined text
+        if any(kw in combined for kw in ["新增", "新功能", "new feature", "add support"]):
+            parts.append("【变更类型】新功能开发")
+        elif any(kw in combined for kw in ["修复", "fix", "bug", "缺陷"]):
+            parts.append("【变更类型】缺陷修复")
+        else:
+            parts.append("【变更类型】功能增强")
+
+        # Extract change scope from bug_profile fields
+        scope_fields = ["regression_scope", "change_scope", "impact_scope"]
+        for sf in scope_fields:
+            val = str(bug_profile.get(sf) or "").strip()
+            if val:
+                parts.append(f"【影响范围】{val}")
+                break
+
+        if title:
+            parts.append(f"【变更标题】{title}")
+        if root_cause:
+            parts.append(f"【根因描述】{root_cause[:500]}")
+
+        # Build priority guidance for agents
+        parts.append("")
+        parts.append("【评审深度指引】")
+        parts.append("- 新增/变更功能: 需深入覆盖边界、负向、并发场景")
+        parts.append("- 已有功能(回归): 保证基本功能正常即可，聚焦与变更的交互点")
+        parts.append("- 横切面(协议/地址族/配置层级): 挑选核心场景验证兼容性")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _build_tech_context(bug_profile: Optional[Dict[str, Any]]) -> str:
+        if not bug_profile:
+            return ""
+        try:
+            from INAGENT.rag.cli_graph_store import get_cli_graph_store
+            store = get_cli_graph_store()
+            store._ensure_loaded()
+        except Exception:
+            return ""
+
+        modules = set()
+        for field in ("product_module", "regression_scope", "change_scope"):
+            val = bug_profile.get(field)
+            if isinstance(val, list):
+                modules.update(v.strip() for v in val if v)
+            elif isinstance(val, str) and val.strip():
+                modules.update(m.strip() for m in val.replace(",", " ").split())
+
+        if not modules:
+            return ""
+
+        lines: List[str] = []
+        for mid, node in store._module_nodes.items():
+            label = node.get("label", mid)
+            if not any(m.lower() in label.lower() or label.lower() in m.lower() for m in modules):
+                continue
+            proto = ", ".join(node.get("protocol_stack") or [])
+            layer = node.get("layer", "")
+            tags = ", ".join(node.get("feature_tags") or [])
+            addr = ", ".join(node.get("address_family") or [])
+            parts = []
+            if proto:
+                parts.append(f"协议栈={proto}")
+            if layer:
+                parts.append(f"层级={layer}")
+            if addr:
+                parts.append(f"地址族={addr}")
+            if tags:
+                parts.append(f"功能标签={tags}")
+            if parts:
+                lines.append(f"模块 {label}: {' | '.join(parts)}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _run_async(workforce: Workforce, task: Task) -> Task:
@@ -607,13 +1561,18 @@ class ReviewPipeline:
         if loop and loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
+                return pool.submit(asyncio.run, coro).result(timeout=1800)
         else:
             return asyncio.run(coro)
 
 
 class ReviewPipelineCallback(WorkforceCallback):
     """Workforce 运行日志回调。"""
+
+    def __init__(self) -> None:
+        self.task_failed_count = 0
+        self.task_completed_count = 0
+        self.failed_tasks: List[Dict[str, str]] = []
 
     def log_task_created(self, event: TaskCreatedEvent) -> None:
         logger.info("[ReviewWF] task created=%s", event.task_id)
@@ -632,6 +1591,7 @@ class ReviewPipelineCallback(WorkforceCallback):
         logger.info("[ReviewWF] start task=%s worker=%s", event.task_id, event.worker_id)
 
     def log_task_completed(self, event: TaskCompletedEvent) -> None:
+        self.task_completed_count += 1
         logger.info(
             "[ReviewWF] done task=%s worker=%s (%.1fs)",
             event.task_id,
@@ -640,6 +1600,14 @@ class ReviewPipelineCallback(WorkforceCallback):
         )
 
     def log_task_failed(self, event: TaskFailedEvent) -> None:
+        self.task_failed_count += 1
+        self.failed_tasks.append(
+            {
+                "task_id": event.task_id,
+                "worker_id": event.worker_id or "",
+                "error": event.error_message or "",
+            }
+        )
         logger.warning("[ReviewWF] failed task=%s err=%s", event.task_id, event.error_message)
 
     def log_worker_created(self, event: WorkerCreatedEvent) -> None:

@@ -96,7 +96,14 @@ REVIEW_CHECKLIST = [
     {"id": "R12", "category": "质量", "check": "测试步骤与预期结果一一对应", "severity": "Medium"},
     {"id": "R13", "category": "一致性", "check": "同一功能的测试用例优先级分布合理（不全为 High）", "severity": "Low"},
     {"id": "R14", "category": "一致性", "check": "无重复/高度相似的测试用例", "severity": "Medium"},
+    {"id": "R15", "category": "覆盖度", "check": "Load 类型用例覆盖并发连接、大流量和稳定性等关键维度", "severity": "Medium"},
+    {"id": "R16", "category": "覆盖度", "check": "高优先级功能包含 Stress/负载回归场景", "severity": "Medium"},
+    {"id": "R17", "category": "Bug定向", "check": "Bug-to-Case 用例覆盖 Root Cause 场景", "severity": "High"},
+    {"id": "R18", "category": "Bug定向", "check": "Bug-to-Case 用例覆盖 Testing Suggestions 的关键验证点", "severity": "High"},
+    {"id": "R19", "category": "回归", "check": "已有回归用例覆盖了修复影响范围内的基础功能路径", "severity": "Medium"},
+    {"id": "R20", "category": "回归", "check": "out_of_scope 判定有功能树或数据流的结构化依据", "severity": "Medium"},
 ]
+RULE_INDEX = {item["id"]: item.copy() for item in REVIEW_CHECKLIST}
 
 
 class TestRulesEngine:
@@ -178,6 +185,10 @@ class TestRulesEngine:
         """获取评审检查清单。"""
         return [item.copy() for item in REVIEW_CHECKLIST]
 
+    def get_rule_map(self) -> Dict[str, Dict[str, str]]:
+        """获取规则映射字典（rule_id -> 规则定义）。"""
+        return {k: v.copy() for k, v in RULE_INDEX.items()}
+
     def get_rules_context(self, purpose: str = "write") -> str:
         """
         将所有规则整合为上下文文本，供 LLM prompt 使用。
@@ -219,6 +230,14 @@ class TestRulesEngine:
             parts.append("\n## 评审检查清单")
             for item in REVIEW_CHECKLIST:
                 parts.append(f"- [{item['severity']}] {item['id']}: {item['check']}")
+            parts.append("\n## 规则引用格式（强约束）")
+            parts.append("- 引用规则时必须同时给出 rule_id 与规则原文 check，二者必须一一对应。")
+            parts.append("- 若证据不足，写“待确认”，不得强行标注规则编号。")
+            parts.append("- 每个问题按以下字段组织：")
+            parts.append("  - 问题: <具体问题与影响>")
+            parts.append("  - 建议: <可执行的修复建议>")
+            parts.append("  - 证据: <用例编号/CLI片段/知识来源>")
+            parts.append("  - 规则: <Rxx - 规则原文>")
 
         return "\n".join(parts)
 

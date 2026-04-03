@@ -68,29 +68,12 @@ def test_cli_reference_retriever_basic_search(temp_dir: Path):
     assert any("health" in item["command_prefix"].lower() for item in by_keyword)
 
 
-def test_knowledge_router_test_write_mode_includes_rules_and_cli(temp_dir: Path):
-    """test_write 模式下，路由器应至少包含 Rules 和 CLI 上下文。"""
-    # 构造最小 CLI 参考
-    cli_file = temp_dir / "cli.json"
-    cli_file.write_text(
-        """
-[
-  {
-    "page_content": "slb virtual VS1 10.0.0.1 80",
-    "metadata": {
-      "command_prefix": "slb virtual",
-      "product_module": "SLB",
-      "config_mode": "global",
-      "step_type": "virtual_services",
-      "section_title": "Virtual Service",
-      "source_file": "cli.json"
-    }
-  }
-]
-        """.strip(),
-        encoding="utf-8",
-    )
-
+def test_knowledge_router_test_write_mode_includes_rules(temp_dir: Path):
+    """test_write 模式下，路由器应至少包含 Rules 上下文。
+    
+    新统一架构下，CLI/设计/测试文档全部通过 UnifiedRAG 检索，
+    不再有独立的 CLI 层。Rules 引擎作为确定性规则独立注入。
+    """
     # 构造最小测试列表目录（TestRulesEngine 会按固定文件名加载）
     ref_dir = temp_dir / "reference"
     ref_dir.mkdir(parents=True, exist_ok=True)
@@ -118,9 +101,8 @@ def test_knowledge_router_test_write_mode_includes_rules_and_cli(temp_dir: Path)
         (ref_dir / name).write_text(minimal_test_item, encoding="utf-8")
 
     router = KnowledgeRouter(
-        cli_retriever=CLIReferenceRetriever(cli_path=cli_file),
-        rules_engine=TestRulesEngine(reference_dir=ref_dir),
         unified_rag=None,
+        rules_engine=TestRulesEngine(reference_dir=ref_dir),
         hybrid_retriever=None,
         reranker=None,
     )
@@ -133,22 +115,16 @@ def test_knowledge_router_test_write_mode_includes_rules_and_cli(temp_dir: Path)
     )
 
     assert "rules" in out["layers_used"]
-    assert "cli" in out["layers_used"]
 
     # 有规则上下文
     assert out["rules_context"]
     assert "测试类型" in out["rules_context"]
 
-    # 有 CLI 检索结果
-    assert out["cli_results"]
-    assert any("slb virtual" in item["command_prefix"].lower() for item in out["cli_results"])
-
-    # 合并上下文中含有分层标题
+    # 合并上下文中含有规则标题
     assert "[测试规范]" in out["context"]
-    assert "[CLI 参考]" in out["context"]
 
 
 def test_classify_for_mode_mapping():
     """模式到知识层映射应与设计一致。"""
     layers = classify_for_mode("test_review")
-    assert layers == [KnowledgeLayer.RULES, KnowledgeLayer.TEST]
+    assert layers == [KnowledgeLayer.RULES, KnowledgeLayer.TEST, KnowledgeLayer.DESIGN]

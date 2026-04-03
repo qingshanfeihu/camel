@@ -28,26 +28,32 @@ logger = logging.getLogger(__name__)
 # GraphRAG 工作目录（位于 INAGENT/graphrag_index）
 GRAPHRAG_INDEX_DIR = Path(__file__).resolve().parent.parent / "graphrag_index"
 
-# 实体类型定义（网络配置领域 + 测试领域）
+# 实体类型定义 — 仅保留 CLI/配置领域相关类型
+# CLI 叶子节点是结构化命令数据，无需 test_case/scenario/requirement 等类型
 DEFAULT_ENTITY_TYPES = [
-    # 产品知识层
-    "product_module",      # 产品功能模块：SLB, LLB, GSLB, 基础网络
-    "protocol",            # 协议类型：HTTP, HTTPS, TCP, UDP, HTTP/2
-    "feature",             # 产品功能特性：HTTP2 多路复用, 头部压缩
-    "design_knowledge",    # 设计知识：数据结构, 状态机, API, 设计决策
-    # CLI/配置层
-    "command",             # CLI 命令完整语法
-    "parameter",           # 命令参数及范围/默认值
-    "step_type",           # 配置步骤类型
-    "configuration",       # 配置项或配置块
-    "config_example",      # 配置实例（完整命令序列示例）
-    # 需求/规格层
-    "requirement",         # 功能需求/规格要求
-    "scenario",            # 配置场景
-    # 测试层
-    "test_case",           # 测试用例概要
-    "test_standard",       # 测试标准定义
+    "product_module",      # 产品功能模块：SLB, LLB, GSLB, 基础网络, AAA
+    "protocol",            # 协议类型：HTTP, HTTPS, TCP, UDP, SIP, RTSP
+    "feature",             # 产品功能特性：会话保持, 健康检查, SSL 卸载
+    "command",             # CLI 命令（完整语法，如 slb virtual http）
+    "parameter",           # 命令参数（名称/类型/范围/默认值）
+    "configuration",       # 配置项或配置块（如 虚拟服务配置, 健康检查配置）
 ]
+
+# 实体类型推断规则 — 供 post-processing 修复脏实体时使用
+# 规则按优先级从高到低排列；新增类型时在此同步维护匹配模式
+# pattern 匹配对象：entity description 文本（中英文混合、小写匹配）
+ENTITY_TYPE_INFER_RULES: list[tuple[str, str]] = [
+    # (regex_pattern, entity_type)
+    (r'功能模块|产品模块|\bmodule\b',                              "product_module"),
+    (r'网络协议|\bprotocol\b(?!\s*type)',                          "protocol"),
+    (r'配置(项|块|集合|段)|configuration\s*block|配置集',          "configuration"),
+    (r'功能(特性|特征)|\bfeature\b',                               "feature"),
+    (r'CLI\s*命令|\b命令\b(?!参数)|\bcli\s+command\b',             "command"),
+    (r'(命令)?参数|取值范围|默认值|必填|可选参数',                  "parameter"),
+]
+
+# 当 description 和 title 均无法判定类型时的兜底类型
+ENTITY_TYPE_FALLBACK = "parameter"
 
 
 @dataclass
@@ -55,13 +61,16 @@ class GraphRAGConfig:
     """GraphRAG 配置类"""
     # LLM 配置
     api_key: str = ""
-    api_base: str = "https://api.siliconflow.cn/v1"
-    chat_model: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-    embedding_model: str = "BAAI/bge-m3"
+    api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    chat_model: str = "qwen-plus"
+    embedding_model: str = "text-embedding-v4"
     
     # 处理配置
+    # Qwen-Plus 128K context，chunk.size 单位是 tokens（tiktoken cl100k_base 编码）
+    # CLI 混合文档 ~2 chars/token → 16000 tokens ≈ 32KB = ~80 条命令/chunk
+    # 约 22 次 extract_graph LLM 调用（1M chars / 32KB = ~31 chunks × 并发处理）
     chunk_size: int = 16000
-    chunk_overlap: int = 400
+    chunk_overlap: int = 300
     max_gleanings: int = 0
     
     # 实体类型
@@ -84,18 +93,23 @@ class GraphRAGConfig:
     max_retries: int = 6
 
 
-def load_siliconflow_config() -> GraphRAGConfig:
+def load_gateway_config() -> GraphRAGConfig:
     """从环境变量加载 LLM Gateway 配置"""
-    from INAGENT.utils.llm_config import get_siliconflow_config
+    from INAGENT.utils.llm_config import get_gateway_config
     
-    config = get_siliconflow_config()
+    config = get_gateway_config()
     
     return GraphRAGConfig(
         api_key=config.get("api_key", ""),
-        api_base=config.get("base_url", "https://api.siliconflow.cn/v1"),
-        chat_model=config.get("chat_model", "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"),
-        embedding_model=config.get("embedding_model", "BAAI/bge-m3"),
+        api_base=config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        chat_model=config.get("chat_model", "qwen-plus"),
+        embedding_model=config.get("embedding_model", "text-embedding-v4"),
     )
+
+
+def load_siliconflow_config() -> GraphRAGConfig:
+    """兼容旧命名：等价于 load_gateway_config。"""
+    return load_gateway_config()
 
 
 def generate_graphrag_settings(config: GraphRAGConfig, output_dir: Path = None) -> Path:
@@ -182,7 +196,7 @@ def generate_graphrag_settings(config: GraphRAGConfig, output_dir: Path = None) 
         "embed_text": {
             "model_id": "default_embedding_model",
             "vector_store_id": "default_vector_store",
-            "batch_max_tokens": 4000,
+            "batch_max_tokens": 8000,  # text-embedding-v4 支持 8192 tokens/batch
         },
         "extract_graph": {
             "model_id": "default_chat_model",
@@ -202,7 +216,16 @@ def generate_graphrag_settings(config: GraphRAGConfig, output_dir: Path = None) 
             "async_mode": "threaded",
         },
         "cluster_graph": {
-            "max_cluster_size": 10,
+            # CLI 模块通常包含 20-100 条命令，max_cluster_size=10 会过度分裂
+            # 设为 25 使模块级 community 保持完整
+            "max_cluster_size": 25,
+        },
+        "prune_graph": {
+            # 移除极低频节点：只出现1次的实体可能是提取噪声
+            "min_node_freq": 2,
+            "min_node_degree": 1,
+            # 移除占边权重极低的边（最低 5% 分位数）
+            "min_edge_weight_pct": 0.05,
         },
         "extract_claims": {
             "enabled": False,  # 禁用 claim 提取，简化流程
@@ -212,7 +235,7 @@ def generate_graphrag_settings(config: GraphRAGConfig, output_dir: Path = None) 
             "graph_prompt": "prompts/community_report_graph.txt",
             "text_prompt": "prompts/community_report_text.txt",
             "max_length": 2000,
-            "max_input_length": 8000,
+            "max_input_length": 16000,  # Qwen 可处理更长的社区报告输入
         },
         "embed_graph": {
             "enabled": False,  # 暂时禁用 node2vec
@@ -272,8 +295,8 @@ def generate_extract_graph_prompt(entity_types: List[str] = None) -> str:
     """
     entity_types = entity_types or DEFAULT_ENTITY_TYPES
     
-    prompt = f"""你是网络设备配置与测试领域的知识图谱构建专家。
-你需要从技术文档（包括配置文档、功能规格书、测试列表）中提取实体和关系，构建知识图谱。
+    prompt = f"""你是网络设备 CLI 配置领域的知识图谱构建专家。
+输入文档是由 XML 命令树生成的结构化 CLI 参考文档，每个文本块描述一个命令叶子节点及其参数。
 
 # 实体类型定义
 
@@ -283,15 +306,13 @@ def generate_extract_graph_prompt(entity_types: List[str] = None) -> str:
 # 关系类型定义
 
 请识别以下关系：
-- DEPENDS_ON: 配置依赖关系（如：健康检查依赖后端服务器）
-- SUPPORTS_PROTOCOL: 协议支持关系（如：虚拟服务支持HTTP协议）
-- BELONGS_TO: 归属关系（如：slb_health_checks 归属于 SLB 模块）
-- CONFIGURES: 配置关系（如：命令配置某个参数）
-- IS_ADVANCED_FEATURE: 高级功能关系（如：会话保持是虚拟服务的高级功能）
-- PART_OF: 组成关系（如：参数是命令的一部分）
-- TESTS: 测试关系（如：测试用例测试某个功能特性）
-- COVERS: 覆盖关系（如：测试集覆盖某个需求）
-- VERIFIES: 验证关系（如：测试用例验证某个配置项的正确性）
+- BELONGS_TO: 归属关系（命令/配置项 归属于 模块）
+- PART_OF: 组成关系（参数 是 命令 的一部分）
+- CONFIGURES: 配置关系（命令 配置 某个功能特性）
+- DEPENDS_ON: 配置依赖关系（如：健康检查 依赖 后端服务器配置）
+- SUPPORTS_PROTOCOL: 协议支持关系（如：虚拟服务 支持 HTTP 协议）
+- IS_VARIANT_OF: 变体关系（如：`no` 形式 是 某命令的 否定变体）
+- PRECEDES: 操作前置关系（配置步骤的正确顺序，如 create 先于 bind）
 
 # 输出格式
 
@@ -302,7 +323,7 @@ def generate_extract_graph_prompt(entity_types: List[str] = None) -> str:
 ("relationship"{{tuple_delimiter}}<source_entity>{{tuple_delimiter}}<target_entity>{{tuple_delimiter}}<relationship_type>{{tuple_delimiter}}<relationship_description>{{tuple_delimiter}}<relationship_strength>){{record_delimiter}}
 
 其中：
-- entity_name: 实体名称（使用规范化名称，如 slb_virtual_services）
+- entity_name: 实体名称（使用规范化名称，如 slb_virtual_http）
 - entity_type: 实体类型（从上述类型中选择）
 - entity_description: 实体描述（简洁明了）
 - relationship_type: 关系类型（从上述类型中选择）
@@ -311,12 +332,14 @@ def generate_extract_graph_prompt(entity_types: List[str] = None) -> str:
 
 # 重要规则
 
-1. **动态协议识别**：从文本中动态识别所有协议类型（HTTP, HTTPS, TCP, UDP, SIP, RTSP 等），不要硬编码
-2. **模块前缀**：步骤类型应使用模块前缀（如 slb_health_checks 而非 health_checks）
-3. **层级关系**：识别模块层级（基础网络 → 应用层 → 高级功能）
-4. **配置顺序**：识别配置依赖关系，确保正确的配置顺序
-5. **测试关联**：识别测试用例与功能需求/配置项之间的 TESTS/COVERS/VERIFIES 关系
-6. **需求追踪**：从功能规格书中提取 requirement 实体，建立需求到测试的链路
+1. **模块归属**：entity_name 使用 XML func 名称或命令前缀（如 `slb_virtual_http`）
+2. **协议识别**：从文本中动态识别协议（HTTP, HTTPS, TCP, UDP, SIP, RTSP 等），不要硬编码
+3. **层级结构**：识别 模块 → 配置项 → 命令 → 参数 的层级实体
+4. **配置顺序**：识别命令间的前置依赖（create 先于 bind）
+5. **克制提取**：只提取文本中明确出现的实体，不要推断或补全
+6. **类型必填**：entity_type 必须是上述6种类型之一（product_module/protocol/feature/command/parameter/configuration），不加引号、不允许留空；命令语法 `<参数名>` 或 `[参数名]` 中的参数归类为 `parameter`；无法确定时缺省归为 `parameter`
+7. **忽略内部函数**：文档中 `内部函数:` 字段仅供参考，**不要**将内部函数名（如 `clear_cache_settings`）单独提取为实体，也不要将 `function` 作为实体类型输出
+8. **类型格式**：entity_type 写英文小写原始名称，不加引号（正确: `command`，错误: `"command"`）
 
 # 输入文本
 
@@ -332,16 +355,12 @@ def generate_extract_graph_prompt(entity_types: List[str] = None) -> str:
 def _get_entity_type_description(entity_type: str) -> str:
     """获取实体类型描述"""
     descriptions = {
-        "product_module": "产品功能模块（如 SLB、LLB、GSLB、基础网络、安全）",
-        "protocol": "网络协议类型（如 HTTP、HTTPS、TCP、UDP、SIP）",
-        "step_type": "配置步骤类型（如 slb_virtual_services、slb_health_checks）",
-        "configuration": "配置项或配置块（如 虚拟服务配置、健康检查配置）",
-        "command": "CLI 命令（如 slb virtual http、slb real）",
-        "parameter": "配置参数（如 vip、vport、max_connection）",
-        "scenario": "配置场景（如 HTTP_SLB_CONFIG、HTTPS_SSL_CONFIG）",
-        "test_case": "测试用例（如 HTTP2_Stream_Multiplexing_Test、Health_Check_Test）",
-        "requirement": "功能需求/规格要求（如 SW Functional Spec 中的具体功能要求）",
-        "feature": "产品功能特性（如 HTTP2 多路复用、头部压缩、服务器推送）",
+        "product_module": "产品功能模块（如 SLB、LLB、GSLB、AAA、基础网络）",
+        "protocol":       "网络协议类型（如 HTTP、HTTPS、TCP、UDP、SIP、RTSP）",
+        "feature":        "产品功能特性（如 会话保持、健康检查、SSL 卸载、负载均衡）",
+        "command":        "CLI 命令（完整语法，如 slb virtual http、aaa ldap server）",
+        "parameter":      "命令参数（名称/类型/取值范围/默认值）",
+        "configuration":  "配置项或配置块（如 虚拟服务配置、健康检查配置）",
     }
     return descriptions.get(entity_type, "其他实体")
 
@@ -671,38 +690,12 @@ If you don't know the answer, just say so. Do not make anything up.
     }
 
 
-# 已有专用检索器处理的来源文件，不纳入 GraphRAG 索引
-_DEDICATED_RETRIEVER_SOURCES = {"cli.json", "app.json", "cli.pdf"}
+# 新策略：默认不排除来源文件，避免关系知识仅停留在专用检索器而不进入图谱。
+# 如需恢复旧行为，可通过配置注入来源文件名单。
+_DEDICATED_RETRIEVER_SOURCES: set[str] = set()
 
-# document_category → knowledge_layer 映射
-_CATEGORY_TO_LAYER = {
-    "spec/prd": "design",
-    "spec/func_spec": "design",
-    "spec/design": "design",
-    "test/test_list": "test",
-    "test/test_strategy": "test",
-    "test/test_template": "rules",
-}
-
-
-def _classify_source_file(source_file: str, blocks: list) -> str:
-    """使用 document_classifier 对来源文件进行分类。"""
-    # 优先使用 block 级别已有的 document_category
-    for block in blocks:
-        cat = block.get("metadata", {}).get("document_category", "")
-        if cat:
-            return cat
-    # 回退到文件名 + 内容分类
-    try:
-        from INAGENT.data_tools.document_classifier import classify_document
-        preview = ""
-        for block in blocks[:5]:
-            text = block.get("text", "") or block.get("page_content", "")
-            preview += text[:400] + "\n"
-        category, _ = classify_document(Path(source_file), content_preview=preview)
-        return category
-    except Exception:
-        return "unknown"
+# 当前 knowledge_base.json 全部是 XML 生成的 cli/reference 叶子节点
+# knowledge_layer 固定为 "cli"，无需分类映射
 
 
 def prepare_input_documents(
@@ -713,16 +706,20 @@ def prepare_input_documents(
     """
     准备 GraphRAG 输入文档
 
-    将 knowledge_base.json 按来源文件合并为大文档，供 GraphRAG 分块和提取。
-    合并后每个来源文件的所有 block 会拼接为一个文档，由 GraphRAG 的 text_splitter
-    按 chunk_size 自动切分为 text_unit，从而最大化利用 LLM 的上下文窗口。
+    将 knowledge_base.json 按命令族（command family）分组，每族生成一个文档。
+    命令族 = 剥去 clear/no/show 操作前缀后的前 2 个实义词，例如：
+      - "aaa samlsp sp acs"      → aaa_samlsp
+      - "ha consistency on"      → ha_consistency
+      - "clear slb group member" → slb_group
+      - "clear ha group port"    → ha_group
+
+    相比原模块级分组（aaa / ha / slb 等），命令族分组产生更细粒度的文档：
+      - 原模块级：~129 个文档，text unit 大小 8000-16000 token（超出 source 预算）
+      - 命令族级：~300-500 个文档，text unit 大小 200-2000 token（可进入 local context source）
 
     排除规则：
-    - cli.json / app.json / cli.pdf 由 CLIReferenceRetriever 专门处理，不纳入 GraphRAG
-
-    元数据增强：
-    - document_category: 自动分类（spec/prd, spec/func_spec, spec/design, test/test_list 等）
-    - knowledge_layer: 知识层归属（design / test / rules）
+    - 默认不排除来源（_DEDICATED_RETRIEVER_SOURCES 为空），确保 CLI/功能描述也可进入图谱关系层
+    - 如需排除，可在 _DEDICATED_RETRIEVER_SOURCES 中显式声明来源文件名
 
     Args:
         knowledge_base_path: knowledge_base.json 路径
@@ -756,27 +753,67 @@ def prepare_input_documents(
         chunks = chunks[:max_documents]
     _m("prepare_input_documents: loaded %d chunks", len(chunks))
 
-    # --- 按来源文件合并 block ---
-    source_groups: OrderedDict[str, list] = OrderedDict()
+    # 按命令族分组：剥去 clear/no/show/display 操作前缀，取前 2 个实义词构成命令族 key。
+    #
+    # 示例:
+    #   "aaa samlsp sp acs"      → aaa_samlsp   (set/show/no/clear 同族)
+    #   "ha consistency on"      → ha_consistency
+    #   "clear slb group member" → slb_group     (剥去 "clear")
+    #   "clear ha group port"    → ha_group      (剥去 "clear")
+    #   "show aaa method bind"   → aaa_method    (剥去 "show")
+    #
+    # 动机：原模块级分组产生 text unit 达 8000-16000 token，超出 local_context_build
+    # source 预算（text_unit_prop=0.5 × max_context_tokens=12000 ≈ 6000 token），
+    # 导致 sources 始终为 0，local context 只剩合成摘要句。
+    # 命令族分组后每族约 2-15 条命令，text unit 约 200-2000 token，可完整进入 source 预算。
+    #
+    # 第二道保险：首轮 2-word 分组后若族>_SPLIT_THRESHOLD 条，自动下探到 3-word 前缀，
+    # 防止 slb_group / slb_real 等大族依然超出 source 预算。
+    _OP_FIRST_WORDS = {"clear", "no", "show", "display"}
+    _SPLIT_THRESHOLD = 40  # 2-word 族超过此数量时继续拆到 3-word
+
+    def _sig_words(chunk: dict) -> list:
+        meta = chunk.get("metadata") or {}
+        cmd = (meta.get("command_prefix") or "").strip()
+        words = cmd.split()
+        if words and words[0].lower() in _OP_FIRST_WORDS:
+            words = words[1:]
+        return words or [(meta.get("product_module") or "unknown").split("_")[0]]
+
+    def _family_key(words: list, depth: int = 2) -> str:
+        return "_".join(words[:depth]) if words else "unknown"
+
+    # 第一遍：2-word 命令族分组
+    first_pass: dict = {}
+    excluded_blocks = 0
     for chunk in chunks:
         src = (chunk.get("metadata") or {}).get("source_file", "unknown")
-        source_groups.setdefault(src, []).append(chunk)
+        if src in _DEDICATED_RETRIEVER_SOURCES:
+            excluded_blocks += 1
+            continue
+        words = _sig_words(chunk)
+        key = f"{src}#{_family_key(words, depth=2)}"
+        first_pass.setdefault(key, []).append((src, chunk, words))
 
-    _m("prepare_input_documents: grouped into %d source files", len(source_groups))
+    # 第二遍：过大族（>_SPLIT_THRESHOLD）下探到 3-word
+    module_groups: dict = {}
+    for two_w_key, items in first_pass.items():
+        if len(items) > _SPLIT_THRESHOLD:
+            for src, chunk, words in items:
+                key = f"{src}#{_family_key(words, depth=3)}"
+                module_groups.setdefault(key, []).append(chunk)
+        else:
+            for src, chunk, words in items:
+                module_groups.setdefault(two_w_key, []).append(chunk)
+
+    _m("prepare_input_documents: grouped into %d command-family docs (was module-level)", len(module_groups))
 
     documents = []
-    excluded_blocks = 0
-    for source_file, group_chunks in source_groups.items():
-        # 跳过已有专用检索器处理的来源
-        if source_file in _DEDICATED_RETRIEVER_SOURCES:
-            excluded_blocks += len(group_chunks)
-            _m("prepare_input_documents: SKIP %s (%d blocks, dedicated retriever)",
-               source_file, len(group_chunks))
-            continue
-
-        # 分类
-        category = _classify_source_file(source_file, group_chunks)
-        layer = _CATEGORY_TO_LAYER.get(category, "design")
+    for group_key, group_chunks in module_groups.items():
+        source_file, _, mod_id = group_key.partition("#")
+        # 所有数据均为 cli/reference，knowledge_layer 固定为 cli
+        category = "cli/reference"
+        layer = "cli"
 
         parts: list[str] = []
         for chunk in group_chunks:
@@ -785,30 +822,15 @@ def prepare_input_documents(
                 continue
             metadata = chunk.get("metadata", {})
 
-            # 构建带元数据前缀的文本
+            # 构建带元数据前缀的文本（仅保留通用字段）
             meta_prefix = []
             document_category = metadata.get("document_category", "") or category
             product_module = metadata.get("product_module", "unknown")
-            protocol_type = metadata.get("protocol_type", [])
-            feature_name = metadata.get("feature_name", "")
-            step_type = metadata.get("step_type", "unknown")
-            section_title = metadata.get("section_title", "")
 
             if document_category:
                 meta_prefix.append(f"[分类: {document_category}]")
             if product_module and product_module != "unknown":
                 meta_prefix.append(f"[模块: {product_module}]")
-            if protocol_type:
-                if isinstance(protocol_type, list):
-                    meta_prefix.append(f"[协议: {', '.join(protocol_type)}]")
-                else:
-                    meta_prefix.append(f"[协议: {protocol_type}]")
-            if feature_name:
-                meta_prefix.append(f"[功能: {feature_name}]")
-            if step_type and step_type != "unknown":
-                meta_prefix.append(f"[步骤: {step_type}]")
-            if section_title:
-                meta_prefix.append(f"[章节: {section_title}]")
 
             enriched = " ".join(meta_prefix) + "\n" + text if meta_prefix else text
             parts.append(enriched)
@@ -820,10 +842,11 @@ def prepare_input_documents(
         doc_idx = len(documents)
         documents.append({
             "id": f"src_{doc_idx:04d}",
-            "text": f"[来源: {source_file}]\n\n{merged_text}",
-            "title": source_file,
+            "text": f"[模块: {mod_id}] [来源: {source_file}]\n\n{merged_text}",
+            "title": f"{source_file}#{mod_id}",
             "metadata": {
                 "source_file": source_file,
+                "product_module": mod_id,
                 "document_category": category,
                 "knowledge_layer": layer,
                 "block_count": len(group_chunks),
@@ -833,10 +856,10 @@ def prepare_input_documents(
     output_path = input_dir / "documents.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(documents, f, ensure_ascii=False, indent=2)
-    _m("prepare_input_documents DONE | %d sources -> %d docs (excluded %d blocks from dedicated retrievers), wrote to %s",
-       len(source_groups), len(documents), excluded_blocks, str(output_path))
-    logger.info("已准备 %d 个合并文档到 %s（来源 %d 个文件，排除 %d blocks，原始 %d 个 block）",
-                len(documents), input_dir, len(source_groups), excluded_blocks, len(chunks))
+    _m("prepare_input_documents DONE | %d module-docs written (excluded %d blocks), path=%s",
+       len(documents), excluded_blocks, str(output_path))
+    logger.info("已准备 %d 个模块文档到 %s（排除 %d blocks，原始 %d 个 block）",
+                len(documents), input_dir, excluded_blocks, len(chunks))
     return input_dir
 
 
@@ -891,12 +914,203 @@ def initialize_graphrag_index(
         _m("initialize_graphrag_index: prepare_input_documents START")
         prepare_input_documents(knowledge_base_path, workspace_dir)
         _m("initialize_graphrag_index: prepare_input_documents DONE")
+
+        _invalidate_stale_output(workspace_dir, _m)
+
     (workspace_dir / "output").mkdir(exist_ok=True)
     (workspace_dir / "cache").mkdir(exist_ok=True)
     (workspace_dir / "logs").mkdir(exist_ok=True)
     _m("initialize_graphrag_index DONE | %s", str(workspace_dir))
     logger.info("GraphRAG 工作空间已初始化: %s", workspace_dir)
     return workspace_dir
+
+
+def _input_fingerprint(workspace_dir: Path) -> str:
+    import hashlib
+    docs_path = workspace_dir / "input" / "documents.json"
+    if not docs_path.exists():
+        return ""
+    h = hashlib.sha256()
+    h.update(docs_path.read_bytes())
+    return h.hexdigest()
+
+
+def _invalidate_stale_output(workspace_dir: Path, _m=None) -> None:
+    """Compare input fingerprint with last build; clear output/cache if input changed."""
+    import shutil
+
+    fp_path = workspace_dir / "output" / ".input_fingerprint"
+    current_fp = _input_fingerprint(workspace_dir)
+    if not current_fp:
+        return
+
+    if fp_path.exists():
+        old_fp = fp_path.read_text(encoding="utf-8").strip()
+        if old_fp == current_fp:
+            return
+
+    output_dir = workspace_dir / "output"
+    has_parquets = any(output_dir.glob("*.parquet")) if output_dir.exists() else False
+    if has_parquets:
+        if _m:
+            _m("Input fingerprint changed, clearing stale output/ and cache/")
+        else:
+            logger.info("Input fingerprint changed, clearing stale output/ and cache/")
+        for f in output_dir.glob("*.parquet"):
+            f.unlink()
+        lancedb_dir = output_dir / "lancedb"
+        if lancedb_dir.exists():
+            shutil.rmtree(lancedb_dir, ignore_errors=True)
+        cache_dir = workspace_dir / "cache"
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            cache_dir.mkdir(exist_ok=True)
+
+    output_dir.mkdir(exist_ok=True)
+    fp_path.write_text(current_fp, encoding="utf-8")
+
+
+def _check_output_referential_integrity(output_dir: Path) -> Dict[str, Any]:
+    import pandas as pd
+
+    integrity: Dict[str, Any] = {
+        "ok": True,
+        "problems": [],
+        "details": {},
+    }
+
+    try:
+        entities_path = output_dir / "entities.parquet"
+        relationships_path = output_dir / "relationships.parquet"
+        text_units_path = output_dir / "text_units.parquet"
+        documents_path = output_dir / "documents.parquet"
+
+        if not (entities_path.exists() and relationships_path.exists() and text_units_path.exists()):
+            integrity["skipped"] = True
+            return integrity
+
+        entities = pd.read_parquet(entities_path)
+        relationships = pd.read_parquet(relationships_path)
+        text_units = pd.read_parquet(text_units_path)
+        documents = pd.read_parquet(documents_path) if documents_path.exists() else None
+
+        def _normalize_refs(value: Any) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                raw_items = [value]
+            else:
+                if hasattr(value, "tolist"):
+                    value = value.tolist()
+                if isinstance(value, dict):
+                    raw_items = list(value.values())
+                elif isinstance(value, (list, tuple, set)):
+                    raw_items = list(value)
+                else:
+                    raw_items = [value]
+
+            normalized: List[str] = []
+            for item in raw_items:
+                if item is None:
+                    continue
+                try:
+                    if pd.isna(item):
+                        continue
+                except Exception:
+                    pass
+                normalized.append(str(item))
+            return normalized
+
+        def _collect_refs(frame: Any, column: str) -> Tuple[set[str], int]:
+            if column not in frame.columns:
+                return set(), 0
+            refs: set[str] = set()
+            total = 0
+            for value in frame[column]:
+                items = _normalize_refs(value)
+                refs.update(items)
+                total += len(items)
+            return refs, total
+
+        def _record_problem(name: str, missing_refs: set[str], source_count: int, target_count: int) -> None:
+            integrity["ok"] = False
+            integrity["problems"].append({
+                "name": name,
+                "missing_count": len(missing_refs),
+                "sample_missing": sorted(missing_refs)[:5],
+                "source_count": source_count,
+                "target_count": target_count,
+            })
+
+        text_unit_ids = {str(item) for item in text_units["id"].dropna().astype(str)} if "id" in text_units.columns else set()
+        entity_text_unit_refs, entity_ref_total = _collect_refs(entities, "text_unit_ids")
+        relationship_text_unit_refs, relationship_ref_total = _collect_refs(relationships, "text_unit_ids")
+
+        integrity["details"].update({
+            "entity_count": len(entities),
+            "relationship_count": len(relationships),
+            "text_unit_count": len(text_units),
+            "entity_text_unit_ref_total": entity_ref_total,
+            "relationship_text_unit_ref_total": relationship_ref_total,
+        })
+
+        missing_entity_text_unit_refs = entity_text_unit_refs - text_unit_ids
+        if missing_entity_text_unit_refs:
+            _record_problem(
+                "entities.text_unit_ids_missing_in_text_units",
+                missing_entity_text_unit_refs,
+                len(entity_text_unit_refs),
+                len(text_unit_ids),
+            )
+
+        missing_relationship_text_unit_refs = relationship_text_unit_refs - text_unit_ids
+        if missing_relationship_text_unit_refs:
+            _record_problem(
+                "relationships.text_unit_ids_missing_in_text_units",
+                missing_relationship_text_unit_refs,
+                len(relationship_text_unit_refs),
+                len(text_unit_ids),
+            )
+
+        if documents is not None and "id" in documents.columns:
+            document_ids = {str(item) for item in documents["id"].dropna().astype(str)}
+            text_unit_document_refs, text_unit_document_ref_total = _collect_refs(text_units, "document_ids")
+            document_text_unit_refs, document_text_unit_ref_total = _collect_refs(documents, "text_unit_ids")
+
+            integrity["details"].update({
+                "document_count": len(documents),
+                "text_unit_document_ref_total": text_unit_document_ref_total,
+                "document_text_unit_ref_total": document_text_unit_ref_total,
+            })
+
+            missing_text_unit_document_refs = text_unit_document_refs - document_ids
+            if missing_text_unit_document_refs:
+                _record_problem(
+                    "text_units.document_ids_missing_in_documents",
+                    missing_text_unit_document_refs,
+                    len(text_unit_document_refs),
+                    len(document_ids),
+                )
+
+            missing_document_text_unit_refs = document_text_unit_refs - text_unit_ids
+            if missing_document_text_unit_refs:
+                _record_problem(
+                    "documents.text_unit_ids_missing_in_text_units",
+                    missing_document_text_unit_refs,
+                    len(document_text_unit_refs),
+                    len(text_unit_ids),
+                )
+
+        return integrity
+
+    except Exception as exc:
+        integrity["ok"] = False
+        integrity["error"] = str(exc)
+        integrity["problems"].append({
+            "name": "referential_integrity_check_failed",
+            "message": str(exc),
+        })
+        return integrity
 
 
 def validate_graphrag_index(workspace_dir: Path = None) -> Dict[str, Any]:
@@ -919,6 +1133,7 @@ def validate_graphrag_index(workspace_dir: Path = None) -> Dict[str, Any]:
         "workspace": str(workspace_dir),
         "checks": {},
         "missing": [],
+        "errors": [],
     }
     
     # 检查 settings.yaml
@@ -975,6 +1190,15 @@ def validate_graphrag_index(workspace_dir: Path = None) -> Dict[str, Any]:
         }
         result["checks"]["index_files"] = index_files
         result["index_built"] = all(index_files.values())
+        if result["index_built"]:
+            integrity = _check_output_referential_integrity(output_dir)
+            result["checks"]["referential_integrity"] = integrity
+            if not integrity.get("ok", True):
+                result["valid"] = False
+                for problem in integrity.get("problems", []):
+                    name = problem.get("name")
+                    if name:
+                        result["errors"].append(name)
     else:
         result["index_built"] = False
     
@@ -996,6 +1220,11 @@ def get_graphrag_status() -> Dict[str, Any]:
         "workspace": validation["workspace"],
         "validation": validation,
     }
+
+    integrity = validation.get("checks", {}).get("referential_integrity")
+    if integrity is not None:
+        status["integrity_ok"] = integrity.get("ok", True)
+        status["integrity_problems"] = integrity.get("problems", [])
     
     # 统计索引信息
     if status["index_built"]:

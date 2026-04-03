@@ -1,0 +1,172 @@
+bug_to_case:
+  runtime:
+    reduce_camel_logs: true
+    module_timeout_seconds: 480
+    clean_output_dir: true
+    fail_on_soft_failed: false
+  retry:
+    module_retry_times: 1
+    module_retry_backoff_seconds: 2.0
+  progress:
+    enable_progress_bar: true
+  global_audit:
+    enabled: true
+    max_modules_in_prompt: 64
+    max_context_chars: 3600
+    light_check_case_threshold: 1
+    strict_parse: true
+    retry_on_parse_fail: 1
+    scope_classifier:
+      min_out_scope_confidence: 0.95
+      max_out_scope_ratio: 0.20
+      min_active_module_ratio: 0.75
+      uncertain_policy: "full"
+  report:
+    include_evidence_summary: false
+    include_run_status_section: false
+    evidence:
+      strict_domain_filter: false
+  performance:
+    target_sheet_seconds: 480
+    max_supplement_seconds: 180
+    max_total_tokens_per_sheet: 0
+  manager_first:
+    require_strict_plan_parse: true
+    max_supplement_rounds: 1
+    acceptance:
+      min_confidence: 0.7
+      max_unresolved: 0
+    context:
+      max_taskpack_chars: 2400
+  gates:
+    max_avg_module_seconds: 0
+    max_p95_module_seconds: 0
+    max_failed_modules: 0
+    min_manager_first_accept_rate: 0
+  rag:
+    timeout_seconds: 90
+    graph_query_timeout_seconds: 45
+    graph_timeout_cooldown_seconds: 120
+    min_score: 0.08
+    enable_cache: true
+    cache_max_entries: 256
+    max_rag_queries: 3
+    manager_context_max_modules: 8
+    manager_context_max_chars: 2200
+    max_graph_queries_per_retrieve: 4
+    include_graph_response_text: false
+    use_graphrag_for_product: true
+    use_graphrag_for_cli: false
+    use_graphrag_for_similar: false
+    allow_uncategorized_docs: false
+    suppress_community_warning: true
+    verbose_doc_logs: false
+
+workflow:
+  use_graphrag: true
+  embedding_dim: 1024
+
+storage:
+  qdrant:
+    url: ""
+    api_key: ""
+    collection: "workflow_rag"
+  neo4j:
+    enabled: false
+    uri: "bolt://127.0.0.1:7687"
+    username: "neo4j"
+    password: "neo4j"
+    database: "neo4j"
+
+knowledge_router:
+  enable_hybrid_fusion: true
+
+app:
+  product_name: ""
+
+review:
+  context:
+    compact_mode: true
+  budgets:
+    cases_shared: 4200
+    cases_coverage: 5200
+    cases_cli: 4200
+    cases_spec: 3600
+    cases_load: 3600
+    bug: 2200
+    rules: 2200
+    rule_map: 1800
+    product: 2600
+    similar: 1400
+    cli: 5200
+    synthesis_output_chars: 2200
+
+workforce:
+  verify_worker_timeout_seconds: 420
+  traffic_worker_timeout_seconds: 600
+
+llm:
+  gateway:
+    base_url: ""
+    api_key: ""
+    chat_model: ""
+    embedding_model: "text-embedding-v4"
+    rerank_model: ""
+  siliconflow:
+    api_key: ""
+    chat_model: "mineru-vlm"
+    embedding_model: "text-embedding-v4"
+    reranker_model: "gte-rerank-v2"
+    model_type: "Qwen/Qwen2.5-72B-Instruct"
+    timeout_seconds: 60
+    temperature: 0.7
+    chat_rpm: 1000
+    chat_tpm: 50000
+    embedding_rpm: 2000
+    embedding_tpm: 500000
+    reranker_rpm: 2000
+    reranker_tpm: 500000
+  baidu:
+    qianfan_api_key: ""
+    api_key: ""
+    secret_key: ""
+  hunyuan:
+    base_url: ""
+    model: ""
+
+system:
+  lb_device_ip: ""
+  lb_username: ""
+  vm_mgmt_ip: ""
+  vm_username: ""
+  vm_ssh_port: 22
+
+scripts:
+  lb_env_plan_json: ""
+
+database:
+  postprocess_unknown_module: false
+
+auto_convert:
+  mineru_tools_config_json: ""
+  input:
+    # 额外知识来源路径（文件或目录），支持逗号/分号分隔；默认仅扫描 INAGENT/knowledge_base。
+    # 示例: "C:/path/a.docx;C:/path/folder_with_docs"
+    extra_paths: ""
+  force_siliconflow: "1"
+  assume_yes: ""
+  vllm:
+    url: ""
+    models_timeout_seconds: 8
+    infer_timeout_seconds: 30
+  network:
+    retry_attempts: 3
+    retry_delay_seconds: 5
+    timeout_seconds: 8
+    hf_check_url: "https://huggingface.co/api/models/opendatalab/PDF-Extract-Kit-1.0"
+  parallel:
+    max_workers: 16
+    max_files: 3
+    max_pages_test: ""
+  mineru:
+    cli: ""

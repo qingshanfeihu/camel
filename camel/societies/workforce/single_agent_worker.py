@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Type, Union
@@ -26,7 +27,10 @@ from camel.agents import ChatAgent
 from camel.agents.chat_agent import AsyncStreamingChatAgentResponse
 from camel.logger import get_logger
 from camel.responses import ChatAgentResponse
-from camel.societies.workforce.prompts import PROCESS_TASK_PROMPT
+from camel.societies.workforce.prompts import (
+    PROCESS_TASK_PROMPT,
+    TOOL_PROCESS_TASK_PROMPT,
+)
 from camel.societies.workforce.structured_output_handler import (
     StructuredOutputHandler,
 )
@@ -39,6 +43,11 @@ from camel.tasks.task import Task, TaskState, is_task_result_insufficient
 from camel.utils.context_utils import ContextUtility
 
 logger = get_logger(__name__)
+WORKFORCE_VERBOSE_OUTPUT = os.getenv("WORKFORCE_VERBOSE_OUTPUT", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 class AgentPool:
@@ -442,21 +451,107 @@ class SingleAgentWorker(Worker):
         worker_agent = await self._get_worker_agent()
         response_content = ""
 
+        # Detect whether this worker has tools registered
+        has_tools = bool(getattr(self.worker, '_internal_tools', {}))
+
         try:
             dependency_tasks_info = self._get_dep_tasks_info(dependencies)
-            prompt = str(
-                PROCESS_TASK_PROMPT.format(
-                    content=task.content,
-                    parent_task_content=task.parent.content
-                    if task.parent
-                    else "",
-                    dependency_tasks_info=dependency_tasks_info,
-                    additional_info=task.additional_info,
-                )
-            )
 
-            if self.use_structured_output_handler and self.structured_handler:
+            if has_tools:
+                # ── Tool-equipped worker path ──
+                # Use the tool-friendly prompt (no JSON-only constraints)
+                # so the model can freely execute tool-calling loops.
+                prompt = str(
+                    TOOL_PROCESS_TASK_PROMPT.format(
+                        content=task.content,
+                        parent_task_content=task.parent.content
+                        if task.parent
+                        else "",
+                        dependency_tasks_info=dependency_tasks_info,
+                        additional_info=task.additional_info,
+                    )
+                )
+
+                # Keep tool workers bounded to prevent long runaway loops.
+                original_timeout = worker_agent.step_timeout
+                original_max_iter = worker_agent.max_iteration
+                worker_agent.step_timeout = max(
+                    120.0, original_timeout or 120.0
+                )
+                if worker_agent.max_iteration is None:
+                    worker_agent.max_iteration = 30
+                else:
+                    worker_agent.max_iteration = min(
+                        worker_agent.max_iteration,
+                        30,
+                    )
+                try:
+                    response = await self._safe_agent_call(
+                        worker_agent, prompt
+                    )
+                finally:
+                    worker_agent.step_timeout = original_timeout
+                    worker_agent.max_iteration = original_max_iter
+
+                # Extract final text from response
+                if isinstance(response, AsyncStreamingChatAgentResponse):
+                    content = ""
+                    async for chunk in response:
+                        if chunk.msg:
+                            content = chunk.msg.content
+                    response_content = content
+                else:
+                    response_content = (
+                        response.msg.content if response.msg else ""
+                    )
+
+                # Fallback: when max_iteration is reached the last
+                # response is a tool call with empty content.  Summarise
+                # the tool call results so the downstream pipeline still
+                # receives useful context.
+                if (
+                    not response_content.strip()
+                    and not isinstance(
+                        response, AsyncStreamingChatAgentResponse
+                    )
+                    and response.info
+                ):
+                    tool_records = response.info.get("tool_calls", [])
+                    if tool_records:
+                        parts = []
+                        for rec in tool_records:
+                            res_str = str(rec.result)[:500]
+                            parts.append(
+                                f"[{rec.tool_name}] {res_str}"
+                            )
+                        response_content = (
+                            "(max_iteration reached — tool call summary)\n"
+                            + "\n".join(parts)
+                        )
+
+                # Wrap the free-text response into TaskResult
+                if response_content.strip():
+                    task_result = TaskResult(
+                        content=response_content, failed=False
+                    )
+                else:
+                    task_result = TaskResult(
+                        content="Tool-equipped worker returned empty response",
+                        failed=True,
+                    )
+
+            elif self.use_structured_output_handler and self.structured_handler:
                 # Use structured output handler for prompt-based extraction
+                prompt = str(
+                    PROCESS_TASK_PROMPT.format(
+                        content=task.content,
+                        parent_task_content=task.parent.content
+                        if task.parent
+                        else "",
+                        dependency_tasks_info=dependency_tasks_info,
+                        additional_info=task.additional_info,
+                    )
+                )
                 enhanced_prompt = (
                     self.structured_handler.generate_structured_prompt(
                         base_prompt=prompt,
@@ -502,6 +597,16 @@ class SingleAgentWorker(Worker):
                 )
             else:
                 # Use native structured output if supported
+                prompt = str(
+                    PROCESS_TASK_PROMPT.format(
+                        content=task.content,
+                        parent_task_content=task.parent.content
+                        if task.parent
+                        else "",
+                        dependency_tasks_info=dependency_tasks_info,
+                        additional_info=task.additional_info,
+                    )
+                )
                 response = await self._safe_agent_call(
                     worker_agent, prompt, response_format=TaskResult
                 )
@@ -615,7 +720,8 @@ class SingleAgentWorker(Worker):
         # Store the actual token usage for this specific task
         task.additional_info["token_usage"] = {"total_tokens": total_tokens}
 
-        print(f"======\n{Fore.GREEN}Response from {self}:{Fore.RESET}")
+        if WORKFORCE_VERBOSE_OUTPUT:
+            print(f"======\n{Fore.GREEN}Response from {self}:{Fore.RESET}")
         logger.info(f"Response from {self}:")
 
         if not self.use_structured_output_handler:
@@ -630,13 +736,19 @@ class SingleAgentWorker(Worker):
                 )
 
         color = Fore.RED if task_result.failed else Fore.GREEN  # type: ignore[union-attr]
-        print(
-            f"\n{color}{task_result.content}{Fore.RESET}\n======",  # type: ignore[union-attr]
+        content_text = task_result.content or ""  # type: ignore[union-attr]
+        preview_limit = 4000 if WORKFORCE_VERBOSE_OUTPUT else 800
+        preview_text = (
+            content_text[:preview_limit] + "\n...[truncated]..."
+            if len(content_text) > preview_limit
+            else content_text
         )
+        if WORKFORCE_VERBOSE_OUTPUT:
+            print(f"\n{color}{preview_text}{Fore.RESET}\n======")
         if task_result.failed:  # type: ignore[union-attr]
-            logger.error(f"{task_result.content}")  # type: ignore[union-attr]
+            logger.error(preview_text)
         else:
-            logger.info(f"{task_result.content}")  # type: ignore[union-attr]
+            logger.info(preview_text)
 
         task.result = task_result.content  # type: ignore[union-attr]
 

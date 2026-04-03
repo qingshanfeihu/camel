@@ -14,4 +14,8 @@
 
 from INAGENT.review.pipeline import ReviewPipeline, ReviewPlan, ReviewResult
 
-__all__ = ["ReviewPipeline", "ReviewPlan", "ReviewResult"]
+__all__ = [
+    "ReviewPipeline",
+    "ReviewPlan",
+    "ReviewResult",
+]

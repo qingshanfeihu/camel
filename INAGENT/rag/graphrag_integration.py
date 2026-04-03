@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -72,7 +73,6 @@ class GraphRAGRetriever:
         self,
         workspace_dir: Optional[Path] = None,
         config_path: Optional[Path] = None,
-        use_siliconflow: bool = True,
     ):
         """
         初始化 GraphRAG 检索器
@@ -80,13 +80,11 @@ class GraphRAGRetriever:
         Args:
             workspace_dir: GraphRAG 工作空间目录
             config_path: settings.yaml 配置文件路径
-            use_siliconflow: 是否使用 SiliconFlow 作为 LLM 提供商
         """
         self.workspace_dir = workspace_dir or Path(__file__).parent / "graphrag_index"
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         
         self.config_path = config_path or self.workspace_dir / "settings.yaml"
-        self.use_siliconflow = use_siliconflow
         
         # 索引数据（延迟加载）
         self._entities: Optional[pd.DataFrame] = None
@@ -107,6 +105,17 @@ class GraphRAGRetriever:
         if not output_dir.exists():
             logger.warning(f"GraphRAG 输出目录不存在: {output_dir}")
             return False
+
+        try:
+            from INAGENT.rag.graphrag_adapter import validate_graphrag_index
+
+            validation = validate_graphrag_index(self.workspace_dir)
+            integrity = validation.get("checks", {}).get("referential_integrity")
+            if integrity is not None and not integrity.get("ok", True):
+                logger.error("GraphRAG 输出文件存在引用断链，拒绝加载: %s", integrity.get("problems", []))
+                return False
+        except Exception as e:
+            logger.warning(f"GraphRAG 一致性校验失败，继续尝试加载索引: {e}")
         
         try:
             # 加载索引数据
@@ -138,8 +147,14 @@ class GraphRAGRetriever:
             
             # 加载配置
             self._load_config()
-            
-            self._initialized = True
+
+            if self._config is not None:
+                self._initialized = True
+            else:
+                logger.warning("GraphRAG initialization incomplete: config loading failed")
+                return False
+
+            self._init_context_builder()
             return True
             
         except Exception as e:
@@ -154,30 +169,159 @@ class GraphRAGRetriever:
         except Exception as e:
             logger.warning(f"加载 GraphRAG 配置失败: {e}")
             self._config = None
+
+    def _init_context_builder(self):
+        """构建 LocalSearchMixedContext，用于 local_context_build (无 LLM)。"""
+        self._local_context_builder = None
+        self._context_builder_params = {}
+        if self._config is None or self._entities is None or self._text_units is None:
+            return
+        try:
+            from graphrag.config.embeddings import entity_description_embedding
+            from graphrag.query.context_builder.entity_extraction import EntityVectorStoreKey
+            from graphrag.query.indexer_adapters import (
+                read_indexer_entities,
+                read_indexer_relationships,
+                read_indexer_reports,
+                read_indexer_text_units,
+            )
+            from graphrag.query.structured_search.local_search.mixed_context import (
+                LocalSearchMixedContext,
+            )
+            from graphrag.language_model.manager import ModelManager
+            from graphrag.tokenizer.get_tokenizer import get_tokenizer
+            from graphrag.utils.api import get_embedding_store
+            from graphrag.utils.cli import redact
+
+            community_level = 2
+            vector_store_args = {}
+            for index, store in self._config.vector_store.items():
+                vector_store_args[index] = store.model_dump()
+
+            description_embedding_store = get_embedding_store(
+                config_args=vector_store_args,
+                embedding_name=entity_description_embedding,
+            )
+
+            communities = self._communities if self._communities is not None else pd.DataFrame()
+            community_reports = self._community_reports if self._community_reports is not None else pd.DataFrame()
+
+            entities_ = read_indexer_entities(self._entities, communities, None)
+            reports_ = read_indexer_reports(community_reports, communities, community_level)
+            text_units_ = read_indexer_text_units(self._text_units)
+            relationships_ = read_indexer_relationships(
+                self._relationships if self._relationships is not None else pd.DataFrame()
+            )
+
+            embedding_settings = self._config.get_language_model_config(
+                self._config.local_search.embedding_model_id
+            )
+            embedding_model = ModelManager().get_or_create_embedding_model(
+                name="local_context_embedding",
+                model_type=embedding_settings.type,
+                config=embedding_settings,
+            )
+
+            model_settings = self._config.get_language_model_config(
+                self._config.local_search.chat_model_id
+            )
+            tokenizer = get_tokenizer(model_config=model_settings)
+
+            ls_config = self._config.local_search
+            self._local_context_builder = LocalSearchMixedContext(
+                community_reports=reports_,
+                text_units=text_units_,
+                entities=entities_,
+                relationships=relationships_,
+                covariates={"claims": []},
+                entity_text_embeddings=description_embedding_store,
+                embedding_vectorstore_key=EntityVectorStoreKey.ID,
+                text_embedder=embedding_model,
+                tokenizer=tokenizer,
+            )
+            self._context_builder_params = {
+                "text_unit_prop": ls_config.text_unit_prop,
+                "community_prop": ls_config.community_prop,
+                "conversation_history_max_turns": ls_config.conversation_history_max_turns,
+                "conversation_history_user_turns_only": True,
+                "top_k_mapped_entities": ls_config.top_k_entities,
+                "top_k_relationships": ls_config.top_k_relationships,
+                "include_entity_rank": True,
+                "include_relationship_weight": True,
+                "include_community_rank": False,
+                "return_candidate_context": False,
+                "embedding_vectorstore_key": EntityVectorStoreKey.ID,
+                "max_context_tokens": ls_config.max_context_tokens,
+            }
+            logger.info("LocalSearchMixedContext 初始化成功 (context-only, 无 LLM)")
+        except Exception as e:
+            logger.warning(f"LocalSearchMixedContext 初始化失败，将回退到 local_search: {e}")
+            self._local_context_builder = None
+
+    async def local_context_build(
+        self,
+        query: str,
+        top_k: int = 10,
+    ) -> List[GraphRAGSearchResult]:
+        """仅构建上下文（1 次 embedding，0 次 LLM），跳过 response 生成。"""
+        if not self._ensure_initialized():
+            return []
+        if self._local_context_builder is None:
+            _, results = await self.local_search(query, top_k)
+            return results
+        try:
+            context_result = self._local_context_builder.build_context(
+                query=query, **self._context_builder_params
+            )
+            return self._convert_context_to_results(
+                context_result.context_records, "local"
+            )[:top_k]
+        except Exception as e:
+            logger.warning(f"local_context_build 失败，回退到 local_search: {e}")
+            _, results = await self.local_search(query, top_k)
+            return results
     
     async def build_index(
         self,
         knowledge_base_path: Optional[Path] = None,
         force_rebuild: bool = False,
+        resume: bool = False,
+        fast: bool = False,
+        update: bool = False,
     ) -> bool:
         """
         构建 GraphRAG 索引
-        
+
         Args:
             knowledge_base_path: knowledge_base.json 路径
-            force_rebuild: 是否强制重建索引
-        
+            force_rebuild: 是否强制重建索引（清空 cache + output）
+            resume: 续跑中断的构建（保留 cache/output，已完成的 LLM 调用命中缓存）
+            fast: 用 NLP 抽取代替 LLM（跳过 extract_graph LLM 调用）
+            update: 增量更新（仅处理新增/变更文档，与现有索引合并）
+
         Returns:
             是否构建成功
         """
         output_dir = self.workspace_dir / "output"
-        
-        # 检查是否需要重建
-        if not force_rebuild and output_dir.exists():
+
+        if not (force_rebuild or resume or update) and output_dir.exists():
             entities_path = output_dir / "entities.parquet"
             if entities_path.exists():
                 logger.info("GraphRAG 索引已存在，跳过构建")
                 return True
+
+        if force_rebuild and output_dir.exists():
+            import shutil
+            for f in output_dir.glob("*.parquet"):
+                f.unlink()
+            ldb = output_dir / "lancedb"
+            if ldb.exists():
+                shutil.rmtree(ldb, ignore_errors=True)
+            cache_dir = self.workspace_dir / "cache"
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                cache_dir.mkdir(exist_ok=True)
+            logger.info("force_rebuild: 已清理 output/ 和 cache/")
         
         # 准备输入数据
         knowledge_base_path = knowledge_base_path or (
@@ -211,11 +355,19 @@ class GraphRAGRetriever:
             _m("build_index: load_config START")
             from graphrag.api import build_index
             from graphrag.config.load_config import load_config
+            from graphrag.config.enums import IndexingMethod
             config = load_config(self.workspace_dir)
             _m("build_index: load_config DONE")
 
-            _m("build_index: graphrag.api.build_index(config) START (内部 extract/community 等阶段会较久)")
-            results = await build_index(config)
+            method = IndexingMethod.Fast if fast else IndexingMethod.Standard
+            is_update_run = update
+            _m("build_index: graphrag.api.build_index(config) START | method=%s update=%s",
+               method.value, is_update_run)
+            results = await build_index(
+                config,
+                method=method,
+                is_update_run=is_update_run,
+            )
             _m("build_index: graphrag.api.build_index DONE")
 
             errors = []
@@ -225,6 +377,21 @@ class GraphRAGRetriever:
             if errors:
                 logger.error("GraphRAG 索引构建出错: %s", errors)
                 return False
+
+            from INAGENT.rag.graphrag_adapter import validate_graphrag_index
+
+            validation = validate_graphrag_index(self.workspace_dir)
+            integrity = validation.get("checks", {}).get("referential_integrity")
+            if integrity is not None and not integrity.get("ok", True):
+                logger.error("GraphRAG 索引构建后校验失败: %s", integrity.get("problems", []))
+                return False
+
+            from INAGENT.rag.graphrag_adapter import _input_fingerprint
+            fp = _input_fingerprint(self.workspace_dir)
+            if fp:
+                fp_path = self.workspace_dir / "output" / ".input_fingerprint"
+                fp_path.write_text(fp, encoding="utf-8")
+
             logger.info("GraphRAG 索引构建完成")
             self._initialized = False
             return True
@@ -496,14 +663,25 @@ class GraphRAGRetriever:
                 for _, row in sources.iterrows():
                     text = str(row.get("text", "")) if "text" in row.index else ""
                     if text:
+                        _src_meta = {
+                            "id": str(row.get("id", "")) if "id" in row.index else "",
+                            "title": str(row.get("title", "")) if "title" in row.index else "",
+                            "source_type": "graphrag_source",
+                        }
+                        _inagent_json_match = re.search(
+                            r"INAGENT_META_JSON\s*({[^}]+})", text
+                        )
+                        if _inagent_json_match:
+                            try:
+                                _parsed = json.loads(_inagent_json_match.group(1))
+                                if "document_category" in _parsed:
+                                    _src_meta["document_category"] = _parsed["document_category"]
+                            except (json.JSONDecodeError, ValueError):
+                                pass
                         results.append(GraphRAGSearchResult(
                             text=text,
                             score=float(row.get("score", 0.5)) if "score" in row.index else 0.5,
-                            metadata={
-                                "id": str(row.get("id", "")) if "id" in row.index else "",
-                                "title": str(row.get("title", "")) if "title" in row.index else "",
-                                "source_type": "graphrag_source",
-                            },
+                            metadata=_src_meta,
                             source="graphrag_source",
                             search_type=search_type,
                         ))
@@ -514,15 +692,21 @@ class GraphRAGRetriever:
                 for _, row in entities.iterrows():
                     desc = str(row.get("description", "")) if "description" in row.index else ""
                     if desc:
-                        title = str(row.get("title", "")) if "title" in row.index else ""
+                        title = ""
+                        for col in ("title", "entity", "name"):
+                            if col in row.index and row.get(col):
+                                title = str(row.get(col))
+                                break
+                        etype = str(row.get("type", "")) if "type" in row.index else ""
                         results.append(GraphRAGSearchResult(
                             text=desc,
                             score=float(row.get("rank", 0.3)) if "rank" in row.index else 0.3,
                             metadata={
                                 "id": str(row.get("id", "")) if "id" in row.index else "",
                                 "title": title,
-                                "type": str(row.get("type", "")) if "type" in row.index else "",
+                                "type": etype,
                                 "source_type": "graphrag_entity",
+                                "_graphrag_synthesized": True,
                             },
                             source="graphrag_entity",
                             search_type=search_type,
@@ -530,11 +714,13 @@ class GraphRAGRetriever:
                         ))
             
             # 提取 relationships（关系描述）
+            # 跳过裸类型标签（如 BELONGS_TO、PART_OF）——它们不含语义信息
             relationships = context_data.get("relationships", None)
             if relationships is not None and isinstance(relationships, pd.DataFrame) and len(relationships) > 0:
                 for _, row in relationships.iterrows():
                     desc = str(row.get("description", "")) if "description" in row.index else ""
-                    if desc:
+                    if not desc or " " not in desc:
+                        continue
                         src = str(row.get("source", "")) if "source" in row.index else ""
                         tgt = str(row.get("target", "")) if "target" in row.index else ""
                         results.append(GraphRAGSearchResult(
@@ -545,6 +731,7 @@ class GraphRAGRetriever:
                                 "target_entity": tgt,
                                 "type": str(row.get("type", "")) if "type" in row.index else "",
                                 "source_type": "graphrag_relationship",
+                                "_graphrag_synthesized": True,
                             },
                             source="graphrag_relationship",
                             search_type=search_type,
@@ -574,6 +761,7 @@ class GraphRAGRetriever:
                                 "id": str(row.get("id", "")) if "id" in row.index else "",
                                 "title": str(row.get("title", "")) if "title" in row.index else "",
                                 "source_type": "graphrag_report",
+                                "_graphrag_synthesized": True,
                             },
                             source="graphrag_report",
                             search_type=search_type,
@@ -665,6 +853,339 @@ class GraphRAGRetriever:
     def is_available(self) -> bool:
         """检查 GraphRAG 是否可用"""
         return self._ensure_initialized()
+
+    # ── Write infrastructure (Farm-Owner) ─────────────────────────────────────
+
+    def snapshot_backup(self, label: str = "") -> Path:
+        import shutil
+        from datetime import datetime
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = f"{ts}_{label}" if label else ts
+        output_dir = self.workspace_dir / "output"
+        snap_dir = self.workspace_dir / "snapshots" / name
+        snap_dir.mkdir(parents=True, exist_ok=True)
+
+        for pq in output_dir.glob("*.parquet"):
+            shutil.copy2(pq, snap_dir / pq.name)
+        ldb = output_dir / "lancedb"
+        if ldb.exists():
+            shutil.copytree(ldb, snap_dir / "lancedb", dirs_exist_ok=True)
+
+        manifest = {
+            "timestamp": ts,
+            "label": label,
+            "files": [f.name for f in snap_dir.iterdir()],
+        }
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info("snapshot_backup → %s", snap_dir)
+        return snap_dir
+
+    def upsert_entities(self, patches: List[Dict[str, Any]]) -> int:
+        output_dir = self.workspace_dir / "output"
+        entities_path = output_dir / "entities.parquet"
+        if not entities_path.exists():
+            raise FileNotFoundError(f"entities.parquet 不存在: {entities_path}")
+
+        df = pd.read_parquet(entities_path)
+        existing_titles = set(df["title"].str.upper()) if "title" in df.columns else set()
+
+        new_rows = []
+        for p in patches:
+            title = p.get("title", "")
+            if title.upper() in existing_titles:
+                logger.info("upsert_entities: 跳过已存在实体 %s", title)
+                continue
+            import uuid
+            row = {
+                "id": str(uuid.uuid4()),
+                "title": title,
+                "type": p.get("entity_type", "CONFIGURATION"),
+                "description": p.get("description", ""),
+                "human_readable_id": int(df["human_readable_id"].max()) + 1 + len(new_rows)
+                if "human_readable_id" in df.columns
+                else len(df) + len(new_rows),
+            }
+            if "source_id" in p and p["source_id"]:
+                row["text_unit_ids"] = [p["source_id"]]
+            new_rows.append(row)
+
+        if not new_rows:
+            return 0
+
+        new_df = pd.DataFrame(new_rows)
+        for col in df.columns:
+            if col not in new_df.columns:
+                new_df[col] = None
+        df = pd.concat([df, new_df[df.columns]], ignore_index=True)
+        df.to_parquet(entities_path, index=False)
+        logger.info("upsert_entities: 新增 %d 行实体", len(new_rows))
+        return len(new_rows)
+
+    def add_entity_columns(self, columns: List[Dict[str, Any]]) -> List[str]:
+        output_dir = self.workspace_dir / "output"
+        entities_path = output_dir / "entities.parquet"
+        if not entities_path.exists():
+            raise FileNotFoundError(f"entities.parquet 不存在: {entities_path}")
+
+        df = pd.read_parquet(entities_path)
+        added = []
+        for spec in columns:
+            col_name = spec.get("name", "")
+            if not col_name or col_name in df.columns:
+                continue
+            dtype_str = spec.get("dtype", "str")
+            default = spec.get("default")
+            if dtype_str == "bool":
+                df[col_name] = bool(default) if default is not None else False
+            elif dtype_str == "int":
+                df[col_name] = int(default) if default is not None else 0
+            elif dtype_str == "float":
+                df[col_name] = float(default) if default is not None else 0.0
+            else:
+                df[col_name] = str(default) if default is not None else ""
+            added.append(col_name)
+
+        if added:
+            df.to_parquet(entities_path, index=False)
+            logger.info("add_entity_columns: 新增列 %s", added)
+        return added
+
+    def update_entity_fields(self, title: str, fields: Dict[str, Any]) -> bool:
+        output_dir = self.workspace_dir / "output"
+        entities_path = output_dir / "entities.parquet"
+        if not entities_path.exists():
+            raise FileNotFoundError(f"entities.parquet 不存在: {entities_path}")
+
+        if not title or not fields:
+            return False
+
+        df = pd.read_parquet(entities_path)
+        if "title" not in df.columns:
+            raise KeyError("entities.parquet 缺少 title 列")
+
+        mask = df["title"].fillna("").astype(str).str.upper() == title.upper()
+        if not mask.any():
+            logger.warning("update_entity_fields: 未找到实体 %s", title)
+            return False
+
+        for field_name, field_value in fields.items():
+            if field_name not in df.columns:
+                df[field_name] = None
+            df.loc[mask, field_name] = field_value
+
+        df.to_parquet(entities_path, index=False)
+        logger.info("update_entity_fields: 已更新实体 %s 的字段 %s", title, list(fields.keys()))
+        return True
+
+    def add_relationships(self, patches: List[Dict[str, Any]]) -> int:
+        import uuid
+
+        output_dir = self.workspace_dir / "output"
+        relationships_path = output_dir / "relationships.parquet"
+        if not relationships_path.exists():
+            raise FileNotFoundError(f"relationships.parquet 不存在: {relationships_path}")
+
+        df = pd.read_parquet(relationships_path)
+        existing = set()
+        required_cols = ["source", "target", "type"]
+        for col in required_cols:
+            if col not in df.columns:
+                raise KeyError(f"relationships.parquet 缺少 {col} 列")
+
+        for _, row in df.iterrows():
+            existing.add((
+                str(row.get("source", "")).upper(),
+                str(row.get("target", "")).upper(),
+                str(row.get("type", "RELATED")).upper(),
+            ))
+
+        next_hrid = 1
+        if "human_readable_id" in df.columns and not df.empty:
+            next_hrid = int(df["human_readable_id"].max()) + 1
+
+        new_rows = []
+        for patch in patches:
+            source = str(patch.get("source", "")).strip()
+            target = str(patch.get("target", "")).strip()
+            rel_type = str(patch.get("type", "RELATED")).strip() or "RELATED"
+            if not source or not target:
+                continue
+
+            rel_key = (source.upper(), target.upper(), rel_type.upper())
+            if rel_key in existing:
+                continue
+
+            row = {col: None for col in df.columns}
+            row["source"] = source
+            row["target"] = target
+            row["type"] = rel_type
+            if "description" in df.columns:
+                row["description"] = patch.get("description", "")
+            if "text_unit_ids" in df.columns and patch.get("source_id"):
+                row["text_unit_ids"] = [patch["source_id"]]
+            if "id" in df.columns:
+                row["id"] = str(uuid.uuid4())
+            if "human_readable_id" in df.columns:
+                row["human_readable_id"] = next_hrid
+                next_hrid += 1
+            new_rows.append(row)
+            existing.add(rel_key)
+
+        if not new_rows:
+            return 0
+
+        new_df = pd.DataFrame(new_rows)
+        for col in df.columns:
+            if col not in new_df.columns:
+                new_df[col] = None
+        df = pd.concat([df, new_df[df.columns]], ignore_index=True)
+        df.to_parquet(relationships_path, index=False)
+        logger.info("add_relationships: 新增 %d 条关系", len(new_rows))
+        return len(new_rows)
+
+    def reembed_entities(self, entity_titles: List[str]) -> int:
+        import lancedb
+        import requests as _requests
+
+        output_dir = self.workspace_dir / "output"
+        entities_path = output_dir / "entities.parquet"
+        ldb_path = output_dir / "lancedb"
+
+        if not entities_path.exists() or not ldb_path.exists():
+            raise FileNotFoundError("entities.parquet 或 lancedb 目录不存在")
+
+        df = pd.read_parquet(entities_path)
+        mask = df["title"].str.upper().isin([t.upper() for t in entity_titles])
+        targets = df[mask]
+        if targets.empty:
+            return 0
+
+        from INAGENT.utils.llm_config import get_gateway_config
+        gw = get_gateway_config()
+        embed_model = gw.get("embedding_model", "text-embedding-v4")
+        base_url = gw.get("base_url", "").rstrip("/")
+        api_key = gw.get("api_key", "local-gateway")
+
+        texts = []
+        ids = []
+        titles = []
+        for _, row in targets.iterrows():
+            texts.append(str(row.get("description", row.get("title", ""))))
+            ids.append(str(row["id"]))
+            titles.append(str(row["title"]))
+
+        resp = _requests.post(
+            f"{base_url}/embeddings",
+            json={"model": embed_model, "input": texts},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        embeddings = [item["embedding"] for item in resp.json()["data"]]
+
+        db = lancedb.connect(str(ldb_path))
+        table_name = "default-entity-description"
+        tbl = db.open_table(table_name)
+
+        new_records = []
+        for i, emb in enumerate(embeddings):
+            new_records.append({
+                "id": ids[i],
+                "title": titles[i],
+                "text": texts[i],
+                "vector": emb,
+            })
+
+        tbl.add(new_records)
+        logger.info("reembed_entities: 嵌入并写入 %d 个实体到 LanceDB", len(new_records))
+        return len(new_records)
+
+    def replace_entity_embeddings(self, entity_titles: List[str]) -> int:
+        import lancedb
+        import requests as _requests
+
+        output_dir = self.workspace_dir / "output"
+        entities_path = output_dir / "entities.parquet"
+        ldb_path = output_dir / "lancedb"
+
+        if not entities_path.exists() or not ldb_path.exists():
+            raise FileNotFoundError("entities.parquet 或 lancedb 目录不存在")
+
+        df = pd.read_parquet(entities_path)
+        mask = df["title"].str.upper().isin([t.upper() for t in entity_titles])
+        targets = df[mask]
+        if targets.empty:
+            return 0
+
+        from INAGENT.utils.llm_config import get_gateway_config
+        gw = get_gateway_config()
+        embed_model = gw.get("embedding_model", "text-embedding-v4")
+        base_url = gw.get("base_url", "").rstrip("/")
+        api_key = gw.get("api_key", "local-gateway")
+
+        texts = []
+        ids = []
+        titles = []
+        for _, row in targets.iterrows():
+            texts.append(str(row.get("description", row.get("title", ""))))
+            ids.append(str(row["id"]))
+            titles.append(str(row["title"]))
+
+        resp = _requests.post(
+            f"{base_url}/embeddings",
+            json={"model": embed_model, "input": texts},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        embeddings = [item["embedding"] for item in resp.json()["data"]]
+
+        db = lancedb.connect(str(ldb_path))
+        table_name = "default-entity-description"
+        tbl = db.open_table(table_name)
+
+        if hasattr(tbl, "delete"):
+            escaped_ids = [entity_id.replace("'", "\\'") for entity_id in ids]
+            if len(escaped_ids) == 1:
+                filter_expr = f"id = '{escaped_ids[0]}'"
+            else:
+                filter_expr = "id IN (" + ", ".join(f"'{entity_id}'" for entity_id in escaped_ids) + ")"
+            tbl.delete(filter_expr)
+
+        new_records = []
+        for idx, embedding in enumerate(embeddings):
+            new_records.append({
+                "id": ids[idx],
+                "title": titles[idx],
+                "text": texts[idx],
+                "vector": embedding,
+            })
+
+        tbl.add(new_records)
+        logger.info("replace_entity_embeddings: 替换 %d 个实体嵌入", len(new_records))
+        return len(new_records)
+
+    def reload(self):
+        self._initialized = False
+        self._entities = None
+        self._relationships = None
+        self._communities = None
+        self._community_reports = None
+        self._text_units = None
+        self._config = None
+        self._local_context_builder = None
+        self._context_builder_params = {}
+        self._ensure_initialized()
+        logger.info("GraphRAGRetriever.reload() 完成")
 
 
 class HybridGraphRAGRetriever:

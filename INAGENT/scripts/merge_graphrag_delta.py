@@ -148,12 +148,12 @@ def rebuild_lancedb():
         # 使用项目的 embedding 模型
         from INAGENT.utils import env_utils
         env_utils.load_inagent_env()
-        from INAGENT.utils.llm_config import get_siliconflow_config
-        config = get_siliconflow_config()
+        from INAGENT.utils.llm_config import get_gateway_config
+        config = get_gateway_config()
         
         api_key = config.get("api_key")
         base_url = config.get("base_url", "http://127.0.0.1:9000/v1")
-        embed_model = config.get("embedding_model", "BAAI/bge-m3")
+        embed_model = config.get("embedding_model", "text-embedding-v4")
         
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)

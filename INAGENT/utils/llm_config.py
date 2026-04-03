@@ -1,4 +1,4 @@
-﻿# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
 统一的 LLM 配置管理模块
 
@@ -31,6 +31,7 @@ import logging
 from typing import Dict, Optional, Any, List
 from pathlib import Path
 
+from INAGENT.config.project_config import cfg_float, cfg_int, cfg_str
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 logger = logging.getLogger(__name__)
@@ -68,17 +69,17 @@ class LLMConfig:
             }
         """
         # 向后兼容：直接返回网关配置
-        sf_config = self.get_siliconflow_config()
+        gateway_cfg = self.get_gateway_config()
         
         # 转换为与旧接口兼容的格式
         config = {
-            "api_key": sf_config.get("api_key", ""),
-            "base_url": sf_config.get("base_url", ""),
-            "model": sf_config.get("chat_model", ""),
-            "timeout": sf_config.get("timeout", 60),
+            "api_key": gateway_cfg.get("api_key", ""),
+            "base_url": gateway_cfg.get("base_url", ""),
+            "model": gateway_cfg.get("chat_model", ""),
+            "timeout": gateway_cfg.get("timeout", 60),
             # 网关对话模型限速：RPM 1000, TPM 50000
-            "rpm": sf_config.get("chat_rpm", 1000),
-            "tpm": sf_config.get("chat_tpm", 50000),
+            "rpm": gateway_cfg.get("chat_rpm", 1000),
+            "tpm": gateway_cfg.get("chat_tpm", 50000),
             "temperature": 0.7,  # 网关推荐温度
         }
         
@@ -101,18 +102,18 @@ class LLMConfig:
             }
         """
         # 向后兼容：直接返回网关配置
-        sf_config = self.get_siliconflow_config()
+        gateway_cfg = self.get_gateway_config()
         
         config = {
-            "api_key": sf_config.get("api_key", ""),
-            "base_url": sf_config.get("base_url", ""),
-            "model": sf_config.get("chat_model", ""),
-            "timeout": sf_config.get("timeout", 60),
+            "api_key": gateway_cfg.get("api_key", ""),
+            "base_url": gateway_cfg.get("base_url", ""),
+            "model": gateway_cfg.get("chat_model", ""),
+            "timeout": gateway_cfg.get("timeout", 60),
         }
         
         return config
     
-    def get_siliconflow_config(self) -> Dict[str, Any]:
+    def get_gateway_config(self) -> Dict[str, Any]:
         """
         获取 LLM 网关配置
         
@@ -152,14 +153,14 @@ class LLMConfig:
                 "reranker_tpm": int,  # 重排序模型限速
             }
         """
-        if "siliconflow" in self._config_cache:
-            return self._config_cache["siliconflow"]
+        if "gateway" in self._config_cache:
+            return self._config_cache["gateway"]
         
-        api_key = os.getenv("SILICONFLOW_API_KEY", "")
+        api_key = cfg_str("llm.siliconflow.api_key", "", env="SILICONFLOW_API_KEY")
         gateway_base_url = self._normalize_base_url(
-            os.getenv("LLM_GATEWAY_BASE_URL", "")
+            cfg_str("llm.gateway.base_url", "", env="LLM_GATEWAY_BASE_URL")
         )
-        gateway_api_key = os.getenv("LLM_GATEWAY_API_KEY", "")
+        gateway_api_key = cfg_str("llm.gateway.api_key", "", env="LLM_GATEWAY_API_KEY")
 
         if not gateway_base_url:
             raise ValueError(
@@ -177,8 +178,8 @@ class LLMConfig:
         
         # 对话模型配置（优先使用网关配置）
         chat_model = (
-            os.getenv("LLM_GATEWAY_CHAT_MODEL", "").strip()
-            or os.getenv("SILICONFLOW_CHAT_MODEL", "mineru-vlm")
+            cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL").strip()
+            or cfg_str("llm.siliconflow.chat_model", "mineru-vlm", env="SILICONFLOW_CHAT_MODEL")
         )
         if not chat_model:
             chat_model = "mineru-vlm"
@@ -190,11 +191,11 @@ class LLMConfig:
         
         # 嵌入模型配置（优先使用网关配置）
         embedding_model = (
-            os.getenv("LLM_GATEWAY_EMBEDDING_MODEL", "").strip()
-            or os.getenv("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3")
+            cfg_str("llm.gateway.embedding_model", "", env="LLM_GATEWAY_EMBEDDING_MODEL").strip()
+            or cfg_str("llm.siliconflow.embedding_model", "text-embedding-v4", env="SILICONFLOW_EMBEDDING_MODEL")
         )
         if not embedding_model:
-            embedding_model = "BAAI/bge-m3"
+            embedding_model = "text-embedding-v4"
             logger.warning(
                 "LLM_GATEWAY_EMBEDDING_MODEL 未配置，使用默认值: %s。"
                 "建议在 .env 文件中明确配置。",
@@ -203,11 +204,11 @@ class LLMConfig:
         
         # 重排序模型配置（优先使用网关配置）
         reranker_model = (
-            os.getenv("LLM_GATEWAY_RERANK_MODEL", "").strip()
-            or os.getenv("SILICONFLOW_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+            cfg_str("llm.gateway.rerank_model", "", env="LLM_GATEWAY_RERANK_MODEL").strip()
+            or cfg_str("llm.siliconflow.reranker_model", "qwen3-rerank", env="SILICONFLOW_RERANKER_MODEL")
         )
         if not reranker_model:
-            reranker_model = "BAAI/bge-reranker-v2-m3"
+            reranker_model = "qwen3-rerank"
             logger.warning(
                 "LLM_GATEWAY_RERANK_MODEL 未配置，使用默认值: %s。"
                 "建议在 .env 文件中明确配置。",
@@ -217,29 +218,34 @@ class LLMConfig:
         config = {
             "api_key": api_key,
             "base_url": base_url,
-            "timeout": float(os.getenv("SILICONFLOW_TIMEOUT", "60")),
+            "timeout": cfg_float("llm.gateway.timeout_seconds", 60.0, env="LLM_GATEWAY_TIMEOUT") or cfg_float("llm.siliconflow.timeout_seconds", 60.0, env="SILICONFLOW_TIMEOUT"),
             # 模型名称
             "chat_model": chat_model,
             "embedding_model": embedding_model,
             "reranker_model": reranker_model,
-            # 对话模型限速（根据官方标准：RPM 1000, TPM 50000）
-            "chat_rpm": int(os.getenv("SILICONFLOW_CHAT_RPM", "1000")),
-            "chat_tpm": int(os.getenv("SILICONFLOW_CHAT_TPM", "50000")),
-            # 嵌入模型限速（根据官方标准：RPM 2000, TPM 500000）
-            "embedding_rpm": int(os.getenv("SILICONFLOW_EMBEDDING_RPM", "2000")),
-            "embedding_tpm": int(os.getenv("SILICONFLOW_EMBEDDING_TPM", "500000")),
-            # 重排序模型限速（根据官方标准：RPM 2000, TPM 500000）
-            "reranker_rpm": int(os.getenv("SILICONFLOW_RERANKER_RPM", "2000")),
-            "reranker_tpm": int(os.getenv("SILICONFLOW_RERANKER_TPM", "500000")),
+            # 对话模型限速
+            "chat_rpm": cfg_int("llm.gateway.chat_rpm", 0, env="LLM_GATEWAY_CHAT_RPM") or cfg_int("llm.siliconflow.chat_rpm", 1000, env="SILICONFLOW_CHAT_RPM"),
+            "chat_tpm": cfg_int("llm.gateway.chat_tpm", 0, env="LLM_GATEWAY_CHAT_TPM") or cfg_int("llm.siliconflow.chat_tpm", 50000, env="SILICONFLOW_CHAT_TPM"),
+            # 嵌入模型限速
+            "embedding_rpm": cfg_int("llm.gateway.embedding_rpm", 0, env="LLM_GATEWAY_EMBEDDING_RPM") or cfg_int("llm.siliconflow.embedding_rpm", 2000, env="SILICONFLOW_EMBEDDING_RPM"),
+            "embedding_tpm": cfg_int("llm.gateway.embedding_tpm", 0, env="LLM_GATEWAY_EMBEDDING_TPM") or cfg_int("llm.siliconflow.embedding_tpm", 500000, env="SILICONFLOW_EMBEDDING_TPM"),
+            # 重排序模型限速
+            "reranker_rpm": cfg_int("llm.gateway.reranker_rpm", 0, env="LLM_GATEWAY_RERANKER_RPM") or cfg_int("llm.siliconflow.reranker_rpm", 2000, env="SILICONFLOW_RERANKER_RPM"),
+            "reranker_tpm": cfg_int("llm.gateway.reranker_tpm", 0, env="LLM_GATEWAY_RERANKER_TPM") or cfg_int("llm.siliconflow.reranker_tpm", 500000, env="SILICONFLOW_RERANKER_TPM"),
             "gateway_enabled": bool(gateway_base_url),
         }
         
+        self._config_cache["gateway"] = config
         self._config_cache["siliconflow"] = config
         return config
+
+    # Backward compatible alias
+    def get_siliconflow_config(self) -> Dict[str, Any]:
+        return self.get_gateway_config()
     
     def get_llm_config(
         self,
-        provider: str = "siliconflow",
+        provider: str = "gateway",
         use_config_file: bool = True
     ) -> Dict[str, Any]:
         """
@@ -256,17 +262,17 @@ class LLMConfig:
         # 为向后兼容保留 provider 参数但记录警告
         provider_lower = provider.lower()
         
-        if provider_lower not in ("siliconflow", "qianfan", "openai"):
+        if provider_lower not in ("gateway", "siliconflow", "qianfan", "openai"):
             logger.warning("未知的 LLM 提供商: %s，使用网关配置", provider)
-        elif provider_lower != "siliconflow":
+        elif provider_lower not in ("gateway", "siliconflow"):
             logger.debug("已将 LLM 提供商从 %s 统一切换为网关", provider)
         
         # 统一返回网关配置
-        config = self.get_siliconflow_config()
+        config = self.get_gateway_config()
         
         # 如果支持从配置文件加载，尝试加载
         if use_config_file:
-            config = self._merge_with_config_file(config, "siliconflow")
+            config = self._merge_with_config_file(config, "gateway")
         
         return config
     
@@ -292,7 +298,7 @@ class LLMConfig:
         # 为避免这种错误，将配置文件合并限定在默认 provider 上，
         # 其它 provider 继续只使用各自的环境变量配置。
         provider_lower = provider.lower()
-        if provider_lower != "siliconflow":
+        if provider_lower not in ("siliconflow", "gateway"):
             return config
         
         # 检查是否有配置文件（如 mineru.json）
@@ -309,7 +315,7 @@ class LLMConfig:
             llm_config = file_config.get("llm-aided-config", {}).get("metadata_extraction", {})
             if llm_config:
                 gateway_enabled = bool(
-                    os.getenv("LLM_GATEWAY_BASE_URL", "").strip()
+                    cfg_str("llm.gateway.base_url", "", env="LLM_GATEWAY_BASE_URL").strip()
                 )
                 # 合并配置（配置文件优先级更高）
                 for key in ["api_key", "base_url", "model", "timeout"]:
@@ -340,9 +346,9 @@ class LLMConfig:
         
         return url.rstrip("/")
     
-    def _get_siliconflow_temperature(self) -> float:
+    def _get_gateway_temperature(self) -> float:
         """获取网关温度参数"""
-        raw = os.getenv("SILICONFLOW_TEMPERATURE", "0.7")
+        raw = cfg_str("llm.siliconflow.temperature", "0.7", env="SILICONFLOW_TEMPERATURE")
         try:
             value = float(raw)
         except Exception:
@@ -359,7 +365,7 @@ class LLMConfig:
     # 向后兼容
     def _get_qianfan_temperature(self) -> float:
         """获取温度参数（向后兼容，实际返回网关温度）"""
-        return self._get_siliconflow_temperature()
+        return self._get_gateway_temperature()
     
     def validate_config(self, config: Dict[str, Any], provider: str = "qianfan") -> tuple[bool, List[str]]:
         """
@@ -371,6 +377,7 @@ class LLMConfig:
         required_fields = {
             "qianfan": ["api_key", "base_url", "model"],
             "openai": ["api_key", "base_url"],
+            "gateway": ["api_key", "base_url"],
             "siliconflow": ["api_key", "base_url"],
         }
         
@@ -392,7 +399,7 @@ class LLMConfig:
 _llm_config_instance: Optional[LLMConfig] = None
 
 
-def get_llm_config(provider: str = "siliconflow") -> Dict[str, Any]:
+def get_llm_config(provider: str = "gateway") -> Dict[str, Any]:
     """
     获取 LLM 配置（统一入口）- 已统一使用 LLM 网关
     
@@ -411,20 +418,25 @@ def get_llm_config(provider: str = "siliconflow") -> Dict[str, Any]:
 
 def get_qianfan_config() -> Dict[str, Any]:
     """获取千帆配置（便捷函数）- 已统一返回网关配置"""
-    return get_llm_config("siliconflow")
+    return get_llm_config("gateway")
 
 
 def get_openai_config() -> Dict[str, Any]:
     """获取 OpenAI 配置（便捷函数）- 已统一返回网关配置"""
-    return get_llm_config("siliconflow")
+    return get_llm_config("gateway")
+
+
+def get_gateway_config() -> Dict[str, Any]:
+    """获取 LLM 网关配置（首选命名）"""
+    return get_llm_config("gateway")
 
 
 def get_siliconflow_config() -> Dict[str, Any]:
-    """获取 LLM 网关配置（便捷函数）"""
-    return get_llm_config("siliconflow")
+    """获取 LLM 网关配置（兼容旧命名）"""
+    return get_gateway_config()
 
 
-def create_openai_client(provider: str = "siliconflow", **kwargs) -> Any:
+def create_openai_client(provider: str = "gateway", **kwargs) -> Any:
     """
     创建 OpenAI 兼容客户端（统一接口）- 已统一使用 LLM 网关
     
@@ -442,7 +454,7 @@ def create_openai_client(provider: str = "siliconflow", **kwargs) -> Any:
         return None
     
     # 统一使用网关配置
-    config = get_llm_config("siliconflow")
+    config = get_llm_config("gateway")
     
     # 合并额外参数
     client_config = {
@@ -461,7 +473,7 @@ def create_openai_client(provider: str = "siliconflow", **kwargs) -> Any:
     return OpenAI(**client_config)
 
 
-def check_llm_availability(provider: str = "siliconflow") -> tuple[bool, str]:
+def check_llm_availability(provider: str = "gateway") -> tuple[bool, str]:
     """
     检查 LLM 服务是否可用（已统一使用 LLM 网关）
     
@@ -469,10 +481,10 @@ def check_llm_availability(provider: str = "siliconflow") -> tuple[bool, str]:
         (is_available, message)
     """
     # 统一使用网关配置
-    config = get_llm_config("siliconflow")
+    config = get_llm_config("gateway")
     
     llm_config = LLMConfig()
-    is_valid, missing = llm_config.validate_config(config, "siliconflow")
+    is_valid, missing = llm_config.validate_config(config, "gateway")
     
     if not is_valid:
         return False, f"LLM 网关配置不完整，缺少字段: {', '.join(missing)}"

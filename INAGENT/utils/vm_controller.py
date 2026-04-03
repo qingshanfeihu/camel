@@ -40,7 +40,7 @@ class VMController:
         self,
         host: str,
         username: str = "root",
-        password: str = "",
+        password: str = "click1",
         port: int = 22,
         timeout: int = 15,
     ):
@@ -62,7 +62,7 @@ class VMController:
         return cls(
             host=host,
             username=os.environ.get("VM_USERNAME", "root"),
-            password=os.environ.get("VM_PASSWORD", ""),
+            password=os.environ.get("VM_PASSWORD", "click1"),
             port=int(os.environ.get("VM_SSH_PORT", "22")),
         )
 

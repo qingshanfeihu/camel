@@ -1,4 +1,4 @@
-﻿# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+# ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -29,6 +29,7 @@ sys.path.insert(
 )
 
 from INAGENT.utils.env_utils import load_inagent_env
+from INAGENT.config.project_config import cfg_str
 
 from camel.models import ModelFactory
 from camel.toolkits import WebDeployToolkit
@@ -47,13 +48,17 @@ def _load_env() -> None:
 
 
 def _build_model() -> Optional[object]:
-    gateway_url = os.getenv("LLM_GATEWAY_BASE_URL")
+    gateway_url = cfg_str("llm.gateway.base_url", "", env="LLM_GATEWAY_BASE_URL")
     if not gateway_url:
         return None
-    api_key = os.getenv("LLM_GATEWAY_API_KEY") or "local-gateway"
+    api_key = cfg_str("llm.gateway.api_key", "", env="LLM_GATEWAY_API_KEY") or "local-gateway"
     if not gateway_url.rstrip("/").endswith("/v1"):
         gateway_url = f"{gateway_url.rstrip('/')}/v1"
-    model_name = os.getenv("SILICONFLOW_MODEL_TYPE") or "Qwen/Qwen2.5-72B-Instruct"
+    model_name = cfg_str(
+        "llm.siliconflow.model_type",
+        "Qwen/Qwen2.5-72B-Instruct",
+        env="SILICONFLOW_MODEL_TYPE",
+    )
     return ModelFactory.create(
         model_platform=ModelPlatformType.SILICONFLOW,
         model_type=model_name,
@@ -174,7 +179,7 @@ def main() -> None:
     model = _build_model()
     env_plan: Dict[str, Any] = {}
     if model is None:
-        override_json = os.getenv("LB_ENV_PLAN_JSON")
+        override_json = cfg_str("scripts.lb_env_plan_json", "", env="LB_ENV_PLAN_JSON")
         if not override_json:
             raise RuntimeError(
                 "LLM_GATEWAY_BASE_URL not found. Set LLM_GATEWAY_BASE_URL "
