@@ -1,0 +1,38 @@
+王涛 2022-05-30 12:28:25 CST
+Created an attachment (id=129513) [details]
+cookie加密配置项.jpeg
+
+需求描述：
+IT云项目中目前APV cookie加密只能全局配置，不能基于单独group来设定，需要支持指定cookie和加密密码进行加密；
+
+友商支持在使用 Insert Cookie、Rewrite Cookie或Embed Cookie算法时,可以指定cookie加密的开关，指定是否兼容明文，指定cookie加密密码；详见附件截图可配置参数项。
+Comment 1王涛 2022-05-30 12:29:11 CST
+Created an attachment (id=129514) [details]
+cookie加密.png
+Comment 2吴远洋 2022-05-30 19:11:36 CST
+1.支持基于group配置slb mode ircookie
+2.支持配置AES加密的密码
+Comment 3吴远洋 2022-06-21 18:01:44 CST
+spec :/okm:root/DEV_APV/SLB/HTTP Proxy/cookie_encry.docx
+Comment 4吴远洋 2022-06-28 14:15:27 CST
+Description:Bug 121100 - apv support cookie encry
+Root Cause:custonmer require
+Condition of Occurrence:always
+Fixed Details:
+slb mode ircookie <ircookie_mode> [group_name] [passwd]
+[group_name] option, default is global
+[passwd] aes encry passwd
+no slb mode ircookie <group_name>
+show slb mode ircookie [group_name]
+clear slb mode ircookie 
+Testing Suggestions:refer bug
+Affected Release:trunk 10.4.2 10.4.3
+Extra Impact:N/A
+webui bug:122830
+doc bug:122829
+
+Xinchuang Multi-OS Platform Impact(MUST provide). 
+ 1. Code is probably not OS-related (99%);
+ 2. Not sure after analysis (must provide possibly-related points);
+ 3. Code is OS-Related (must provide related points)
+ Choice:1
