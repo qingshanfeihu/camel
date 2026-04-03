@@ -12,6 +12,21 @@
 - **不承诺（默认）**：Qdrant / BM25 / 混合向量不会自动更新；编排应在合并或回填后调用 `refresh_hybrid_vector_index()` 或 `initialize_rag_system(force_rebuild_vectors=True)`。
 - **可选**：`KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` 在 `reload()` 之后刷新混合向量（需 LLM 网关）；`hybrid_vectors_force=False` 时按 `knowledge_base.json` 指纹决定是否重建。
 
+### 给混合搜索（06）的正式指示：向量通道无「按条 diff」增量 upsert
+
+农场主链路里若触发混合向量刷新，底层是 `refresh_hybrid_vector_index` → `initialize_rag_system(..., force_rebuild_vectors=...)`。**当前实现不提供**「只更新变更的那几条 chunk / 几个 Qdrant 点」的正式 API；混合搜索侧请按下面两种模式对接预期，**不要**向农场主要求未实现的增量向量语义。
+
+| 参数 / 行为 | Qdrant | BM25（进程内） |
+|-------------|--------|----------------|
+| `hybrid_vectors_force=True`（`refresh_hybrid_vector_index` 默认、`process_gap_entries` 默认） | **清空 collection**，再按 `load_knowledge_base(reference_dir)` 得到的文档块 **整库重嵌写回** | 与全量嵌入共用同一批文档，随 `hybrid_retriever.process` 路径重建 |
+| `hybrid_vectors_force=False` | 比较 `knowledge_base.json` SHA256 与本地 `rag_meta.json`：**指纹不变 → 不向 Qdrant 写入**（认为向量集已与上次全量一致）；**指纹变了 → clear + 全量重嵌** | **仍会**用当前 KB 调 `build_bm25_only`，即 **BM25 与指纹是否变无关，每次初始化都会按当前 KB 刷新内存索引** |
+
+**结论（请 06 按此执行）**：
+
+1. **需要 Qdrant 与合并后的 `knowledge_base.json` 严格一致时**：编排使用 **`force=True`（或删指纹后全量）**，接受 **全量重建** 成本。
+2. **希望少打 Qdrant、但能接受「仅 BM25 反映最新 KB、Qdrant 仍为旧全量」的风险时**：可用 **`force=False`**，并理解 **指纹不变时 Qdrant 不会追平** `reference/*.json` 单独改动（除非先合并进 `knowledge_base.json` 使指纹变）。
+3. **若产品必须「按变更增量 upsert Qdrant」**：由 **混合搜索（06）** 在 `workflow_config_generator` / `HybridRetriever` / `QdrantStorage`（及与 `block_id` 等 chunk 身份对齐）**另行设计与实现**；**不属于**农场主交付范围。落地后需在 PR 中同步本段与 `06-hybrid-search.md`、`DATA_FLOW.md`。
+
 ### 混合向量刷新与农民的调用顺序（非 bug，易漏）
 
 - 农民 `write_to_reference` **只**更新 `knowledge_base/reference/{stem}.json`（按 `block_id` 去重追加），**不**调用 `merge_knowledge_base`，**不**刷新 Qdrant/BM25。

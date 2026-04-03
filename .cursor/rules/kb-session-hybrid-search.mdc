@@ -10,6 +10,8 @@ alwaysApply: true
 
 **全文宪章**（范围清单、概念分层、交付自检、与 05 分工）：`INAGENT/docs/agents/sessions/06-hybrid-search.md`。
 
+**与农场主 / Qdrant**：`initialize_rag_system` **无**按条增量 upsert；仅 **全量 clear+重嵌**（`force_rebuild_vectors=True`）或 **指纹不变则跳过 Qdrant、仍刷 BM25**（`force=False`）。若需增量向量，由 **06** 在 Hybrid/Qdrant 侧实现；见宪章 §「与农场主：Qdrant / BM25 刷新契约」。
+
 **应改（摘要）**：`hybrid_knowledge_fusion.py`、`unified_rag.py`（并行/合并/白名单相关）、`knowledge_router.py`（`_retrieve_unified`、fusion、fallback）、`entity_link_store.py`、`neo4j_store.py`、`web/deps.py`（融合组装）、`rerank_retriever.py` / `fallback_retrieval.py`（与兜底链直接相关时）、legacy `camel/.../hybrid_retrival.py`（与 Router 兜底一致时）、`enable_hybrid_fusion` / `INAGENT_ENABLE_HYBRID_FUSION` 等配置。
 
 **宪章同步义务**：职责或文件边界有变动时，**同一批改动**内更新：(1) `06-hybrid-search.md`；(2) 本 `.mdc`；(3) 受影响的 `DATA_FLOW.md` / `ARCHITECTURE.md` 或配置说明。

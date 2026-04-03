@@ -13,4 +13,4 @@ alwaysApply: true
 
 不做 chunk 内容富化；内容侧交给农民 `apply_fill_request`。
 
-**检索**：图侧依赖 **`reload()`**；混合向量可另选 **`process_gap_entries(..., refresh_hybrid_vectors=True)`**（仅合并**调用时刻**已落盘的 `reference/*.json`）或编排调用 **`merge_knowledge_base` + `refresh_hybrid_vector_index()`**。农民 **`write_to_reference`** 之后若还有写分片，须在农场主向量刷新步**之前**完成，或之后再次 merge+刷新。
+**检索**：图侧依赖 **`reload()`**；混合向量可另选 **`process_gap_entries(..., refresh_hybrid_vectors=True)`** 或编排 **`merge_knowledge_base` + `refresh_hybrid_vector_index()`**。**Qdrant 仅全量或指纹模式，无按条增量**（见 `04-farm-owner.md` § 给混合搜索）。农民写 reference 与 merge 顺序见宪章。

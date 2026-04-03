@@ -11,6 +11,15 @@
 3. **KnowledgeRouter 选型链**：`_retrieve_unified()` 中按配置优先 `HybridKnowledgeFusion`，失败则 `UnifiedRAG`，再失败则 legacy hybrid_retriever + rerank 兜底（见 `knowledge_router.py`）。
 4. **依赖注入**：`web/deps.py` 中 `get_hybrid_fusion()` 组装 `HybridKnowledgeFusion(unified_rag=..., neo4j_store=..., entity_link_store=...)`。
 
+## 与农场主（04）：Qdrant / BM25 刷新契约（正式）
+
+`initialize_rag_system` / `refresh_hybrid_vector_index` **当前没有**「按变更 diff 只 upsert 若干 Qdrant 点」的路径。行为只有：
+
+- **全量**：`force_rebuild_vectors=True`（或 `refresh_hybrid_vector_index(force=True)`）→ 清空 Qdrant collection，按 `load_knowledge_base(reference_dir)` **整库重嵌**。
+- **指纹模式**：`force_rebuild_vectors=False` → `knowledge_base.json` SHA256 与 `rag_meta.json` 比对；**相同则跳过 Qdrant 写入**，但仍 **`build_bm25_only` 用当前 KB 刷新内存 BM25**；**不同则 clear + 全量重嵌**。
+
+**06 的职责边界**：若业务要求 **增量向量**（按 `block_id` / point id 部分更新），在 **本会话** 实现并维护对应 API 与契约；农场主与编排层在此之前 **只能** 依赖上述全量或指纹两种模式。权威说明见 `sessions/04-farm-owner.md` 中 **「给混合搜索（06）的正式指示」**。
+
 ## 范围（应改）
 
 - `INAGENT/rag/hybrid_knowledge_fusion.py`
