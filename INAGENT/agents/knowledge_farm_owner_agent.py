@@ -18,7 +18,7 @@
 执行 GraphRAG 结构性维护 —— 新实体、属性列、冲突与溢出的保守裁决。
 写入前 snapshot_backup；结束后对 GraphRAG 检索器 reload()（仅刷新当前进程内图视图）。
 
-不承诺 Qdrant / merged knowledge_base / 混合检索更新；不写 knowledge_base.json。
+不写 knowledge_base.json。混合向量（Qdrant/BM25）默认不刷新；可传 ``refresh_hybrid_vectors=True`` 在 reload 后调用 ``refresh_hybrid_vector_index``。
 仅做图结构维护，不做 chunk 内容富化（农民的职责）。
 
 职责变更时请同步：INAGENT/docs/agents/sessions/04-farm-owner.md、
@@ -115,7 +115,20 @@ class KnowledgeFarmOwnerAgent:
 
         return self.process_gap_entries(entries)
 
-    def process_gap_entries(self, entries: List[SchemaGapEntry]) -> FarmOwnerReport:
+    def process_gap_entries(
+        self,
+        entries: List[SchemaGapEntry],
+        *,
+        refresh_hybrid_vectors: bool = False,
+        hybrid_vectors_force: bool = True,
+    ) -> FarmOwnerReport:
+        """处理 gap 条目。
+
+        refresh_hybrid_vectors: GraphRAG reload 之后是否调用 ``refresh_hybrid_vector_index``，
+            使 Qdrant/BM25 与 ``knowledge_base/reference`` 当前内容一致（需已配置 LLM 网关）。
+        hybrid_vectors_force: 为 True 时强制清空 Qdrant 再重嵌；仅当确定 merged KB 指纹已变
+            且希望省耗时时可改为 False，走指纹判定逻辑。
+        """
         report = FarmOwnerReport()
 
         try:
@@ -142,6 +155,14 @@ class KnowledgeFarmOwnerAgent:
             self.graphrag.reload()
         except Exception as exc:
             report.errors.append(f"reload 失败: {exc}")
+
+        if refresh_hybrid_vectors:
+            try:
+                from INAGENT.workflow_config_generator import refresh_hybrid_vector_index
+
+                refresh_hybrid_vector_index(force=hybrid_vectors_force)
+            except Exception as exc:
+                report.errors.append(f"混合向量索引刷新失败: {exc}")
 
         logger.info(
             "FarmOwner 完成: +%d entities, +%s columns, %d embedded, %d conflicts, %d overflows, %d errors",

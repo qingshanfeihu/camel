@@ -8,7 +8,7 @@ import json
 import logging
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 

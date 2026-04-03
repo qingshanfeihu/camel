@@ -13,4 +13,4 @@ alwaysApply: true
 
 不做 chunk 内容富化；内容侧交给农民 `apply_fill_request`。
 
-**检索**：仅保证 **`GraphRAGRetriever.reload()`** 后图路径一致；全向量/混合检索不在农场主范围。
+**检索**：图侧依赖 **`reload()`**；混合向量可另选 **`process_gap_entries(..., refresh_hybrid_vectors=True)`** 或编排调用 **`refresh_hybrid_vector_index()`**。

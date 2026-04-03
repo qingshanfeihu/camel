@@ -7,7 +7,8 @@
 ## 检索与数据边界（农场主能承诺的范围）
 
 - **能承诺**：在同一运行进程内，图结构变更后执行 `GraphRAGRetriever.reload()`，经 **GraphRAG 路径** 的查询可读到新实体、新列与关系（仍受适配器与 parquet 等持久化一致性约束）。
-- **不承诺**：Qdrant / BM25、合并后的 `knowledge_base.json` 向量重建、混合检索融合与 Rerank——**不属于**农场主职责；调用方不可假设「只跑农场主」即可更新全链路检索。
+- **不承诺（默认）**：Qdrant / BM25 / 混合向量不会自动更新；编排应在合并或回填后调用 `refresh_hybrid_vector_index()` 或 `initialize_rag_system(force_rebuild_vectors=True)`。
+- **可选**：`KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` 在 `reload()` 之后刷新混合向量（需 LLM 网关）；`hybrid_vectors_force=False` 时按 `knowledge_base.json` 指纹决定是否重建。
 
 ## `FillRequest` 与 `new_node_template`（农场主产出契约）
 

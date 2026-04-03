@@ -275,13 +275,8 @@ def run_fill_cycle(farmer, report):
 def rebuild_qdrant():
     from INAGENT.workflow_config_generator import initialize_rag_system
 
-    rag_meta = QDRANT_DIR / "rag_meta.json"
-    if rag_meta.exists():
-        rag_meta.unlink()
-        logger.info("清理 rag_meta.json 强制重建 Qdrant")
-
-    logger.info("=== 重建 Qdrant 向量索引 ===")
-    hybrid, reranker, graphrag = initialize_rag_system()
+    logger.info("=== 重建 Qdrant 向量索引（force_rebuild_vectors） ===")
+    hybrid, reranker, graphrag = initialize_rag_system(force_rebuild_vectors=True)
 
     vec_count = 0
     try:

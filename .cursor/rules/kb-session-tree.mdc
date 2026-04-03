@@ -5,6 +5,7 @@ globs:
   - INAGENT/scripts/*cli*.py
   - INAGENT/knowledge_base/cli_keyword_graph.json
   - INAGENT/docs/agents/sessions/01-tree.md
+  - INAGENT/scripts/snapshot_retrieval_baseline.py
 alwaysApply: false
 ---
 
@@ -18,7 +19,7 @@ alwaysApply: false
 
 ## 摘要
 
-- **负责**：`skeleton_index.py`、CLI 图相关脚本（`enrich_cli_graph.py`、`extract_cli_keywords_and_graph.py`、`analyze_cli_graph.py`、`enrich_cli_leaf_schema.py`、`rebuild_cli_docs.py`、`import_cli_graph_to_neo4j.py` 等与树/图直接相关者）、`cli_keyword_graph.json`；农民内与树匹配相关的最小改动。
+- **负责**：`skeleton_index.py`、CLI 图相关脚本（`enrich_cli_graph.py`、`extract_cli_keywords_and_graph.py`、`analyze_cli_graph.py`、`enrich_cli_leaf_schema.py`、`rebuild_cli_docs.py`、`import_cli_graph_to_neo4j.py` 等与树/图直接相关者）、`snapshot_retrieval_baseline.py`（检索基线快照/恢复）、`cli_keyword_graph.json`；农民内与树匹配相关的最小改动。
 - **禁止**：采购员 / 农场主核心决策与 GraphRAG 结构写入逻辑。
 - **宪章同步**：树职责或文件清单变化时，**同时更新** `01-tree.md` 与本 `.mdc` 摘要/`globs`。
 - **启用方式**：触及上方 `globs` 时本规则应自动关联；否则在规则面板启用或 @ `01-tree.md`。

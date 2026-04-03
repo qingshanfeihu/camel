@@ -411,12 +411,15 @@ def _documents_to_elements(docs: list) -> list[Text]:
     return elements
 
 
-def initialize_rag_system(use_graphrag: bool = None):
+def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: bool = False):
     """
     初始化RAG系统
     
     Args:
         use_graphrag: 是否启用 GraphRAG，默认从环境变量读取
+        force_rebuild_vectors: 为 True 时清空 Qdrant 集合并从 ``knowledge_base/reference``
+            重新嵌入（使混合检索向量与当前合并 KB 对齐）。用于仅改了 ``reference/*.json``
+            而 ``knowledge_base.json`` 指纹未变、或图/农场主处理后需强制刷新向量通道的场景。
     
     Returns:
         (hybrid_retriever, reranker, graphrag_retriever)
@@ -512,6 +515,14 @@ def initialize_rag_system(use_graphrag: bool = None):
         pass
 
     need_rebuild_vectors = existing_points <= 0
+    if force_rebuild_vectors:
+        logger.info("force_rebuild_vectors=True：清空 Qdrant 集合并从 knowledge_base 目录重建混合向量")
+        need_rebuild_vectors = True
+        try:
+            storage.clear()
+            existing_points = 0
+        except Exception as e:
+            logger.warning("Qdrant 清空失败: %s", e)
     # Also rebuild when fingerprint metadata is missing (e.g. after manual cleanup)
     if existing_points > 0 and kb_fp and not cached_kb_fp:
         logger.info("Qdrant 元数据缺失 (rag_meta.json)，强制重建向量索引")
@@ -623,6 +634,18 @@ def initialize_rag_system(use_graphrag: bool = None):
         logger.info("GraphRAG 已禁用，使用向量检索")
 
     return hybrid_retriever, reranker, graphrag_retriever
+
+
+def refresh_hybrid_vector_index(
+    *,
+    use_graphrag: bool = None,
+    force: bool = True,
+):
+    """刷新混合向量索引（Qdrant + 内存 BM25），可选顺带初始化 GraphRAG 句柄。
+
+    ``force=True``（默认）会清空集合并全量重嵌，保证与当前 ``load_knowledge_base`` 数据源一致。
+    """
+    return initialize_rag_system(use_graphrag=use_graphrag, force_rebuild_vectors=force)
 
 
 def initialize_llm_model():

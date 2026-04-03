@@ -511,3 +511,30 @@ _check_*.py
 _consolidate_*.py
 check_mineru_config.py
 What's New.MD
+
+##### INAGENT — local runtime / review artifacts (do not sync) #####
+# Excel opens a lock file like ~$Workbook.xlsx
+~$*.xlsx
+~$*.xls
+
+# LLM gateway: local overrides (secrets / machine-specific)
+llm_gateway/config.yaml.local
+
+# Web app local SQLite (per-machine)
+INAGENT/web/*.db
+
+# Ephemeral working directory used by agents / jobs
+INAGENT/working_dir/
+
+# Local vector index / embeddings cache (rebuild from knowledge sources)
+INAGENT/vector_store/
+
+# Test review pipeline: binary inputs, generated outputs, backups, scratch notes
+# (Keep small text fixtures under jobs/ tracked explicitly when needed.)
+INAGENT/jobs/test_review/**/*.xlsx
+INAGENT/jobs/test_review/**/output/
+INAGENT/jobs/test_review/**/output_*/
+INAGENT/jobs/test_review/**/*_backup.json
+INAGENT/jobs/test_review/**/*_OLD.json
+INAGENT/jobs/test_review/**/bug_to_case.json
+INAGENT/jobs/test_review/**/manual_review_notes.txt

@@ -19,6 +19,7 @@
 - `INAGENT/scripts/extract_cli_keywords_and_graph.py`
 - `INAGENT/scripts/analyze_cli_graph.py`
 - `INAGENT/scripts/enrich_cli_leaf_schema.py`、`rebuild_cli_docs.py`、`import_cli_graph_to_neo4j.py`（与树/图数据直接相关时）
+- `INAGENT/scripts/snapshot_retrieval_baseline.py`（**检索基线**：树 + reference + GraphRAG `output/` + 本地 Qdrant 一体快照/恢复，用于污染回退）
 - `INAGENT/knowledge_base/cli_keyword_graph.json`（由脚本再生成时）
 - `INAGENT/agents/knowledge_farmer_agent.py` 中 **仅** 与 `_match_tree_node`、骨架加载、`kb_index`、交叉引用检测直接相关的逻辑（大块重构前先与农民会话对齐）
 
@@ -32,6 +33,32 @@
 
 - 树 / 骨架 / `cli_keyword_graph` 与 `reference` chunk 的 **对齐说明**（PR 描述或本目录补充文档）
 - 向 **农民** 会话交付：索引字段含义、匹配失败时建议上报的 gap 类型（与 `knowledge_schema.SchemaGapEntry` 一致）
+
+## 检索基线快照（污染回退 → 恢复高质量混合检索）
+
+**问题**：农民改 `reference/`、合并 `knowledge_base.json`，或农场主改 GraphRAG 结构，均可能污染「树 + 索引」；仅依赖 `graphrag_integration.snapshot_backup()` **只覆盖 GraphRAG 的 parquet/LanceDB**，**不包含** `cli_keyword_graph.json`、`reference/*.json`、**本地 Qdrant 向量目录**，无法单独恢复整条混合检索链路。
+
+**做法**：在重大批处理或实验前创建基线；出问题时一键恢复（须先停服务）。
+
+```text
+python INAGENT/scripts/snapshot_retrieval_baseline.py create --label hq_cli
+python INAGENT/scripts/snapshot_retrieval_baseline.py restore INAGENT/knowledge_base/retrieval_baselines/<时间戳>_hq_cli
+```
+
+**快照目录**（默认 `knowledge_base/retrieval_baselines/<UTC时间戳>[_标签]/`）含：
+
+| 子目录/文件 | 作用 |
+|-------------|------|
+| `reference/*.json` | 合并后的 chunk 与 `cli.json` 等 |
+| `tree/cli_keyword_graph.json` | L1 CLI 图（可用 `--skip-cli-graph` 跳过极大文件） |
+| `tree/skeleton_index.db` | 骨架索引 SQLite（若存在） |
+| `graphrag_output/` | 与 `graphrag_index/output` 对齐的 parquet + `lancedb/` |
+| `qdrant_local/` | **仅本地**持久化 Qdrant（`QDRANT_LOCAL_DIR` 或默认 `%LocalAppData%/INAGENT/vector_store/qdrant`） |
+| `manifest.json` | 校验和、chunk 数、`qdrant` 为远端时的说明 |
+
+**限制**：若配置 **远端 Qdrant**（`QDRANT_URL`），脚本**不会**拷贝向量数据，manifest 会标注；需在服务端做快照或恢复源数据后 **重跑向量导入**。恢复后请 **重启服务** 并对 GraphRAG 调用 **`reload()`**（若进程内已缓存）。
+
+**与农场主**：`KnowledgeFarmOwnerAgent` 写入前的 `snapshot_backup` 仍保留，作为 **GraphRAG 增量写入前** 的保险；**检索基线**是更广的运维操作，由树会话维护脚本，农民/农场主在高风险操作前可手动执行 `create`。
 
 ## 依赖文档
 
