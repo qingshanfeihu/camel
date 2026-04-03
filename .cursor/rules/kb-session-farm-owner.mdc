@@ -1,0 +1,29 @@
+---
+description: 知识库「农场主」角色 — GraphRAG 结构维护、FillRequest、宪章同步
+globs: INAGENT/agents/knowledge_farm_owner_agent.py,INAGENT/rag/graphrag_adapter.py,INAGENT/rag/graphrag_integration.py,INAGENT/rag/knowledge_schema.py,INAGENT/docs/agents/sessions/04-farm-owner.md
+alwaysApply: false
+---
+
+# 知识库会话：农场主（Farm Owner）
+
+**权威宪章**：[`INAGENT/docs/agents/sessions/04-farm-owner.md`](INAGENT/docs/agents/sessions/04-farm-owner.md)  
+**全会话锚点**（上下文压缩后仍注入）：[`kb-session-farm-owner-anchor.mdc`](kb-session-farm-owner-anchor.mdc)
+
+## 持久职责（简记）
+
+- 消费 **`schema_gaps.jsonl`**（采购/农民产出），对 GraphRAG 做 **结构维护**：新实体、新属性列、冲突与溢出的 **保守裁决**；写入前 **`snapshot_backup`**；完成后 **`reload()`**（仅 **GraphRAG 图视图**，不承诺 Qdrant / merged KB / 混合检索）。
+- 通过 **`FarmOwnerReport.fill_requests`** 输出结构化意图；**不**直接调用农民；**不**做 chunk 内容富化；**不**下发无意义的布尔占位（`new_entity_attribute` 仅在存在 **`default_value`** 时发 `FillRequest`）。
+- 与 **树** 会话：gap 中携带骨架/`node_id` 等；CLI 实体与图不一致时 **先定数据归属** 再改代码。
+- **职责变更时**：同步更新宪章、`kb-session-farm-owner.mdc`、锚点（若一句话职责变）、模块头注释；契约变更同步农民/采购相关单测与 PR 说明。
+
+## 范围（应改）
+
+- `INAGENT/agents/knowledge_farm_owner_agent.py`
+- `INAGENT/rag/graphrag_adapter.py`、`INAGENT/rag/graphrag_integration.py` 中与 farm_owner **结构写入**直接相关、且已确认安全的调用点（小步、可回滚）
+- `INAGENT/rag/knowledge_schema.py` 中 Farm 相关模型
+
+## 非范围（勿改）
+
+- chunk **内容富化**（农民 `apply_fill_request` 与 reference）
+- **采购** 三层准入策略
+- **销售员** 检索路由与 Rerank（除非修复农场主 **reload** 后的集成错误）

@@ -27,46 +27,6 @@ from INAGENT.workflow_config_generator import (
     process_job,
     _documents_to_elements,
 )
-# 尝试导入_adaptive_rag_retrieval
-try:
-    from INAGENT.rag.fallback_retrieval import _adaptive_rag_retrieval
-except ImportError:
-    try:
-        # 尝试从workflow_config_generator导入（如果它导入了）
-        from INAGENT.workflow_config_generator import _adaptive_rag_retrieval
-    except ImportError:
-        # 如果都不存在，定义一个简单的实现
-        def _adaptive_rag_retrieval(hybrid_retriever, reranker, job_content, decomposition_result=None, **kwargs):
-            """简单的RAG检索实现（当fallback_retrieval不可用时）"""
-            top_k_retrieval = kwargs.get("top_k_retrieval", 10)
-            top_k_rerank = kwargs.get("top_k_rerank", 5)
-            
-            # 使用hybrid_retriever进行检索
-            try:
-                # 尝试使用query方法
-                if hasattr(hybrid_retriever, 'query'):
-                    retrieved_docs = hybrid_retriever.query(job_content, top_k=top_k_retrieval)
-                elif hasattr(hybrid_retriever, 'retrieve'):
-                    retrieved_docs = hybrid_retriever.retrieve(job_content, top_k=top_k_retrieval)
-                else:
-                    retrieved_docs = []
-            except Exception as e:
-                logger.warning(f"RAG检索失败: {e}")
-                retrieved_docs = []
-            
-            # 提取文本内容
-            texts = []
-            for doc in retrieved_docs:
-                if isinstance(doc, dict):
-                    text = doc.get("text", "") or doc.get("page_content", "") or doc.get("content", "")
-                else:
-                    text = str(doc)
-                if text:
-                    texts.append(text[:500])  # 限制每个片段长度
-            
-            context = "\n\n".join(texts[:top_k_rerank])
-            
-            return context, {"retrieved_snippets": texts[:top_k_rerank]}, decomposition_result or {}
 from INAGENT.agents.lb_ops_agent import (
     build_lb_ops_agent,
     build_lb_ops_prompt,
@@ -180,31 +140,30 @@ def generate_config(job_content: str, hybrid_retriever, reranker, model, functio
 
 
 def generate_explanation(query: str, hybrid_retriever, reranker, model) -> Dict[str, Any]:
-    """生成功能解释"""
+    """通过知识路由器检索 + Agent 生成功能解释"""
     try:
-        # 使用RAG检索相关文档
-        context, retrieval_info, _ = _adaptive_rag_retrieval(
+        from INAGENT.rag.knowledge_router import KnowledgeRouter
+        from INAGENT.rag.test_rules import TestRulesEngine
+        from INAGENT.rag.unified_rag import UnifiedRAGRetriever
+
+        unified_rag = UnifiedRAGRetriever(
             hybrid_retriever=hybrid_retriever,
             reranker=reranker,
-            job_content=query,
-            top_k_retrieval=10,
-            top_k_rerank=5,
-            max_snippet_chars=500,
-            max_context_chars=2000,
         )
-        
-        # 提取检索到的文档片段
+        kr = KnowledgeRouter(
+            unified_rag=unified_rag,
+            rules_engine=TestRulesEngine(),
+            hybrid_retriever=hybrid_retriever,
+            reranker=reranker,
+        )
+        retrieval = kr.retrieve(query, mode="explain", max_context_chars=10000)
+        context = retrieval.get("context", "")
+
         retrieved_snippets = []
-        if isinstance(retrieval_info, dict):
-            retrieved_snippets = retrieval_info.get("retrieved_snippets", [])
-        
-        # 如果retrieved_snippets为空，从context中提取
-        if not retrieved_snippets and isinstance(context, str):
-            # 如果context是字符串，按段落分割
+        if context:
             snippets = context.split("\n\n")
             retrieved_snippets = [s[:500] for s in snippets if s.strip()][:5]
-        
-        # 构建解释Agent
+
         explanation_prompt = f"""请基于以下文档内容，详细解释用户询问的功能或概念。
 
 [用户问题]
@@ -220,7 +179,7 @@ def generate_explanation(query: str, hybrid_retriever, reranker, model) -> Dict[
 4. 使用中文回答
 
 请输出详细的功能解释。"""
-        
+
         agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
                 role_name="技术文档专家",
@@ -231,10 +190,10 @@ def generate_explanation(query: str, hybrid_retriever, reranker, model) -> Dict[
             ),
             model=model,
         )
-        
+
         response = agent.step(explanation_prompt)
         explanation = response.msgs[0].content if response.msgs else ""
-        
+
         return {
             "explanation": explanation,
             "related_docs": retrieved_snippets,
@@ -248,11 +207,15 @@ def generate_explanation(query: str, hybrid_retriever, reranker, model) -> Dict[
 def _run_knowledge_router_mode(query, model, hybrid_retriever, reranker, mode):
     """使用知识路由器执行测试用例编写或评审。"""
     from INAGENT.rag.knowledge_router import KnowledgeRouter
-    from INAGENT.rag.cli_reference import CLIReferenceRetriever
     from INAGENT.rag.test_rules import TestRulesEngine
+    from INAGENT.rag.unified_rag import UnifiedRAGRetriever
 
+    unified_rag = UnifiedRAGRetriever(
+        hybrid_retriever=hybrid_retriever,
+        reranker=reranker,
+    )
     kr = KnowledgeRouter(
-        cli_retriever=CLIReferenceRetriever(),
+        unified_rag=unified_rag,
         rules_engine=TestRulesEngine(),
         hybrid_retriever=hybrid_retriever,
         reranker=reranker,
@@ -328,7 +291,7 @@ def main():
     print("")
     print("正在初始化RAG系统...")
     try:
-        hybrid_retriever, reranker = initialize_rag_system()
+        hybrid_retriever, reranker, graphrag_retriever = initialize_rag_system()
         print("[成功] RAG系统初始化完成")
     except Exception as e:
         print(f"[错误] RAG系统初始化失败: {e}")

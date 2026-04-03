@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from INAGENT.config.project_config import cfg_bool
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INAGENT_DIR = REPO_ROOT / "INAGENT"
@@ -57,12 +58,11 @@ LOCAL_RAG_DIRS = [
 
 
 def _maybe_postprocess_unknown_module() -> int:
-    if os.getenv("POSTPROCESS_UNKNOWN_MODULE", "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "y",
-    }:
+    if not cfg_bool(
+        "database.postprocess_unknown_module",
+        False,
+        env="POSTPROCESS_UNKNOWN_MODULE",
+    ):
         return 0
 
     if not KB_PATH.exists():

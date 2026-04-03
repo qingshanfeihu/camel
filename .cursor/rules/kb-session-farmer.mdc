@@ -1,0 +1,14 @@
+---
+description: 知识库「农民」角色 — KnowledgeFarmerAgent 与 cultivate 闭环
+globs: INAGENT/agents/knowledge_farmer_agent.py
+alwaysApply: false
+---
+
+# 知识库会话：农民（Farmer）
+
+完整宪章见 `INAGENT/docs/agents/sessions/02-farmer.md`。
+
+## 摘要
+
+- **负责**：`KnowledgeFarmerAgent` — `cultivate_batch`、`reference` 写入、`schema_gaps`、`apply_fill_request`。
+- **禁止**：采购员 / 农场主内决策与 GraphRAG 结构写入；销售员侧 `knowledge_router` / `unified_rag`（除非极小修复）。

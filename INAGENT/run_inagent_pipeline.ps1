@@ -131,21 +131,27 @@ function Invoke-PreInitDatabase {
 
     $kbPath    = Join-Path $PSScriptRoot "knowledge_base\reference\knowledge_base.json"
     $indexPath = Join-Path $PSScriptRoot "knowledge_base\function_structure_index.json"
+    $graphragEntities = Join-Path $PSScriptRoot "graphrag_index\output\entities.parquet"
+    $qdrantMetaPath = Join-Path $env:USERPROFILE "AppData\Local\INAGENT\vector_store\qdrant\rag_meta.json"
 
-    $kbExists    = Test-Path $kbPath
-    $indexExists = Test-Path $indexPath
+    $kbExists         = Test-Path $kbPath
+    $indexExists      = Test-Path $indexPath
+    $graphragReady    = Test-Path $graphragEntities
+    $qdrantReady      = Test-Path $qdrantMetaPath
 
     if ($kbExists -and $indexExists) {
         Write-Log "Database exists. Skip initialization." "INFO"
-        if ($kbExists) {
-            Write-Log "  - knowledge_base.json: present" "INFO"
+        Write-Log "  - knowledge_base.json: present" "INFO"
+        Write-Log "  - function_structure_index.json: present" "INFO"
+        if ($graphragReady) {
+            Write-Log "  - GraphRAG index: present" "INFO"
         } else {
-            Write-Log "  - knowledge_base.json: missing" "INFO"
+            Write-Log "  - GraphRAG index: MISSING (run database rebuild to build)" "WARN"
         }
-        if ($indexExists) {
-            Write-Log "  - function_structure_index.json: present" "INFO"
+        if ($qdrantReady) {
+            Write-Log "  - Qdrant vector store: present" "INFO"
         } else {
-            Write-Log "  - function_structure_index.json: missing" "INFO"
+            Write-Log "  - Qdrant vector store: MISSING (run database rebuild to build)" "WARN"
         }
         return $true
     }
@@ -223,46 +229,59 @@ function Invoke-DbAction {
 
     Write-Log ("[SUCCESS] Database action completed: {0}" -f $Action) "SUCCESS"
 
-    # GraphRAG: sync or rebuild according to action
+    # Qdrant + GraphRAG: sync or rebuild according to action
     $graphragWorkspace = Join-Path $PSScriptRoot "graphrag_index"
     $graphragOutput = Join-Path $graphragWorkspace "output"
     $kbPath = Join-Path $PSScriptRoot "knowledge_base\reference\knowledge_base.json"
+    $qdrantMetaPath = Join-Path $env:USERPROFILE "AppData\Local\INAGENT\vector_store\qdrant\rag_meta.json"
 
     switch ($Action) {
         "status" {
             Write-Log "" "INFO"
             Write-Log "GraphRAG status:" "INFO"
             $null = Invoke-PythonWithLog "INAGENT/scripts/init_graphrag.py --status"
+            Write-Log "" "INFO"
+            Write-Log "Qdrant vector store status:" "INFO"
+            $null = Invoke-PythonWithLog "-m INAGENT.scripts.run_rag_index --status"
         }
         { $_ -in @("create", "update", "rebuild") } {
-            # Unified GraphRAG build using LLM Gateway (non-batch)
-            # Automatically: init workspace -> build index
-            if (Test-Path $kbPath) {
-                Write-Log "" "INFO"
-                Write-Log "GraphRAG: Starting full build pipeline (LLM Gateway)..." "INFO"
-                Write-Host ""
-                Write-Host "Building GraphRAG index via LLM Gateway..." -ForegroundColor Green
-                Write-Host "This will: init workspace -> build index" -ForegroundColor Cyan
-                Write-Host "Build phases: extract_graph -> summarize -> embed -> communities -> reports" -ForegroundColor Cyan
-                Write-Host "Progress bar will update every 15 seconds during long phases." -ForegroundColor Gray
-                Write-Host ""
-                
+            if (-not (Test-Path $kbPath)) {
+                Write-Log "[WARN] knowledge_base.json not found. Run database create first." "WARN"
+            } else {
                 $env:PYTHONIOENCODING = "utf-8"
-                
-                # Step 1: Init workspace
-                Write-Log "Step 1/2: Initializing GraphRAG workspace..." "INFO"
+
+                # ── Step 1/3: Qdrant vector store rebuild ──
+                Write-Log "" "INFO"
+                Write-Log "Step 1/3: Rebuilding Qdrant vector store..." "INFO"
+                if ($Action -eq "rebuild") {
+                    if (Test-Path $qdrantMetaPath) {
+                        Remove-Item -Path $qdrantMetaPath -Force -ErrorAction SilentlyContinue
+                        Write-Log "  Cleared rag_meta.json to force full rebuild." "INFO"
+                    }
+                }
+                $qdrantExitCode = Invoke-PythonWithLog "-m INAGENT.scripts.run_rag_index"
+                if ($qdrantExitCode -eq 0) {
+                    Write-Log "[SUCCESS] Step 1/3: Qdrant vector store ready." "SUCCESS"
+                } else {
+                    Write-Log "[ERROR] Qdrant vector store rebuild failed." "ERROR"
+                }
+
+                # ── Step 2/3: GraphRAG workspace init ──
+                Write-Log "" "INFO"
+                Write-Log "Step 2/3: Initializing GraphRAG workspace..." "INFO"
                 $initExitCode = Invoke-PythonWithLog "INAGENT/scripts/init_graphrag.py --init"
-                
+
                 if ($initExitCode -ne 0) {
                     Write-Log "[ERROR] GraphRAG workspace init failed." "ERROR"
                 } else {
-                    Write-Log "[SUCCESS] Step 1/2: Workspace initialized." "SUCCESS"
+                    Write-Log "[SUCCESS] Step 2/3: Workspace initialized." "SUCCESS"
                     Write-Host ""
-                    
-                    # Step 2: Build index (with real-time progress monitor)
-                    Write-Log "Step 2/2: Building GraphRAG index (this takes a while)..." "INFO"
+
+                    # ── Step 3/3: GraphRAG index build ──
+                    Write-Log "Step 3/3: Building GraphRAG index (this takes a while)..." "INFO"
+                    Write-Host "Build phases: extract_graph -> summarize -> embed -> communities -> reports" -ForegroundColor Cyan
                     $graphExitCode = Invoke-PythonWithLog "INAGENT/scripts/init_graphrag.py --build"
-                    
+
                     if ($graphExitCode -eq 0) {
                         Write-Log "" "SUCCESS"
                         Write-Log "[SUCCESS] GraphRAG build completed. Ready for workflow use." "SUCCESS"
@@ -270,8 +289,6 @@ function Invoke-DbAction {
                         Write-Log "[ERROR] GraphRAG build failed. Check logs for details." "ERROR"
                     }
                 }
-            } else {
-                Write-Log "[WARN] knowledge_base.json not found. Run database create first." "WARN"
             }
         }
         "delete" {
@@ -295,6 +312,12 @@ function Invoke-DbAction {
                 } else {
                     Write-Log "[SUCCESS] Batch state removed." "SUCCESS"
                 }
+            }
+
+            if (Test-Path $qdrantMetaPath) {
+                Write-Log "Qdrant: clearing rag_meta.json." "INFO"
+                Remove-Item -Path $qdrantMetaPath -Force -ErrorAction SilentlyContinue
+                Write-Log "[SUCCESS] Qdrant metadata cleared." "SUCCESS"
             }
         }
     }
@@ -381,29 +404,51 @@ function Invoke-Jobs {
 
 function Invoke-TestReview {
     Write-Log ""
-    Write-Log "Run test case review (ReviewPipeline: plan → knowledge → review)." "INFO"
-    Write-Log "  Input : INAGENT/jobs/test_review/  (放入 .xlsx/.xls 文件)" "INFO"
-    Write-Log "  Output: INAGENT/review_results/" "INFO"
+    Write-Log "Run test case review (ReviewPipeline: coverage + CLI syntax analysis)." "INFO"
+    Write-Log "  Input : INAGENT/jobs/test_review/  (放入 Bug 目录，含 .xlsx/.xls 文件)" "INFO"
+    Write-Log "  Output: <bug_dir>/output/" "INFO"
     Write-Log ""
 
-    # Check if there are Excel files to review
     $reviewDir = Join-Path $PSScriptRoot "jobs\test_review"
     if (-not (Test-Path $reviewDir)) {
         New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
     }
-    $excelFiles = Get-ChildItem -Path $reviewDir -Include "*.xlsx","*.xls" -File -ErrorAction SilentlyContinue
-    if (-not $excelFiles) {
-        Write-Log "[WARN] INAGENT/jobs/test_review/ 目录下没有找到 Excel 文件。" "WARN"
-        Write-Log "请将待评审的 .xlsx/.xls 文件放入: $reviewDir" "INFO"
+
+    $bugDirs = Get-ChildItem -Path $reviewDir -Directory -ErrorAction SilentlyContinue
+    if (-not $bugDirs) {
+        Write-Log "[WARN] INAGENT/jobs/test_review/ 目录下没有找到 Bug 目录。" "WARN"
+        Write-Log "请创建 Bug 目录并放入 .xlsx/.xls 文件，例如: INAGENT/jobs/test_review/Bug 121100/" "INFO"
         return
     }
-    Write-Log ("找到 {0} 个 Excel 文件待评审" -f $excelFiles.Count) "INFO"
-    foreach ($f in $excelFiles) {
-        Write-Log ("  - {0}" -f $f.Name) "INFO"
+
+    Write-Log ("找到 {0} 个 Bug 目录:" -f $bugDirs.Count) "INFO"
+    $idx = 0
+    foreach ($d in $bugDirs) {
+        $idx++
+        $xlsCount = (Get-ChildItem -Path $d.FullName -Include "*.xlsx","*.xls" -File -ErrorAction SilentlyContinue).Count
+        Write-Log ("  [{0}] {1}  ({2} Excel files)" -f $idx, $d.Name, $xlsCount) "INFO"
     }
     Write-Log ""
 
-    $exitCode = Invoke-PythonWithLog "INAGENT/run_test_review.py"
+    if ($bugDirs.Count -eq 1) {
+        $selectedDir = $bugDirs[0]
+        Write-Log ("自动选择唯一 Bug 目录: {0}" -f $selectedDir.Name) "INFO"
+    } else {
+        $choice = Read-Host "请选择要评审的 Bug 目录编号 (1-$($bugDirs.Count))"
+        $choiceInt = [int]$choice
+        if ($choiceInt -lt 1 -or $choiceInt -gt $bugDirs.Count) {
+            Write-Log "[ERROR] 无效选择: $choice" "ERROR"
+            return
+        }
+        $selectedDir = $bugDirs[$choiceInt - 1]
+    }
+
+    $relPath = "INAGENT/jobs/test_review/$($selectedDir.Name)"
+    $outputDir = "$relPath/output"
+    Write-Log ("评审目录: {0}" -f $relPath) "INFO"
+    Write-Log ""
+
+    $exitCode = Invoke-PythonWithLog "-m INAGENT.run_review `"$relPath`" --output-dir `"$outputDir`""
 
     if ($exitCode -ne 0) {
         Write-Log "[ERROR] Test review failed." "ERROR"
@@ -412,7 +457,7 @@ function Invoke-TestReview {
     }
 
     Write-Log ""
-    Write-Log "[SUCCESS] Test review completed. Results: INAGENT/review_results/" "SUCCESS"
+    Write-Log ("[SUCCESS] Test review completed. Results: {0}" -f $outputDir) "SUCCESS"
 }
 
 function Invoke-WebPlatform {
@@ -526,8 +571,8 @@ Write-Host "[5] Jobs processing"
 Write-Host "    (config generation only, no execution)"
 Write-Host "    Input: INAGENT/jobs/config_tasks/"
 Write-Host "[6] Test review (测试用例评审)"
-Write-Host "    ReviewPipeline: plan → knowledge → review"
-Write-Host "    Input: INAGENT/jobs/test_review/ (.xlsx/.xls)"
+Write-Host "    ReviewPipeline: coverage + CLI syntax analysis"
+Write-Host "    Input: INAGENT/jobs/test_review/<Bug_ID>/ (.xlsx/.xls)"
 Write-Host "[7] Web Platform"
 Write-Host "    (browser UI: http://127.0.0.1:8010)"
 Write-Host "=========================================="

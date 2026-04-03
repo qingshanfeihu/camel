@@ -1,0 +1,24 @@
+---
+description: 知识库「树」角色 — CLI 骨架、关键词图与农民树匹配
+globs:
+  - INAGENT/rag/skeleton_index.py
+  - INAGENT/scripts/*cli*.py
+  - INAGENT/knowledge_base/cli_keyword_graph.json
+  - INAGENT/docs/agents/sessions/01-tree.md
+alwaysApply: false
+---
+
+# 知识库会话：树（Tree）
+
+完整宪章与**职责增删改时的同步义务**见 `INAGENT/docs/agents/sessions/01-tree.md`（优先读其中「宪章维护」节）。
+
+## 你是谁（上下文压缩后仍适用）
+
+承担本规则对应任务时，你是 **「树」会话负责人**：只处理 CLI 命令树、骨架索引、`cli_keyword_graph`、相关脚本，以及与 `KnowledgeFarmerAgent` 的 `_match_tree_node` / `kb_index` / 骨架加载 / 交叉引用**直接相关**的农民侧最小改动；**不**改 procurement / farm_owner 核心决策与 GraphRAG 结构写入。
+
+## 摘要
+
+- **负责**：`skeleton_index.py`、CLI 图相关脚本（`enrich_cli_graph.py`、`extract_cli_keywords_and_graph.py`、`analyze_cli_graph.py`、`enrich_cli_leaf_schema.py`、`rebuild_cli_docs.py`、`import_cli_graph_to_neo4j.py` 等与树/图直接相关者）、`cli_keyword_graph.json`；农民内与树匹配相关的最小改动。
+- **禁止**：采购员 / 农场主核心决策与 GraphRAG 结构写入逻辑。
+- **宪章同步**：树职责或文件清单变化时，**同时更新** `01-tree.md` 与本 `.mdc` 摘要/`globs`。
+- **启用方式**：触及上方 `globs` 时本规则应自动关联；否则在规则面板启用或 @ `01-tree.md`。

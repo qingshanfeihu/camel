@@ -8,7 +8,15 @@ v0.4.0 起，测试执行阶段 (Stage 5-9) 由 **CAMEL Workforce Pipeline** 驱
 
 v0.5.0 新增 **Web Platform**（FastAPI + SPA），提供知识库管理、RAG 问答、测试执行、结果查看和系统运维五大可视化模块。
 
-v0.6.0 新增 **ReviewPipeline**（自主三步评审：plan → knowledge → review），支持 CLI 批量评审和 Web 实时评审。重命名 `graphrag_workspace` → `graphrag_index`，`test` 模式 → `e2e` 以消除歧义。
+v0.6.0 新增 **ReviewPipeline**，支持 CLI 批量评审和 Web 实时评审。重命名 `graphrag_workspace` → `graphrag_index`，`test` 模式 → `e2e` 以消除歧义。
+
+v0.7.0 ReviewPipeline 升级为 **v4 多 Agent Workforce 架构**（5 Worker 并行：Coverage / CLI Syntax / Spec Compliance / Load-Stress / Synthesis），新增 Manager 统一编排 + 模块分流（skip/light/full）机制。
+
+v0.8.1 评审命中率优化：横切面模块 Scope 保护 + 配置并存检查 + 知识库重建，Bug 121100 命中率 **83%**（目标 ≥78%）。
+
+v0.9.0 引入 **Self-Refine 自我改进循环**：ReviewEvaluator 混合评分（程序化+LLM）+ ReviewRefiner 迭代改进 + 报告清洗（5 阶段后处理）。
+
+v10.0 **RAG 基础设施全面升级**：并行检索（GraphRAG+向量 ThreadPoolExecutor）、fail-stop 健康检查、Gateway 并发 embedding（5 路 asyncio.gather）、向量库 28933 points + GraphRAG 3412 entities。
 
 ## 文档索引
 
@@ -16,7 +24,10 @@ v0.6.0 新增 **ReviewPipeline**（自主三步评审：plan → knowledge → r
 |------|------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **系统架构设计文档** |
 | [docs/WEB_USER_GUIDE.md](docs/WEB_USER_GUIDE.md) | **Web Platform 使用手册** |
+| [docs/BUG_TO_CASE_INPUT_USAGE.md](docs/BUG_TO_CASE_INPUT_USAGE.md) | Bug-to-Case 输入格式说明 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 项目更新日志（完整变更记录） |
+| [docs/DESIGN.md](docs/DESIGN.md) | 详细设计文档（知识库/检索层/Agent 层/GraphRAG） |
+| [docs/PLAN_HISTORY.md](docs/PLAN_HISTORY.md) | ReviewPipeline 历史设计（v1/v2） |
 | [docs/TRANSFORMATION_PLAN.md](docs/TRANSFORMATION_PLAN.md) | auto_convert/GraphRAG 一体化改造计划 |
 | [docs/UNKNOWN_MODULE_MISCLASSIFICATION_SUMMARY.md](docs/UNKNOWN_MODULE_MISCLASSIFICATION_SUMMARY.md) | unknown 模块误标分析 |
 
@@ -34,13 +45,22 @@ INAGENT/
 ├── toolkits/                   # ★ Workforce Toolkit (v0.4.0 新增)
 │   ├── nsae_device_toolkit.py  # NSAE 设备 SSH 工具集 (4 tools)
 │   ├── vm_controller_toolkit.py # 测试 VM 控制工具集 (9 tools)
-│   └── traffic_verify_toolkit.py # HTTP 流量验证工具集 (4 tools)
+│   ├── traffic_verify_toolkit.py # HTTP 流量验证工具集 (4 tools)
+│   └── knowledge_toolkit.py    # 知识库工具集 (3 tools, 用于 ReviewPipeline)
 ├── rag/                        # RAG 检索模块
 │   ├── unified_rag.py          # 统一 RAG 检索器（向量+GraphRAG+Rerank+协议加权）
+│   ├── knowledge_router.py     # 知识路由器（mode 白名单 → 检索路径选择）
+│   ├── knowledge_config.py     # 文档分类体系 + mode 白名单定义
+│   ├── knowledge_schema.py     # 知识实体数据模型 (KnowledgeEntity)
+│   ├── hybrid_knowledge_fusion.py # 跨存储融合 (UnifiedRAG + Neo4j + EntityLink)
+│   ├── entity_link_store.py    # SQLite 跨存储实体对齐索引
+│   ├── neo4j_store.py          # Neo4j 图数据库封装
 │   ├── graphrag_integration.py # GraphRAG 检索集成
 │   ├── graphrag_adapter.py     # GraphRAG 适配器（实体提取/配置生成）
 │   ├── fallback_retrieval.py   # RAG 回退检索逻辑
 │   ├── rerank_retriever.py     # SiliconFlow Rerank 检索器
+│   ├── test_rules.py           # 评审规则引擎
+│   ├── cli_reference.py        # CLI 参考文档检索
 │   └── scoring_utils.py        # 协议加权评分
 ├── utils/                      # 通用工具模块
 │   ├── ssh_client.py           # SSH 设备连接客户端
@@ -62,6 +82,8 @@ INAGENT/
 ├── docs/                       # 项目文档
 │   ├── ARCHITECTURE.md         # 系统架构设计
 │   ├── CHANGELOG.md            # 更新日志
+│   ├── DESIGN.md               # 详细设计文档
+│   ├── PLAN_HISTORY.md         # ReviewPipeline 历史设计 (v1/v2)
 │   └── ...                     # 其他技术文档
 ├── unit_tests/                 # 单元测试（pytest）
 ├── jobs/                       # 任务作业目录
@@ -82,12 +104,13 @@ INAGENT/
 │   ├── routers/                # 5 个 API 路由模块
 │   └── static/                 # 前端 SPA (HTML/JS/CSS)
 │
-├── review/                     # ★ ReviewPipeline (v0.6.0 新增)
-│   ├── pipeline.py             # 三步自主评审 (plan → knowledge → review)
-│   └── PLAN.md                 # 设计规划
+├── review/                     # ★ ReviewPipeline (v0.6.0+, v0.7.0 升级为 Workforce)
+│   ├── pipeline.py             # 5-Worker Workforce 评审 (Coverage/CLI/Spec/Load → Synthesis)
+│   ├── input_builder.py        # ReviewInputBuilder: 构建结构化评审输入
+│   └── review_schema.py        # 结构化评审数据模型
 ├── review_results/             # 评审结果输出
 ├── pipeline_runner.py          # ★ 主入口：端到端测试流水线
-├── run_test_review.py          # ★ 测试用例批量评审入口
+├── run_review.py               # ★ 测试用例批量评审入口（原 run_test_review.py / run_bug_to_case.py 已合并）
 ├── workforce_pipeline.py       # ★ Workforce Pipeline (阶段 5-9)
 ├── workflow_config_generator.py # ★ RAG + Agent 配置生成
 ├── interactive_cli.py          # 交互式配置生成器
@@ -140,3 +163,14 @@ cat INAGENT/reports/a1_test_report.md
 # 将 .xlsx/.xls 放入 INAGENT/jobs/test_review/ 后:
 .\INAGENT\run_inagent_pipeline.ps1 -Mode review
 ```
+
+## 评审输出与兼容性
+
+`run_review.py` 仍然保留原有 Markdown 和调试输出，并在此基础上新增结构化 Findings 文件，便于回归比对和后处理：
+
+- `review_{sheet}.md`：单个 Sheet 的评审报告
+- `_summary.md`：本次批量评审汇总
+- `review_debug_{sheet}.jsonl`：调试事件流，包含 RAG 状态、调度告警和结构化 findings 事件
+- `review_findings_{sheet}.json`：从 Markdown 报告抽取的结构化问题清单，适合自动对比和机器消费
+
+当前改造保持增量兼容：原有 `review_*.md`、`_summary.md`、`review_debug_*.jsonl` 的文件名和写出逻辑不变，新增 JSON 输出不会影响现有消费方。`run_test_review.py` 仍保留为历史入口参考，统一评审入口以 `run_review.py` 为准。

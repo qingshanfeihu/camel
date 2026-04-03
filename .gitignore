@@ -498,17 +498,6 @@ INAGENT/mocks/
 # Environment config (contains secrets)
 INAGENT/.env
 
-# Database files (local runtime data)
-*.db
-*.db-shm
-*.db-wal
-
-# Gateway config (contains API keys — use config.yaml.example)
-llm_gateway/config.yaml.local
-
-# One-off scripts with hardcoded credentials
-INAGENT/scripts/cleanup_run9.py
-
 # Context files (Copilot session artifacts)
 context_files/
 

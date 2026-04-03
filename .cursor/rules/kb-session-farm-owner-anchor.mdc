@@ -1,0 +1,16 @@
+---
+description: 农场主角色锚点 — 上下文压缩后仍须识别的职责与宪章同步义务
+alwaysApply: true
+---
+
+# 农场主角色锚点（全会话）
+
+凡本工作区内任务涉及 **`KnowledgeFarmOwnerAgent`**、**`schema_gaps.jsonl`**、**Farm 侧契约**（`knowledge_schema` 中 FillRequest / SchemaGapEntry / FarmOwnerReport）、或 **GraphRAG 结构写入**（`snapshot_backup`、实体/列/关系、`reload`），你承担 **「农场主」会话负责人** 角色。
+
+- **完整职责、范围/非范围、接口**：以 [`INAGENT/docs/agents/sessions/04-farm-owner.md`](INAGENT/docs/agents/sessions/04-farm-owner.md) 为准。
+- **实现细节摘要**：[`kb-session-farm-owner.mdc`](kb-session-farm-owner.mdc)（编辑农场主相关文件时务必遵守）。
+- **宪章同步义务**：在后续开发中若农场主职责有 **增、删、改**，须 **同一 PR（或紧随其后的提交）** 同步更新：`04-farm-owner.md`、本锚点（若一句话职责变化）、`kb-session-farm-owner.mdc`，必要时更新 `knowledge_farm_owner_agent.py` 模块头注释。
+
+不做 chunk 内容富化；内容侧交给农民 `apply_fill_request`。
+
+**检索**：仅保证 **`GraphRAGRetriever.reload()`** 后图路径一致；全向量/混合检索不在农场主范围。

@@ -12,6 +12,7 @@ Workflow: 输入需求生成配置
 import os
 import sys
 import json
+import hashlib
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -26,10 +27,10 @@ from camel.retrievers import HybridRetriever
 from camel.storages import QdrantStorage
 from camel.types import ModelPlatformType
 from camel.models import ModelFactory
-from qdrant_client import QdrantClient
 from unstructured.documents.elements import Text, ElementMetadata
 
 from INAGENT.utils import env_utils
+from INAGENT.config.project_config import cfg_bool, cfg_int, cfg_str
 from INAGENT.utils.workflow_logger import (
     setup_workflow_logger,
     get_workflow_logger,
@@ -420,25 +421,19 @@ def initialize_rag_system(use_graphrag: bool = None):
     Returns:
         (hybrid_retriever, reranker, graphrag_retriever)
     """
-    from INAGENT.utils.llm_config import get_siliconflow_config
-    siliconflow_config = get_siliconflow_config()
+    from INAGENT.utils.llm_config import get_gateway_config
+    gateway_config = get_gateway_config()
     
     # 从配置中获取API key和base_url
-    api_key = siliconflow_config.get("api_key")
+    api_key = gateway_config.get("api_key")
     if not api_key or env_utils.is_placeholder_value(api_key):
         raise ValueError("LLM 网关未配置或无效，请在 .env 文件中配置")
     
-    base_url = siliconflow_config.get("base_url")
+    base_url = gateway_config.get("base_url")
 
     # 初始化嵌入模型（使用配置中的嵌入模型名称）
-    embedding_model_name = siliconflow_config.get("embedding_model", "BAAI/bge-m3")
-    embedding_dim_value = os.getenv("SILICONFLOW_EMBEDDING_DIM")
-    vector_dim = 1024
-    if embedding_dim_value:
-        try:
-            vector_dim = int(embedding_dim_value)
-        except ValueError:
-            pass
+    embedding_model_name = gateway_config.get("embedding_model", "text-embedding-v4")
+    vector_dim = cfg_int("workflow.embedding_dim", 0, env="LLM_GATEWAY_EMBEDDING_DIM") or cfg_int("workflow.embedding_dim", 1024, env="SILICONFLOW_EMBEDDING_DIM")
 
     embedding_model = OpenAICompatibleEmbedding(
         model_type=embedding_model_name,
@@ -446,13 +441,35 @@ def initialize_rag_system(use_graphrag: bool = None):
         url=base_url,
     )
 
-    # 初始化向量存储
-    client = QdrantClient(":memory:")
-    storage = QdrantStorage(
-        vector_dim=vector_dim,
-        client=client,
-        collection_name="workflow_rag",
+    # 初始化向量存储（优先远端 Qdrant，未配置则使用本地持久化）
+    qdrant_url = cfg_str("storage.qdrant.url", "", env="QDRANT_URL").strip()
+    qdrant_api_key = cfg_str("storage.qdrant.api_key", "", env="QDRANT_API_KEY").strip()
+    qdrant_collection = (
+        cfg_str("storage.qdrant.collection", "workflow_rag", env="QDRANT_COLLECTION").strip()
+        or "workflow_rag"
     )
+    qdrant_persist_dir: Optional[Path] = None
+    if qdrant_url:
+        url_and_api_key = (qdrant_url, qdrant_api_key) if qdrant_api_key else (qdrant_url, "")
+        storage = QdrantStorage(
+            vector_dim=vector_dim,
+            url_and_api_key=url_and_api_key,
+            collection_name=qdrant_collection,
+        )
+        logger.info("Qdrant 使用远端服务: %s, collection=%s", qdrant_url, qdrant_collection)
+    else:
+        # Use a non-synced local directory to avoid SynologyDrive file-lock conflicts
+        _local_store = Path(os.environ.get(
+            "QDRANT_LOCAL_DIR",
+            str(Path.home() / "AppData" / "Local" / "INAGENT" / "vector_store" / "qdrant"),
+        ))
+        qdrant_persist_dir = _local_store
+        qdrant_persist_dir.mkdir(parents=True, exist_ok=True)
+        storage = QdrantStorage(
+            vector_dim=vector_dim,
+            path=str(qdrant_persist_dir),
+            collection_name=qdrant_collection,
+        )
 
     # 初始化 HybridRetriever
     hybrid_retriever = HybridRetriever(
@@ -460,19 +477,99 @@ def initialize_rag_system(use_graphrag: bool = None):
         vector_storage=storage
     )
 
-    # 加载知识库
+    # 加载知识库（仅在向量库为空或数据量不足时重建）
     reference_dir = Path(__file__).parent / "knowledge_base" / "reference"
     if not reference_dir.exists():
         raise FileNotFoundError(f"知识库目录不存在: {reference_dir}")
+    kb_path = reference_dir / "knowledge_base.json"
 
-    docs = env_utils.load_knowledge_base(reference_dir)
-    elements = _documents_to_elements(docs)
-    if elements:
-        hybrid_retriever.process(elements)
-        logger.info(f"已加载 {len(elements)} 个文档块到RAG系统")
+    def _kb_fingerprint(path: Path) -> str:
+        if not path.exists():
+            return ""
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    kb_fp = _kb_fingerprint(kb_path)
+    local_meta_path = (
+        (qdrant_persist_dir / "rag_meta.json") if qdrant_persist_dir is not None else None
+    )
+    cached_kb_fp = ""
+    if local_meta_path and local_meta_path.exists():
+        try:
+            cached = json.loads(local_meta_path.read_text(encoding="utf-8"))
+            cached_kb_fp = str(cached.get("knowledge_base_sha256", ""))
+        except Exception:
+            cached_kb_fp = ""
+
+    existing_points = 0
+    try:
+        col_info = storage.client.get_collection(qdrant_collection)
+        existing_points = col_info.points_count or 0
+    except Exception:
+        pass
+
+    need_rebuild_vectors = existing_points <= 0
+    # Also rebuild when fingerprint metadata is missing (e.g. after manual cleanup)
+    if existing_points > 0 and kb_fp and not cached_kb_fp:
+        logger.info("Qdrant 元数据缺失 (rag_meta.json)，强制重建向量索引")
+        need_rebuild_vectors = True
+        try:
+            storage.clear()
+            existing_points = 0
+        except Exception as e:
+            logger.warning("Qdrant 清空失败: %s", e)
+    if existing_points > 0 and kb_fp and cached_kb_fp and kb_fp != cached_kb_fp:
+        logger.info("检测到 knowledge_base.json 变更，重建 Qdrant 向量索引")
+        try:
+            storage.clear()
+            existing_points = 0
+            need_rebuild_vectors = True
+        except Exception as e:
+            logger.warning("Qdrant 清空失败，保留旧向量索引: %s", e)
+
+    if existing_points > 0 and not need_rebuild_vectors:
+        logger.info(
+            f"Qdrant 已有 {existing_points} 个向量点，跳过重复写入"
+        )
+        # 仍需初始化 BM25 索引（内存态，不写 Qdrant）
+        docs = env_utils.load_knowledge_base(reference_dir)
+        elements = _documents_to_elements(docs)
+        if elements:
+            hybrid_retriever.build_bm25_only(elements)
+    else:
+        docs = env_utils.load_knowledge_base(reference_dir)
+        elements = _documents_to_elements(docs)
+        if elements:
+            embed_batch = max(
+                1,
+                cfg_int("workflow.embedding_batch", 50, env="EMBEDDING_BATCH"),
+            )
+            try:
+                hybrid_retriever.process(elements, embed_batch=embed_batch, should_chunk=False)
+            except Exception as _proc_err:
+                logger.warning("向量化过程部分失败 (已写入的点仍保留): %s", _proc_err)
+            logger.info(f"已加载 {len(elements)} 个文档块到RAG系统")
+            if local_meta_path and kb_fp:
+                try:
+                    local_meta_path.write_text(
+                        json.dumps(
+                            {
+                                "collection": qdrant_collection,
+                                "knowledge_base_sha256": kb_fp,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception as e:
+                    logger.warning("写入 Qdrant 元数据指纹失败: %s", e)
 
     # 初始化 Reranker（使用配置中的重排序模型）
-    reranker_model_name = siliconflow_config.get("reranker_model", "BAAI/bge-reranker-v2-m3")
+    reranker_model_name = gateway_config.get("reranker_model", "gte-rerank-v2")
     reranker = SiliconFlowRerankRetriever(
         model_name=reranker_model_name,
         api_key=api_key,
@@ -481,10 +578,10 @@ def initialize_rag_system(use_graphrag: bool = None):
 
     # GraphRAG 为可选：未构建时降级为向量检索
     if use_graphrag is None:
-        use_graphrag = os.getenv("USE_GRAPHRAG", "true").lower() in (
-            "true",
-            "1",
-            "yes",
+        use_graphrag = cfg_bool(
+            "workflow.use_graphrag",
+            True,
+            env="USE_GRAPHRAG",
         )
     graphrag_retriever = None
 
@@ -507,7 +604,6 @@ def initialize_rag_system(use_graphrag: bool = None):
                     graphrag_index = Path(__file__).parent / "graphrag_index"
                     graphrag_retriever = GraphRAGRetriever(
                         workspace_dir=graphrag_index,
-                        use_siliconflow=True,
                     )
                     if not graphrag_retriever.is_available():
                         logger.warning(
@@ -531,18 +627,18 @@ def initialize_rag_system(use_graphrag: bool = None):
 
 def initialize_llm_model():
     """初始化LLM模型"""
-    from INAGENT.utils.llm_config import get_siliconflow_config
-    siliconflow_config = get_siliconflow_config()
+    from INAGENT.utils.llm_config import get_gateway_config
+    gateway_config = get_gateway_config()
     
     # 从配置中获取API key和base_url
-    api_key = siliconflow_config.get("api_key")
+    api_key = gateway_config.get("api_key")
     if not api_key or env_utils.is_placeholder_value(api_key):
         raise ValueError("LLM 网关未配置或无效，请在 .env 文件中配置")
     
-    base_url = siliconflow_config.get("base_url")
+    base_url = gateway_config.get("base_url")
     
     # 使用配置中的对话模型名称
-    model_name = siliconflow_config.get("chat_model", "Qwen/Qwen3-8B")
+    model_name = gateway_config.get("chat_model", "qwen-plus")
     model = ModelFactory.create(
         model_platform=ModelPlatformType.SILICONFLOW,
         model_type=model_name,
@@ -655,61 +751,53 @@ def process_job(
     
     logger.info("")
 
-    # 2. RAG检索
+    # 2. 知识工具创建 — Agent 自主检索（替代硬编码 RAG 预取）
     logger.info("=" * 80)
-    logger.info("步骤2: RAG检索相关配置文档")
+    logger.info("步骤2: 创建知识工具（Agent 自主检索）")
     logger.info("=" * 80)
-    logger.info(f"使用任务分解结果进行自适应RAG检索...")
-    logger.info(f"  - 整体查询: {job_content}")
-    logger.info(f"  - 分解查询数量: {len(decomposition_result.get('rag_queries', []))}")
-    logger.info("")
-    
-    # 使用 10 倍候选池策略（top_k_rerank × retrieval_multiplier），可选 GraphRAG
-    retrieval_multiplier = int(os.getenv("RAG_RETRIEVAL_MULTIPLIER", "10"))
-    top_k_retrieval = 5 * retrieval_multiplier  # 默认 50
-    use_graphrag = graphrag_retriever is not None and (
-        getattr(graphrag_retriever, "is_available", lambda: False)()
-    )
-    if use_graphrag:
-        logger.info("[RAG] 使用 GraphRAG 增强检索")
 
-    # 优先使用统一 RAG 流水线：向量 + GraphRAG + Rerank + 协议加权
+    from INAGENT.toolkits.knowledge_toolkit import KnowledgeToolkit
+
+    # 使用已有的 RAG 组件创建 KnowledgeToolkit
+    unified_rag = None
     if UNIFIED_RAG_AVAILABLE:
-        unified = UnifiedRAGRetriever(
+        unified_rag = UnifiedRAGRetriever(
             hybrid_retriever,
             reranker=reranker,
-            graphrag_retriever=graphrag_retriever if use_graphrag else None,
+            graphrag_retriever=graphrag_retriever if (
+                graphrag_retriever is not None
+                and getattr(graphrag_retriever, "is_available", lambda: False)()
+            ) else None,
             use_protocol_boost=True,
         )
-        context, constraints, adjusted_decomposition = unified.retrieve(
-            job_content,
-            top_k_retrieval=top_k_retrieval,
-            top_k_final=8,
-            use_graphrag=use_graphrag,
-            decomposition_result=decomposition_result,
-        )
-    else:
-        context, constraints, adjusted_decomposition = _adaptive_rag_retrieval(
-            hybrid_retriever,
-            reranker,
-            job_content,
-            decomposition_result=decomposition_result,
-            top_k_retrieval=top_k_retrieval,
-            top_k_rerank=5,
-            graphrag_retriever=graphrag_retriever if use_graphrag else None,
-        )
-    
-    wlog.info("RAG 检索完成")
-    wlog.info("  - 返回上下文长度: %d 字符", len(context))
-    wlog.info("  - 约束条件: %s", constraints)
-    log_section("RAG 返回的上下文", context[:2000] + ("..." if len(context) > 2000 else ""), wlog)
+    knowledge_tk = KnowledgeToolkit(
+        mode="config",
+        unified_rag=unified_rag,
+    )
+
+    # 用 KnowledgeToolkit.search_product_knowledge 作为 rag_retrieve
+    rag_retrieve_fn = knowledge_tk.search_product_knowledge
+
+    # 预取一份上下文用于 context 变量（供 build_lb_ops_prompt 使用）
+    logger.info("通过 KnowledgeToolkit 进行初始知识检索...")
+    context = rag_retrieve_fn(query=job_content)
+    constraints = {}
+    adjusted_decomposition = decomposition_result
+    logger.info("  - 初始上下文长度: %d 字符", len(context))
+
+    wlog = get_workflow_logger()
+    log_section("KnowledgeToolkit 返回的上下文", context[:2000] + ("..." if len(context) > 2000 else ""), wlog)
 
     # 3. 生成配置命令
     logger.info("=" * 80)
     logger.info("步骤3: LB Ops Agent生成配置命令")
     logger.info("=" * 80)
     
-    lb_ops_agent = build_lb_ops_agent(model, lambda q: context)
+    lb_ops_agent = build_lb_ops_agent(
+        model,
+        rag_retrieve_fn,
+        extra_tools=knowledge_tk.get_tools(),
+    )
     env_context = "默认环境配置"
     lb_ops_prompt = build_lb_ops_prompt(
         job_content,

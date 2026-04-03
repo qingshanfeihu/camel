@@ -1,0 +1,28 @@
+---
+description: 知识库「销售员」— 对外检索编排、Toolkit、Web；宪章与 .md 双源同步
+globs:
+  - INAGENT/rag/knowledge_router.py
+  - INAGENT/rag/unified_rag.py
+  - INAGENT/rag/hybrid_knowledge_fusion.py
+  - INAGENT/rag/entity_link_store.py
+  - INAGENT/toolkits/knowledge_toolkit.py
+  - INAGENT/web/deps.py
+  - INAGENT/web/routers/chat.py
+alwaysApply: true
+---
+
+# 知识库会话：销售员（Salesperson）
+
+**全文宪章**：`INAGENT/docs/agents/sessions/05-salesperson.md`（范围 / 非范围 / 接口 / 依赖 / 开场白 / **宪章维护**）。
+
+## 你必须记住
+
+- **职责**：知识库 **对外 usable** — 按场景的检索编排、工具面、API/Web、可观测性、使用文档；**不**负责采购 / 农民 / 农场主入库核心业务与 prompt（例外：阻塞检索的一行级明显 bug）。
+- **可改文件**：`knowledge_router.py`、`unified_rag.py`、`hybrid_knowledge_fusion.py`、`entity_link_store.py`（仅融合对外行为）、`knowledge_toolkit.py`、`web/deps.py`（仅 RAG 健康检查 / 单例等影响对外服务，须写影响面）、`web/routers/chat.py`（RAG 问答路径）。
+- **合同**：遵守 `MODE_CATEGORY_WHITELIST` 与 `KnowledgeRouter`；改白名单须同步 `knowledge_config.py` 并说明各 mode；交付 mode 选用与 `RetrievalConfidence` 等展示建议。
+- **混合检索深度算法**：见 `sessions/06-hybrid-search.md`；销售员协调对外行为与文档。
+- **宪章变更时**：同步更新 `05-salesperson.md` 与本 `.mdc`（摘要、路径、globs、冲突说明），并在 PR 中写明。
+
+## 与其它规则冲突时
+
+用户指定或其它 `kb-session-*.mdc` 明显匹配当前任务时，以该会话为准；否则默认按销售员边界处理对外 RAG / Toolkit / Web。
