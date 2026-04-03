@@ -517,7 +517,6 @@ def main() -> None:
         fill_requests,
         ref_dir=tmp_ref_dir,
         kb_path=tmp_kb,
-        simulate_owner_response=True  # Enable simulation of farm owner approval
     )
     print(f"  → 共更新 {filled} 个节点\n")
 

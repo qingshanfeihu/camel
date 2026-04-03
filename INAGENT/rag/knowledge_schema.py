@@ -66,7 +66,7 @@ class FillRequest:
 class TreeContext:
     """农场主通过 _query_tree_context() 从树侧查询得到的只读上下文。"""
     entity_title: str
-    exists_in_tree: bool = False            # CLIGraphStore.command_exists() 精确命中
+    exists_in_tree: bool = False            # 来自 command_exists 第一项；该方法契约为 (bool, list)
     tree_level: str = "unknown"             # "root"|"trunk"|"branch"|"leaf"|"unknown"
     matched_node_id: str = ""              # 精确命中的 node_id
     hierarchy_prefix: str = ""             # "SLB > Load Balancing Group > ..."

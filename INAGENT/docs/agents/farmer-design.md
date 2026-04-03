@@ -290,6 +290,7 @@ apply_fill_request()
 ## 9. 关键约束
 
 - **幂等性**：`write_to_reference` 以 `block_id` 去重，重跑不产生重复
+- **不合并、不刷向量**：`write_to_reference` 只更新 `reference/{stem}.json`，**不**调用 `merge_knowledge_base`，**不**更新 `knowledge_base.json` 或 Qdrant/BM25。E2E 须在农民写分片之后、依赖混合检索之前，由编排显式合并并刷新向量；若使用 `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)`，该合并发生在**该次农场主调用末尾**且仅包含**当时已落盘**的分片（详见 `sessions/04-farm-owner.md`、`DATA_FLOW.md` §3.7）。
 - **只读骨架拓扑**：农民不新增 `node_id`、不修改树结构
 - **无状态骨架缓存**：`_skeleton` / `_kb_index` 在实例生命周期内缓存，跨批次重用同一 `KnowledgeFarmerAgent` 实例前请确认骨架未变
 - **LLM 可选**：所有核心路径均可在无 LLM 状态下运行（降级为规则提取）

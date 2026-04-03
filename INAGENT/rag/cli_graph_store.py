@@ -237,6 +237,9 @@ class CLIGraphStore:
     def command_exists(self, cmd_text: str) -> Tuple[bool, List[str]]:
         """检查 CLI 命令是否在图谱中存在。
 
+        契约：固定返回 ``Tuple[bool, List[str]]``（农场主 ``_query_tree_context`` 解包）。
+        Mock 勿只返回 ``bool``，应 ``(True, [])`` / ``(False, [...])``，否则解包 ``TypeError`` 被吞后 ``exists_in_tree`` 恒假。
+
         Args:
             cmd_text: CLI 命令文本，如 "slb mode ircookie" 或 "no slb transparent"
 

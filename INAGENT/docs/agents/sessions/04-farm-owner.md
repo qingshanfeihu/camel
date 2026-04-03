@@ -12,6 +12,12 @@
 - **不承诺（默认）**：Qdrant / BM25 / 混合向量不会自动更新；编排应在合并或回填后调用 `refresh_hybrid_vector_index()` 或 `initialize_rag_system(force_rebuild_vectors=True)`。
 - **可选**：`KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` 在 `reload()` 之后刷新混合向量（需 LLM 网关）；`hybrid_vectors_force=False` 时按 `knowledge_base.json` 指纹决定是否重建。
 
+### 混合向量刷新与农民的调用顺序（非 bug，易漏）
+
+- 农民 `write_to_reference` **只**更新 `knowledge_base/reference/{stem}.json`（按 `block_id` 去重追加），**不**调用 `merge_knowledge_base`，**不**刷新 Qdrant/BM25。
+- `refresh_hybrid_vectors=True` 时，农场主在**本次** `process_gap_entries` 收尾处对**当前已落盘**的 `reference/*.json` 执行 `merge_knowledge_base` → `refresh_hybrid_vector_index`；**不会**自动等待或重跑之后农民再写入的文件。
+- **E2E 约束**：若在「农场主且 `refresh_hybrid_vectors=True`」这一步**之后**还有 `write_to_reference`，编排层必须再显式合并并刷新混合向量，否则检索仍基于旧的 `knowledge_base.json` 与向量索引。**推荐**：所有需要的 `write_to_reference` **先于** `process_gap_entries(..., refresh_hybrid_vectors=True)`（与 `scripts/test_ircookie_e2e.py` 注释中的顺序一致：先农民写 reference → merge → 农场主挖槽 → 再按需回填与向量重建）。
+
 ## `FillRequest` 与 `new_node_template`（农场主产出契约）
 
 - 农场主保证 `action`、`entity_title`、`target_node_id`、`fill_fields` / `resolved_value` 在文档语义下可解释；**不**下发无业务含义的布尔占位（例如用 `True` 表示「列已挖槽」）。

@@ -374,6 +374,20 @@ RRF 融合后每条结果:
 }
 ```
 
+### 3.7 知识库合并与混合向量刷新（编排顺序）
+
+向量路径（§3.2）消费的是合并后的 `knowledge_base/reference/knowledge_base.json` 经嵌入写入的 Qdrant/BM25 索引，而不是单个 `{stem}.json`。
+
+| 步骤 | 谁 | 行为 |
+|------|-----|------|
+| 写入分片 | 农民 `write_to_reference` | 只写 `reference/{stem}.json`，**不**合并、**不**刷向量 |
+| 合并小文件 | `merge_knowledge_base(reference_dir, knowledge_base.json)` | 将 `reference/*.json` 聚合成检索用的 `knowledge_base.json` |
+| 可选一键 | `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` | 在 GraphRAG `reload()` **之后**，对**当时磁盘上**的 `reference/*.json` 执行上表合并，再 `refresh_hybrid_vector_index` |
+
+**隐患（非数据污染类 bug）**：若 E2E 在「农场主且 `refresh_hybrid_vectors=True`」**之后**再执行 `write_to_reference`，则除非编排再次 `merge_knowledge_base` + `refresh_hybrid_vector_index`（或等价重建），混合检索仍看不到新 chunk。农场主路径**已**在开启该开关时前置合并，但**不能**替代「农民写分片 → 合并 → 刷向量」在时间与调用顺序上的完整闭环。
+
+**推荐顺序**（与 `scripts/test_ircookie_e2e.py` 文档串一致）：农民 `write_to_reference` → `merge_knowledge_base` → 农场主 `process_gaps` / `process_gap_entries`（若需向量一致再开 `refresh_hybrid_vectors`）→ 若仍有农民回填写 reference，则再 merge + 刷新向量。
+
 ---
 
 ## L3 — 评审管线

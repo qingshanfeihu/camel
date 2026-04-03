@@ -23,7 +23,17 @@ Skeleton artifact 状态、enrich 快照）；规则可确定时走规则，模�
 禁止硬编码相似度阈值。needs_tree_session 条目放 FarmOwnerReport.deferred。
 
 不写 knowledge_base.json。混合向量（Qdrant/BM25）默认不刷新；可传
-``refresh_hybrid_vectors=True`` 先 merge_knowledge_base 再 refresh_hybrid_vector_index。
+``refresh_hybrid_vectors=True``：在本方法末尾对**当时磁盘上**的 ``reference/*.json``
+先 ``merge_knowledge_base`` 再 ``refresh_hybrid_vector_index``。
+
+**编排顺序（E2E）**：农民 ``write_to_reference`` 只写入 ``reference/{stem}.json``，
+**不会**合并 ``knowledge_base.json``、也不会触发向量刷新。若管线在农场主
+``process_gap_entries(..., refresh_hybrid_vectors=True)`` **之后**仍有
+``write_to_reference``，则必须再由上层显式 ``merge_knowledge_base`` +
+``refresh_hybrid_vector_index``（或等价的 RAG 重建）；否则混合检索仍读旧合并结果。
+推荐顺序：所有目标 ``write_to_reference`` 完成 **早于** 带 ``refresh_hybrid_vectors=True``
+的农场主步骤（见 ``INAGENT/docs/agents/sessions/04-farm-owner.md``、``DATA_FLOW.md`` §3.7）。
+
 仅做图结构维护，不做 chunk 内容富化（农民的职责）。
 
 职责变更时请同步：INAGENT/docs/agents/sessions/04-farm-owner.md、
@@ -135,8 +145,10 @@ class KnowledgeFarmOwnerAgent:
     ) -> FarmOwnerReport:
         """处理 gap 条目。
 
-        refresh_hybrid_vectors: GraphRAG reload 之后是否调用 ``refresh_hybrid_vector_index``，
-            使 Qdrant/BM25 与 ``knowledge_base/reference`` 当前内容一致（需已配置 LLM 网关）。
+        refresh_hybrid_vectors: GraphRAG reload 之后是否 ``merge_knowledge_base`` 再调用
+            ``refresh_hybrid_vector_index``，使 Qdrant/BM25 与**本调用执行时** ``reference/*.json``
+            的合并结果一致（需已配置 LLM 网关）。此前或此后农民的 ``write_to_reference`` 不会自动纳入，
+            除非编排再次触发合并与刷新。
         hybrid_vectors_force: 为 True 时强制清空 Qdrant 再重嵌；仅当确定 merged KB 指纹已变
             且希望省耗时时可改为 False，走指纹判定逻辑。
         """
@@ -324,18 +336,6 @@ class KnowledgeFarmOwnerAgent:
                         )
                     except Exception as exc:
                         logger.debug("skeleton register 失败(非致命): %s", exc)
-
-            report.fill_requests.append(FillRequest(
-                entity_title=entry.entity_title,
-                fill_fields=enrich_fields,
-                source_evidence=entry.evidence,
-                action=action,
-                resolved_value=enrich_fields,
-                target_node_id=ctx.matched_node_id or entry.entity_title,
-                tree_level=ctx.tree_level,
-                enrich_fields=enrich_fields,
-                artifact_id=entry.entity_title,
-            ))
 
     def _decide_new_entity_action(
         self,
@@ -709,8 +709,11 @@ class KnowledgeFarmOwnerAgent:
 
     def _fallback_overflow_decision(self, entry: SchemaGapEntry) -> Dict[str, Any]:
         target_node_id = self._default_overflow_target(entry)
-        if target_node_id:
-            return {"decision": "merge_into", "target_node_id": target_node_id}
+        if target_node_id and entry.nearest_matches:
+            top_match = entry.nearest_matches[0]
+            similarity = float(top_match.get("similarity", 0.0) or 0.0)
+            if similarity >= 0.9:
+                return {"decision": "merge_into", "target_node_id": target_node_id}
         if entry.entity_title or entry.entity_description or entry.chunk_content:
             return {
                 "decision": "create_new",

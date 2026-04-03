@@ -490,73 +490,127 @@ class KnowledgeFarmerAgent:
         fill_requests: List[FillRequest],
         ref_dir: Optional[Path] = None,
         kb_path: Optional[Path] = None,
-        simulate_owner_response: bool = False
     ) -> int:
-        """
-        Enhanced to handle structured submissions to the farm owner and process their responses.
+        """Apply farm-owner ``FillRequest`` rows to reference chunks (and optionally skeleton).
+
+        Farm owner has already decided; each non-discard request carries
+        ``target_node_id`` (preferred) or ``entity_title`` as the stable node key, plus
+        ``fill_fields`` to merge into chunk metadata.
+
+        Matching rule for ``reference/*.json`` array items::
+
+            metadata.tree_node_id == target  or  metadata.node_id == target
+
+        If ``kb_path`` exists, skeleton items with ``metadata.node_id == target`` receive
+        the same field merge (optional parity with CLI leaves).
+
+        Returns the number of **records** updated (reference items + skeleton items).
         """
         ref_dir = ref_dir or _REFERENCE_DIR
         kb_path = kb_path or _KB_PATH
         if not fill_requests:
             return 0
 
-        # Prepare structured submission
-        submissions = []
-        for req in fill_requests:
-            if req.action != "discard":
-                submissions.append({
-                    "entity_title": req.entity_title,
-                    "target_node_id": req.target_node_id,
-                    "fill_fields": req.fill_fields,
-                    "action": req.action,
-                })
-
-        # Simulate farm owner response if enabled
-        if simulate_owner_response:
-            owner_responses = [
-                {
-                    "status": "APPROVED",
-                    "target_node_id": "appendix_c_trunk",
-                    "updated_fields": {
-                        "description": "Approved description for Appendix C trunk",
-                        "metadata": {"approved": True}
-                    }
-                }
-            ]
-        else:
-            owner_responses = []  # Placeholder for real farm owner responses
-
-        # Process farm owner responses
         filled = 0
-        if owner_responses:
-            for response in owner_responses:
-                if response["status"] == "APPROVED":
-                    node_id = response["target_node_id"]
-                    updated_fields = response.get("updated_fields", {})
 
-                    # Update skeleton leaves
-                    if kb_path.exists():
-                        try:
-                            data = json.loads(kb_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            data = None
-                        if data:
-                            modified = False
-                            for item in data:
-                                m = item.get("metadata", {})
-                                if m.get("node_id") == node_id:
-                                    m.update(updated_fields)
-                                    item["metadata"] = m
-                                    modified = True
-                                    filled += 1
-                            if modified:
-                                kb_path.write_text(
-                                    json.dumps(data, ensure_ascii=False, indent=2),
-                                    encoding="utf-8",
-                                )
-                                logger.info(
-                                    "[农民] apply_fill_request: 农场主审批通过，骨架 %d 节点已更新", filled
-                                )
+        for req in fill_requests:
+            if req.action == "discard":
+                continue
+            target = (req.target_node_id or req.entity_title or "").strip()
+            if not target:
+                logger.warning(
+                    "[农民] apply_fill_request: skip request with empty target_node_id "
+                    "and entity_title (action=%s)",
+                    req.action,
+                )
+                continue
+            merge: Dict = {}
+            if req.fill_fields:
+                merge.update(req.fill_fields)
+            if getattr(req, "enrich_fields", None):
+                merge.update(req.enrich_fields)
+            if not merge:
+                continue
+
+            if ref_dir.exists():
+                for json_file in sorted(ref_dir.glob("*.json")):
+                    if "_bak" in json_file.stem or "_bak_" in json_file.stem:
+                        continue
+                    try:
+                        data = json.loads(json_file.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        logger.warning(
+                            "[农民] apply_fill_request: skip %s (%s)",
+                            json_file.name,
+                            exc,
+                        )
+                        continue
+                    if not isinstance(data, list):
+                        continue
+                    file_changed = False
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        meta = item.get("metadata")
+                        if not isinstance(meta, dict):
+                            continue
+                        tid = str(meta.get("tree_node_id") or meta.get("node_id") or "").strip()
+                        if tid != target:
+                            continue
+                        for k, v in merge.items():
+                            meta[k] = v
+                        item["metadata"] = meta
+                        file_changed = True
+                        filled += 1
+                    if file_changed:
+                        json_file.write_text(
+                            json.dumps(data, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        logger.info(
+                            "[农民] apply_fill_request: 已更新 reference/%s (target=%s)",
+                            json_file.name,
+                            target,
+                        )
+
+            kb_file = Path(kb_path) if kb_path else None
+            if kb_file and kb_file.exists():
+                try:
+                    kb_data = json.loads(kb_file.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.warning(
+                        "[农民] apply_fill_request: 无法读取骨架 %s (%s)",
+                        kb_file,
+                        exc,
+                    )
+                    kb_data = None
+                if isinstance(kb_data, list):
+                    kb_modified = False
+                    for item in kb_data:
+                        if not isinstance(item, dict):
+                            continue
+                        m = item.get("metadata")
+                        if not isinstance(m, dict):
+                            continue
+                        if str(m.get("node_id") or "").strip() != target:
+                            continue
+                        for k, v in merge.items():
+                            m[k] = v
+                        item["metadata"] = m
+                        kb_modified = True
+                        filled += 1
+                    if kb_modified:
+                        kb_file.write_text(
+                            json.dumps(kb_data, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        logger.info(
+                            "[农民] apply_fill_request: 已更新骨架节点 target=%s",
+                            target,
+                        )
+
+        if filled:
+            logger.info("[农民] apply_fill_request: 共更新 %d 条记录", filled)
         return filled
 
     # ── Step 1: rules ─────────────────────────────────────────────────────────
