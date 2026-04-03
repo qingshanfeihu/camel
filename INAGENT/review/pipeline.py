@@ -12,36 +12,56 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 
-"""Autonomous review pipeline.
-
-Pipeline stages:
-1. Planning: LLM analyzes input and returns structured JSON plan.
-2. Knowledge acquisition: system executes plan queries + mandatory rules context.
-3. Review: LLM produces final review report based on plan and acquired knowledge.
-"""
+"""Autonomous review pipeline (v4 — structured input + workforce)."""
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import re
+import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
+from camel.societies.workforce import Workforce, WorkforceMode
+from camel.societies.workforce.events import (
+    AllTasksCompletedEvent,
+    TaskAssignedEvent,
+    TaskCompletedEvent,
+    TaskCreatedEvent,
+    TaskDecomposedEvent,
+    TaskFailedEvent,
+    TaskStartedEvent,
+    WorkerCreatedEvent,
+    WorkerDeletedEvent,
+)
+from camel.societies.workforce.workforce_callback import WorkforceCallback
+from camel.tasks import Task
+from camel.toolkits.note_taking_toolkit import NoteTakingToolkit
+
+from INAGENT.review.input_builder import ReviewInputBuilder
+from INAGENT.toolkits.knowledge_toolkit import KnowledgeToolkit
 
 logger = logging.getLogger(__name__)
 
-_SCOPE_TO_MODE = {
-    "product": "explain",
-    "test": "test_review",
-    "command": "config",
-}
+# Working directory root for inter-agent notes
+_WORKING_DIR_ROOT = Path(__file__).resolve().parent.parent / "working_dir"
 
-_DEFAULT_REVIEW_DIMENSIONS = ["功能覆盖", "用例规范性"]
+_DEFAULT_REVIEW_DIMENSIONS = [
+    "功能覆盖",
+    "用例规范性",
+    "CLI语法正确性",
+    "Load/Stress充分性",
+    "Bug修复验证",
+]
 
+
+# ── Data classes (unchanged public API) ─────────────────────────────
 
 @dataclass
 class ReviewPlan:
@@ -69,6 +89,7 @@ class ReviewResult:
     knowledge: str
     review: str
     elapsed_seconds: float
+    rag_status: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -76,11 +97,50 @@ class ReviewResult:
             "knowledge": self.knowledge,
             "review": self.review,
             "elapsed_seconds": self.elapsed_seconds,
+            "rag_status": self.rag_status or {},
         }
 
 
+# ── System prompt fragments ─────────────────────────────────────────
+
+_OUTPUT_REQUIREMENTS = """\
+输出要求:
+1. 全部使用中文输出。
+2. 禁止输出 emoji。
+3. 报告仅输出清晰 Markdown，不输出 JSON 代码块。
+4. 问题必须定位到用例编号（# 列），格式如: '用例 #3'。
+5. 每个问题需标注规则编号（R01-R18）和严重度（High/Medium/Low）。
+6. 必须包含 Load/Stress 充分性结论。
+7. 若是 Bug-to-Case，必须逐条回答 key_questions。
+8. 报告按固定分节输出：总体结论、逐行问题、覆盖缺口、格式问题、综合建议。
+9. 信息不足时明确写出不确定点。"""
+
+
+# ── Helper ──────────────────────────────────────────────────────────
+
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _summarize_text(text: str, limit: int = 800) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    return compact[:limit] if len(compact) > limit else compact
+
+
+# ── ReviewPipeline ──────────────────────────────────────────────────
+
 class ReviewPipeline:
-    """Two-step autonomous review pipeline."""
+    """Multi-agent autonomous review pipeline (v3).
+
+    Internally uses a CAMEL :class:`Workforce` in ``PIPELINE`` mode with
+    five specialised workers.  The external API is identical to v1/v2:
+
+    * ``__init__(router, model, product_name)``
+    * ``run(test_cases_text, bug_profile) -> ReviewResult``
+    * ``clear_knowledge_cache()``
+    """
 
     def __init__(self, router, model, product_name: str):
         self.router = router
@@ -90,6 +150,15 @@ class ReviewPipeline:
             if isinstance(product_name, str) and product_name.strip()
             else "NSAE (InfosecOS) 负载均衡器"
         )
+        # Extract unified_rag and rules_engine from router for KnowledgeToolkit
+        self._unified_rag = getattr(router, "unified_rag", None)
+        self._rules_engine = getattr(router, "rules_engine", None)
+        self._input_builder = ReviewInputBuilder(
+            unified_rag=self._unified_rag,
+            rules_engine=self._rules_engine,
+        )
+
+    # ── public API (unchanged signature) ────────────────────────
 
     def run(
         self,
@@ -100,413 +169,484 @@ class ReviewPipeline:
             raise ValueError("test_cases_text cannot be empty")
 
         started_at = time.time()
-        planning_input = self._build_planning_input(test_cases_text, bug_profile)
 
-        plan = self._plan(planning_input, has_change_desc=bool(bug_profile))
-        knowledge = self._acquire_knowledge(plan, planning_input)
-        review = self._review(test_cases_text, plan, knowledge)
+        # Build a lightweight plan object for backward compatibility
+        plan = self._build_deterministic_plan(bug_profile)
+
+        # Run the multi-agent Workforce pipeline
+        review, knowledge_summary, rag_status = self._run_workforce(
+            test_cases_text, plan, bug_profile,
+        )
 
         return ReviewResult(
             plan=plan,
-            knowledge=knowledge,
+            knowledge=knowledge_summary,
             review=review,
             elapsed_seconds=time.time() - started_at,
+            rag_status=rag_status,
         )
 
-    def _build_planning_input(
+    def clear_knowledge_cache(self):
+        """Clear cached knowledge context (no-op in v3, kept for API compat)."""
+        pass
+
+    # ── deterministic plan (no LLM call) ──────────────────────
+
+    def _build_deterministic_plan(
+        self, bug_profile: Optional[Dict[str, Any]]
+    ) -> ReviewPlan:
+        has_change = bool(bug_profile)
+        scope_analysis = None
+        if has_change and bug_profile:
+            scope_analysis = {
+                "change_summary": _to_text(
+                    bug_profile.get("Summary")
+                    or bug_profile.get("title")
+                    or bug_profile.get("Title")
+                    or bug_profile.get("Bug ID", "")
+                ),
+                "in_scope": "变更相关功能",
+                "out_of_scope": "未涉及模块",
+                "scope_rationale": "基于 Bug/变更描述自动推断",
+            }
+        return ReviewPlan(
+            understanding="(多Agent协作评审 v3)",
+            scope_analysis=scope_analysis,
+            knowledge_queries=[],
+            review_dimensions=list(_DEFAULT_REVIEW_DIMENSIONS),
+        )
+
+    # ── Workforce orchestration ─────────────────────────────────
+
+    def _run_workforce(
         self,
         test_cases_text: str,
+        plan: ReviewPlan,
         bug_profile: Optional[Dict[str, Any]],
-    ) -> str:
-        parts: List[str] = []
+    ) -> tuple:
+        """Build and run the review workforce pipeline.
 
+        Returns:
+            (review_text, knowledge_summary, rag_status)
+        """
+        run_id = uuid.uuid4().hex[:12]
+        work_dir = _WORKING_DIR_ROOT / run_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            result = self._execute_workforce(
+                test_cases_text, plan, bug_profile, work_dir,
+            )
+        finally:
+            # Clean up working directory
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        return result
+
+    def _execute_workforce(
+        self,
+        test_cases_text: str,
+        plan: ReviewPlan,
+        bug_profile: Optional[Dict[str, Any]],
+        work_dir: Path,
+    ) -> tuple:
+        """Create Workforce, build pipeline, execute, and return results."""
+        note_tk = NoteTakingToolkit(working_directory=str(work_dir))
+        knowledge_tk = KnowledgeToolkit(
+            mode="test_review",
+            unified_rag=self._unified_rag,
+            rules_engine=self._rules_engine,
+        )
+        review_input = self._input_builder.build(test_cases_text, bug_profile)
+
+        # 预注入共享笔记，避免前置 LLM 知识准备阶段不稳定
+        note_tk.create_note("review_rules", review_input.review_rules, overwrite=True)
+        note_tk.create_note("product_knowledge", review_input.product_knowledge, overwrite=True)
+        note_tk.create_note("similar_tests", review_input.similar_tests, overwrite=True)
+        note_tk.create_note("cli_reference", review_input.cli_reference, overwrite=True)
+        note_tk.create_note("test_cases", review_input.test_cases_text, overwrite=True)
+        # Backward compatibility: some prompts/tools still reference '*.md' note names.
+        note_tk.create_note("test_cases.md", review_input.test_cases_text, overwrite=True)
+        bug_ctx_lines: List[str] = []
+        if review_input.bug_info:
+            bug_ctx_lines.extend(
+                [
+                    f"- Bug ID: {review_input.bug_info.bug_id}",
+                    f"- Title: {review_input.bug_info.title}",
+                    f"- Root Cause: {review_input.bug_info.root_cause}",
+                    f"- Testing Suggestions: {review_input.bug_info.testing_suggestions}",
+                    f"- Sheet Role: {review_input.sheet_role}",
+                ]
+            )
+            if review_input.key_questions:
+                bug_ctx_lines.append("- Key Questions:")
+                bug_ctx_lines.extend([f"  - {q}" for q in review_input.key_questions])
+        note_tk.create_note(
+            "bug_context",
+            "\n".join([ln for ln in bug_ctx_lines if ln.strip()]) or "(无 bug 定向上下文)",
+            overwrite=True,
+        )
+        note_tk.create_note(
+            "load_stress_analysis",
+            "待分析",
+            overwrite=True,
+        )
+
+        # Bug/change context string for prompts
+        change_ctx = ""
         if bug_profile:
-            lines = [
-                f"- {k}: {self._to_text(v)}"
+            change_lines = [
+                f"- {k}: {_to_text(v)}"
                 for k, v in bug_profile.items()
-                if self._to_text(v)
+                if _to_text(v)
             ]
-            if lines:
-                parts.append("[变更描述]\n" + "\n".join(lines))
+            if change_lines:
+                change_ctx = "[变更描述]\n" + "\n".join(change_lines)
 
-        parts.append("[测试用例内容]\n" + test_cases_text)
-        return "\n\n".join(parts)
-
-    def _plan(self, input_text: str, has_change_desc: bool) -> ReviewPlan:
-        agent = ChatAgent(
-            system_message=BaseMessage.make_assistant_message(
-                role_name="测试评审规划者",
-                content=self._build_planning_system_prompt(),
-            ),
-            model=self.model,
-        )
-
-        response = agent.step(
-            self._build_planning_user_prompt(input_text, has_change_desc)
-        )
-        raw_text = response.msgs[0].content if response.msgs else ""
-
-        parsed = self._extract_json(raw_text)
-        if not parsed:
-            logger.warning("Planning JSON parse failed, fallback to default plan")
-            return ReviewPlan(
-                understanding="",
-                scope_analysis=None,
-                knowledge_queries=[],
-                review_dimensions=list(_DEFAULT_REVIEW_DIMENSIONS),
-            )
-
-        return self._coerce_review_plan(parsed, has_change_desc)
-
-    def _build_planning_system_prompt(self) -> str:
-        return (
-            f"你是 {self.product_name} 的测试评审专家。\n"
-            "你的任务是先做评审规划，而不是直接给出评审结论。\n"
-            "请根据输入内容，判断评审范围、是否需要补充知识、以及评审维度。\n"
-            "必须输出 JSON，不要输出代码块或额外解释。"
-        )
-
-    def _build_planning_user_prompt(self, input_text: str, has_change_desc: bool) -> str:
-        scope_instruction = (
-            "如果输入包含变更描述（例如缺陷修复或功能开发信息），请输出 scope_analysis 对象，"
-            "并区分 in_scope 与 out_of_scope。"
-            if has_change_desc
-            else "本次没有变更描述，请将 scope_analysis 设为 null。"
-        )
-
-        return (
-            "请阅读以下输入，输出评审计划 JSON。\n"
-            f"{scope_instruction}\n"
-            "你可以自主决定是否需要额外知识检索。"
-            "如果不需要，请将 knowledge_queries 返回空数组。\n\n"
-            "JSON 结构如下：\n"
-            "{\n"
-            "  \"understanding\": \"...\",\n"
-            "  \"scope_analysis\": {\n"
-            "    \"change_summary\": \"...\",\n"
-            "    \"in_scope\": \"...\",\n"
-            "    \"out_of_scope\": \"...\",\n"
-            "    \"scope_rationale\": \"...\"\n"
-            "  } | null,\n"
-            "  \"knowledge_queries\": [\n"
-            "    {\"query\": \"...\", \"scope\": \"product|test|command\", \"reason\": \"...\"}\n"
-            "  ],\n"
-            "  \"review_dimensions\": [\"...\"]\n"
-            "}\n\n"
-            "[输入]\n"
-            f"{input_text}"
-        )
-
-    def _coerce_review_plan(
-        self,
-        data: Dict[str, Any],
-        has_change_desc: bool,
-    ) -> ReviewPlan:
-        understanding = self._to_text(data.get("understanding"))
-        scope_analysis = self._coerce_scope_analysis(
-            data.get("scope_analysis"), has_change_desc
-        )
-        knowledge_queries = self._coerce_knowledge_queries(
-            data.get("knowledge_queries")
-        )
-        review_dimensions = self._coerce_review_dimensions(
-            data.get("review_dimensions")
-        )
-
-        return ReviewPlan(
-            understanding=understanding,
-            scope_analysis=scope_analysis,
-            knowledge_queries=knowledge_queries,
-            review_dimensions=review_dimensions,
-        )
-
-    def _coerce_scope_analysis(
-        self,
-        raw_scope: Any,
-        has_change_desc: bool,
-    ) -> Optional[Dict[str, str]]:
-        if not has_change_desc:
-            return None
-        if not isinstance(raw_scope, dict):
-            return None
-
-        scope_analysis = {
-            "change_summary": self._to_text(raw_scope.get("change_summary")),
-            "in_scope": self._to_text(raw_scope.get("in_scope")),
-            "out_of_scope": self._to_text(raw_scope.get("out_of_scope")),
-            "scope_rationale": self._to_text(raw_scope.get("scope_rationale")),
-        }
-
-        if any(scope_analysis.values()):
-            return scope_analysis
-        return None
-
-    def _coerce_knowledge_queries(self, raw_queries: Any) -> List[Dict[str, str]]:
-        if not isinstance(raw_queries, list):
-            return []
-
-        normalized: List[Dict[str, str]] = []
-        for item in raw_queries:
-            if not isinstance(item, dict):
-                continue
-
-            query = self._to_text(item.get("query"))
-            if not query:
-                continue
-
-            scope = self._normalize_scope(item.get("scope"))
-            reason = self._to_text(item.get("reason"))
-
-            normalized.append({
-                "query": query,
-                "scope": scope,
-                "reason": reason,
-            })
-
-        return normalized
-
-    def _coerce_review_dimensions(self, raw_dimensions: Any) -> List[str]:
-        dimensions: List[str] = []
-
-        if isinstance(raw_dimensions, list):
-            for item in raw_dimensions:
-                text = self._to_text(item)
-                if text and text not in dimensions:
-                    dimensions.append(text)
-        elif isinstance(raw_dimensions, str):
-            text = self._to_text(raw_dimensions)
-            if text:
-                dimensions.append(text)
-
-        if not dimensions:
-            return list(_DEFAULT_REVIEW_DIMENSIONS)
-        return dimensions
-
-    def _acquire_knowledge(self, plan: ReviewPlan, input_text: str) -> str:
-        sections: List[str] = []
-
-        requested = self._retrieve_requested_knowledge(plan)
-        if requested:
-            sections.append("[LLM 请求的额外知识]\n" + requested)
-
-        mandatory = self._retrieve_mandatory_rules_and_tests(input_text)
-        if mandatory:
-            sections.append(mandatory)
-
-        return "\n\n---\n\n".join(s for s in sections if s.strip())
-
-    def _retrieve_requested_knowledge(self, plan: ReviewPlan) -> str:
-        if not plan.knowledge_queries:
-            return ""
-
-        chunks: List[str] = []
-        for idx, item in enumerate(plan.knowledge_queries, start=1):
-            query = self._to_text(item.get("query"))
-            scope = self._normalize_scope(item.get("scope"))
-            reason = self._to_text(item.get("reason"))
-            mode = _SCOPE_TO_MODE.get(scope, "explain")
-
-            if not query:
-                continue
-
-            try:
-                retrieval = self.router.retrieve(
-                    query=query,
-                    mode=mode,
-                    max_context_chars=5000,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Knowledge retrieval failed for query '%s': %s",
-                    query,
-                    exc,
-                )
-                continue
-
-            context = self._to_text((retrieval or {}).get("context"))
-            if not context:
-                continue
-
-            header = [
-                f"### Query {idx}",
-                f"- scope: {scope}",
-                f"- mode: {mode}",
-                f"- query: {query}",
-            ]
-            if reason:
-                header.append(f"- reason: {reason}")
-
-            chunks.append("\n".join(header) + "\n\n" + context)
-
-        return "\n\n".join(chunks)
-
-    def _retrieve_mandatory_rules_and_tests(self, input_text: str) -> str:
-        rules_engine = getattr(self.router, "rules_engine", None)
-
-        # Fallback to router-level test_review retrieval if rules_engine is not exposed.
-        if rules_engine is None:
-            logger.warning("router.rules_engine not available, fallback to mode=test_review")
-            try:
-                retrieval = self.router.retrieve(
-                    query=self._summarize_text(input_text),
-                    mode="test_review",
-                    max_context_chars=4500,
-                )
-            except Exception as exc:
-                logger.warning("Fallback rules retrieval failed: %s", exc)
-                return ""
-
-            context = self._to_text((retrieval or {}).get("context"))
-            if context:
-                return "[测试规范与已有测试参考]\n" + context
-            return ""
-
-        sections: List[str] = []
-
-        try:
-            rules_context = rules_engine.get_rules_context(purpose="review")
-            if rules_context:
-                sections.append("[测试规范]\n" + rules_context)
-        except Exception as exc:
-            logger.warning("get_rules_context failed: %s", exc)
-
-        try:
-            similar_tests = rules_engine.search_similar_tests(
-                query=self._summarize_text(input_text, limit=500),
-                max_results=5,
-            )
-            if similar_tests:
-                similar_text = rules_engine.format_similar_tests(
-                    similar_tests,
-                    max_chars=2600,
-                )
-                sections.append("[已有测试参考]\n" + similar_text)
-        except Exception as exc:
-            logger.warning("search_similar_tests failed: %s", exc)
-
-        return "\n\n".join(sections)
-
-    def _review(self, input_text: str, plan: ReviewPlan, knowledge: str) -> str:
-        agent = ChatAgent(
-            system_message=BaseMessage.make_assistant_message(
-                role_name="测试评审执行者",
-                content=self._build_review_system_prompt(plan, knowledge),
-            ),
-            model=self.model,
-        )
-
-        review_prompt = (
-            "[待评审测试用例]\n"
-            f"{input_text}\n\n"
-            "请严格依据系统提示中的评审范围、评审维度与知识背景输出评审报告。"
-        )
-
-        response = agent.step(review_prompt)
-        return response.msgs[0].content if response.msgs else "评审失败: 无返回"
-
-    def _build_review_system_prompt(self, plan: ReviewPlan, knowledge: str) -> str:
-        parts: List[str] = [
-            f"你是 {self.product_name} 的测试用例评审专家。",
-            "请生成清晰、可执行的评审结论，优先指出风险、缺口与改进建议。",
-        ]
-
+        scope_ctx = ""
         if plan.scope_analysis:
-            scope = plan.scope_analysis
-            parts.extend(
-                [
-                    "",
-                    f"本次评审聚焦于以下变更: {scope.get('change_summary', '')}",
-                    f"评审范围(in_scope): {scope.get('in_scope', '')}",
-                    f"可降级处理范围(out_of_scope): {scope.get('out_of_scope', '')}",
-                    f"范围依据: {scope.get('scope_rationale', '')}",
-                    "对于 in_scope 部分重点评审功能覆盖是否充分；对于 out_of_scope 部分仅做规范性检查。",
-                ]
-            )
-        else:
-            parts.extend(
-                [
-                    "",
-                    "本次未提供变更范围，请对全部输入用例执行完整评审（覆盖+规范双维度）。",
-                ]
+            s = plan.scope_analysis
+            scope_ctx = (
+                f"评审聚焦变更: {s.get('change_summary', '')}\n"
+                f"in_scope: {s.get('in_scope', '')}\n"
+                f"out_of_scope: {s.get('out_of_scope', '')}"
             )
 
-        dimensions = plan.review_dimensions or _DEFAULT_REVIEW_DIMENSIONS
-        parts.extend(
-            [
-                "",
-                f"请至少从以下维度进行评审: {'；'.join(dimensions)}",
-            ]
+        # ── Worker Agents ────────────────────────────────────────
+        coverage_agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="CoverageAnalysisWorker",
+                content=(
+                    f"你是 {self.product_name} 测试评审的覆盖度分析专家。\n"
+                    f"你的职责是评估测试用例的功能覆盖是否充分。\n\n"
+                    f"{change_ctx}\n{scope_ctx}\n\n"
+                    f"<mandatory_instructions>\n"
+                    f"1. 先使用 read_note 读取 'product_knowledge' 和 'similar_tests' 笔记获取知识上下文\n"
+                    f"2. 读取 'bug_context'（若存在）并将 key_questions 逐条纳入分析\n"
+                    f"3. 基于笔记中的知识进行分析\n"
+                    f"4. 若知识不足，可使用 search_product_knowledge 进行补充检索\n"
+                    f"3. 分析维度:\n"
+                    f"   - 功能点遗漏: 产品功能规格中的需求是否都有对应测试用例\n"
+                    f"   - 边界条件: 关键参数的边界值/上下限是否覆盖\n"
+                    f"   - 异常场景: 错误输入、异常状态、容错场景是否覆盖\n"
+                    f"   - 测试类型分布: Configuration/Boundary/Negative/Functional/Load 是否合理\n"
+                    f"5. 将覆盖度分析结论写入笔记 'coverage_analysis'\n"
+                    f"6. 在输出中给出规则编号与严重度\n"
+                    f"</mandatory_instructions>\n\n"
+                    f"{_OUTPUT_REQUIREMENTS}"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
         )
 
-        if plan.understanding:
-            parts.extend(
-                [
-                    "",
-                    "[前期理解]",
-                    plan.understanding,
-                ]
-            )
-
-        if knowledge:
-            parts.extend(
-                [
-                    "",
-                    "[相关产品知识与评审规范]",
-                    knowledge,
-                ]
-            )
-
-        parts.extend(
-            [
-                "",
-                "输出要求:",
-                "1. 先给总体结论，再给问题清单与改进建议。",
-                "2. 问题描述要具体，避免空泛结论。",
-                "3. 如果信息不足，必须明确说明不确定点。",
-            ]
+        cli_syntax_agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="CLISyntaxCheckWorker",
+                content=(
+                    f"你是 {self.product_name} 的CLI命令语法审核专家。\n"
+                    f"你的职责是验证测试用例步骤中的CLI命令是否语法正确。\n\n"
+                    f"<mandatory_instructions>\n"
+                    f"1. 先使用 read_note 读取 'cli_reference' 笔记获取CLI语法参考\n"
+                    f"2. 基于笔记中的CLI参考进行语法对照检查（所有CLI参考已由前序阶段准备完毕）\n"
+                    f"   如信息不足，可使用 search_product_knowledge(category_filter='cli/reference') 补充检索\n"
+                    f"3. 逐条检查测试步骤中出现的CLI命令:\n"
+                    f"   - 命令是否存在（非虚构的命令）\n"
+                    f"   - 参数格式是否正确（引号、空格、关键字拼写）\n"
+                    f"   - 命令层级/模式是否正确（config mode vs show mode）\n"
+                    f"4. 将CLI语法检查结论写入笔记 'cli_syntax_check'\n"
+                    f"5. 如果所有命令语法正确，可简要说明通过\n"
+                    f"6. 在输出中给出规则编号与严重度\n"
+                    f"</mandatory_instructions>\n\n"
+                    f"{_OUTPUT_REQUIREMENTS}"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
         )
 
-        return "\n".join(parts)
+        spec_compliance_agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="SpecComplianceWorker",
+                content=(
+                    f"你是 {self.product_name} 测试评审的规范符合度检查专家。\n"
+                    f"你的职责是检查测试用例是否符合编写规范和评审标准。\n\n"
+                    f"<mandatory_instructions>\n"
+                    f"1. 先使用 read_note 读取 'review_rules' 笔记获取评审规范（R01-R18检查清单）\n"
+                    f"2. 检查维度:\n"
+                    f"   - 格式规范: 必填字段是否齐全，Case ID 格式是否正确\n"
+                    f"   - Description 格式: 是否符合 '<功能点>: <行为描述>' 格式\n"
+                    f"   - Expected Result: 是否可量化/可验证，非模糊表述\n"
+                    f"   - 步骤与结果对应: 测试步骤与预期结果是否一一对应\n"
+                    f"   - 优先级分布: 同一功能的用例优先级是否合理（不全为 High）\n"
+                    f"   - 重复检查: 是否存在高度相似/重复的测试用例\n"
+                    f"3. 将规范检查结论写入笔记 'spec_compliance'\n"
+                    f"4. 在输出中给出规则编号与严重度\n"
+                    f"</mandatory_instructions>\n\n"
+                    f"{_OUTPUT_REQUIREMENTS}"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools(),
+        )
 
-    def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
-        if not text:
-            return None
+        load_stress_agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="LoadStressWorker",
+                content=(
+                    f"你是 {self.product_name} 的负载与压力测试评审专家。\n"
+                    f"请读取 'test_cases'、'product_knowledge'、'bug_context'（如有），"
+                    f"评估 Load/Stress 用例充分性，并按 R15/R16 给出结论。\n"
+                    f"将结果写入笔记 'load_stress_analysis'。\n\n"
+                    f"{_OUTPUT_REQUIREMENTS}"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools() + knowledge_tk.get_tools(),
+        )
 
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return None
+        synthesis_agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="ReviewSynthesisWorker",
+                content=(
+                    f"你是 {self.product_name} 测试评审的最终综合报告撰写者。\n"
+                    f"你的职责是综合所有专项分析结论，生成最终评审报告。\n\n"
+                    f"{change_ctx}\n{scope_ctx}\n\n"
+                    f"<mandatory_instructions>\n"
+                    f"1. 使用 read_note 读取以下笔记:\n"
+                    f"   - 'coverage_analysis' (覆盖度分析)\n"
+                    f"   - 'cli_syntax_check' (CLI语法检查)\n"
+                    f"   - 'spec_compliance' (规范符合度)\n"
+                    f"   - 'load_stress_analysis' (负载/压力评估)\n"
+                    f"   - 'bug_context' (Bug 定向上下文，如有)\n"
+                    f"2. 综合三个维度的分析，去重合并，生成统一评审报告\n"
+                    f"3. 报告分节顺序固定为：\n"
+                    f"   - 总体结论\n"
+                    f"   - 逐行问题（含规则编号、严重度）\n"
+                    f"   - 覆盖缺口（含增删改建议）\n"
+                    f"   - Load/Stress 评估\n"
+                    f"   - 格式问题\n"
+                    f"   - 综合建议\n"
+                    f"   - [问题摘要]\n"
+                    f"</mandatory_instructions>\n\n"
+                    f"{_OUTPUT_REQUIREMENTS}"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools(),
+        )
 
+        # ── Coordinator & Task Agent ─────────────────────────────
+
+        coordinator_agent = ChatAgent(
+            BaseMessage.make_assistant_message(
+                role_name="Review Coordinator",
+                content=(
+                    "你是测试用例评审 Pipeline 的协调者。\n"
+                    "你负责监控下属 Worker 的进度和质量：\n"
+                    "- CoverageAnalysisWorker 应基于产品知识给出覆盖度分析\n"
+                    "- CLISyntaxCheckWorker 应参照CLI参考验证命令语法\n"
+                    "- SpecComplianceWorker 应依据评审规范检查用例格式\n"
+                    "- LoadStressWorker 应给出负载与压力充分性判断\n"
+                    "- ReviewSynthesisWorker 应综合各方分析给出最终报告\n"
+                    "如果 Worker 的输出不充分，请标记质量不合格。"
+                ),
+            ),
+            model=self.model,
+            tools=note_tk.get_tools(),
+        )
+
+        task_agent = ChatAgent(
+            BaseMessage.make_assistant_message(
+                role_name="Task Planner",
+                content=(
+                    "你是评审任务分派员。已注册的 Worker 有：\n"
+                    "- CoverageAnalysisWorker: 功能覆盖度分析\n"
+                    "- CLISyntaxCheckWorker: CLI命令语法检查\n"
+                    "- SpecComplianceWorker: 规范符合度检查\n"
+                    "- LoadStressWorker: 负载与压力充分性分析\n"
+                    "- ReviewSynthesisWorker: 综合报告撰写\n"
+                    "请根据任务内容分派给最匹配的 Worker。"
+                ),
+            ),
+            model=self.model,
+        )
+
+        # ── Workforce ───────────────────────────────────────────
+
+        workforce = Workforce(
+            "ReviewPipeline Workforce",
+            coordinator_agent=coordinator_agent,
+            task_agent=task_agent,
+            mode=WorkforceMode.PIPELINE,
+            task_timeout_seconds=240.0,  # avoid hanging a module indefinitely
+            callbacks=[ReviewPipelineCallback()],
+        )
+
+        workforce.add_single_agent_worker(
+            "CoverageAnalysisWorker: 基于产品知识评估测试用例的功能覆盖度",
+            coverage_agent,
+        )
+        workforce.add_single_agent_worker(
+            "CLISyntaxCheckWorker: 验证测试步骤中CLI命令的语法正确性",
+            cli_syntax_agent,
+        )
+        workforce.add_single_agent_worker(
+            "SpecComplianceWorker: 检查测试用例的格式规范符合度",
+            spec_compliance_agent,
+        )
+        workforce.add_single_agent_worker(
+            "LoadStressWorker: 检查负载与压力测试覆盖度",
+            load_stress_agent,
+        )
+        workforce.add_single_agent_worker(
+            "ReviewSynthesisWorker: 综合各专项分析，生成最终评审报告",
+            synthesis_agent,
+        )
+
+        # ── Pipeline topology ────────────────────────────────────
+        # fork[Coverage, CLISyntax, SpecCompliance, LoadStress] → join Synthesis
+
+        coverage_task = Task(
+            content=(
+                f"【覆盖度分析】\n"
+                f"请从共享笔记读取 test_cases、product_knowledge、similar_tests、bug_context，"
+                f"输出覆盖度问题并写入 coverage_analysis。"
+            ),
+            id="coverage_analysis",
+        )
+
+        cli_task = Task(
+            content=(
+                f"【CLI语法检查】\n"
+                f"请从共享笔记读取 test_cases、cli_reference，检查 CLI 命令语法并写入 cli_syntax_check。"
+            ),
+            id="cli_syntax_check",
+        )
+
+        spec_task = Task(
+            content=(
+                f"【规范符合度】\n"
+                f"请从共享笔记读取 test_cases、review_rules，检查规范符合度并写入 spec_compliance。"
+            ),
+            id="spec_compliance",
+        )
+        load_task = Task(
+            content=(
+                "【Load/Stress 评估】\n"
+                "请从共享笔记读取 test_cases、product_knowledge、bug_context，"
+                "评估负载和压力测试充分性并写入 load_stress_analysis。"
+            ),
+            id="load_stress_analysis",
+        )
+
+        synthesis_task = Task(
+            content=(
+                f"【综合评审报告】\n"
+                f"请读取 coverage_analysis、cli_syntax_check、spec_compliance、load_stress_analysis、bug_context，"
+                f"综合生成最终报告。"
+            ),
+            id="review_synthesis",
+        )
+
+        workforce.pipeline_fork([coverage_task, cli_task, spec_task, load_task]) \
+                 .pipeline_join(synthesis_task) \
+                 .pipeline_build()
+
+        logger.info(
+            "Review Workforce Pipeline 已构建: "
+            "fork(Coverage, CLISyntax, SpecCompliance, LoadStress) → join(Synthesis)"
+        )
+
+        # ── Execute ──────────────────────────────────────────────
+
+        main_task = Task(
+            content=f"评审测试用例 ({len(test_cases_text)} chars)",
+            id=f"review_{uuid.uuid4().hex[:8]}",
+        )
+
+        result = self._run_async(workforce, main_task)
+
+        # Extract final review text from the result
+        review_text = result.result or "评审失败: Workforce 无返回"
+
+        # Try to read knowledge summary from notes for backward compat
+        knowledge_summary = ""
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
+            knowledge_summary = note_tk.read_note("product_knowledge")
+        except Exception:
+            pass
 
-        if isinstance(parsed, dict):
-            return parsed
-        return None
-
-    def _normalize_scope(self, raw_scope: Any) -> str:
-        scope = self._to_text(raw_scope).lower()
-
-        if scope in _SCOPE_TO_MODE:
-            return scope
-
-        if scope in {"cli", "cmd", "commandline"}:
-            return "command"
-
-        if scope in {"rules", "rule", "case", "review"}:
-            return "test"
-
-        return "product"
-
-    def _summarize_text(self, text: str, limit: int = 800) -> str:
-        compact = re.sub(r"\s+", " ", text or "").strip()
-        if len(compact) <= limit:
-            return compact
-        return compact[:limit]
+        rag_status = {
+            "graphrag_available": bool(getattr(self._unified_rag, "graphrag_retriever", None)),
+            "graphrag_results_count": 0,
+            "vector_results_count": 0,
+            "rerank_applied": bool(getattr(self._unified_rag, "reranker", None)),
+        }
+        return review_text, knowledge_summary, rag_status
 
     @staticmethod
-    def _to_text(value: Any) -> str:
-        if value is None:
-            return ""
-        return str(value).strip()
+    def _run_async(workforce: Workforce, task: Task) -> Task:
+        """Run the Workforce pipeline, handling event loop scenarios."""
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+        except ImportError:
+            pass
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        coro = workforce.process_task_async(task)
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, coro).result()
+        else:
+            return asyncio.run(coro)
+
+
+class ReviewPipelineCallback(WorkforceCallback):
+    """Workforce 运行日志回调。"""
+
+    def log_task_created(self, event: TaskCreatedEvent) -> None:
+        logger.info("[ReviewWF] task created=%s", event.task_id)
+
+    def log_task_decomposed(self, event: TaskDecomposedEvent) -> None:
+        logger.info(
+            "[ReviewWF] task decomposed=%s -> %d subtasks",
+            event.task_id,
+            len(event.subtasks),
+        )
+
+    def log_task_assigned(self, event: TaskAssignedEvent) -> None:
+        logger.info("[ReviewWF] task=%s -> worker=%s", event.task_id, event.worker_id)
+
+    def log_task_started(self, event: TaskStartedEvent) -> None:
+        logger.info("[ReviewWF] start task=%s worker=%s", event.task_id, event.worker_id)
+
+    def log_task_completed(self, event: TaskCompletedEvent) -> None:
+        logger.info(
+            "[ReviewWF] done task=%s worker=%s (%.1fs)",
+            event.task_id,
+            event.worker_id,
+            event.processing_time_seconds or 0.0,
+        )
+
+    def log_task_failed(self, event: TaskFailedEvent) -> None:
+        logger.warning("[ReviewWF] failed task=%s err=%s", event.task_id, event.error_message)
+
+    def log_worker_created(self, event: WorkerCreatedEvent) -> None:
+        logger.info("[ReviewWF] worker created=%s", event.worker_id)
+
+    def log_worker_deleted(self, event: WorkerDeletedEvent) -> None:
+        logger.info("[ReviewWF] worker deleted=%s", event.worker_id)
+
+    def log_all_tasks_completed(self, event: AllTasksCompletedEvent) -> None:
+        logger.info("[ReviewWF] all tasks completed")
