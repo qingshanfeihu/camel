@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import html as html_stdlib
 import json
 import logging
 import os
@@ -2785,10 +2786,58 @@ def _get_frontmatter_config() -> Dict:
     return frontmatter
 
 
+def _mineru_string_list_to_lines(val: Any) -> List[str]:
+    """MinerU ``table_caption`` / ``table_footnote`` may be ``[]`` or ``list[str]``."""
+    if not val:
+        return []
+    if isinstance(val, str):
+        s = val.strip()
+        return [s] if s else []
+    if isinstance(val, list):
+        out: List[str] = []
+        for x in val:
+            if isinstance(x, str) and x.strip():
+                out.append(x.strip())
+        return out
+    return []
+
+
+def _table_body_html_to_plain_text(html: str) -> str:
+    """Convert MinerU ``table_body`` HTML to plain text for chunks and metadata rules."""
+    if not isinstance(html, str) or not html.strip():
+        return ""
+    raw = html_stdlib.unescape(html)
+    # Typical CLI manual: two-column parameter tables
+    raw = re.sub(r"(?i)</td>\s*<td>", " — ", raw)
+    raw = re.sub(r"(?i)</th>\s*<td>", " — ", raw)
+    raw = re.sub(r"(?i)</th>\s*<th>", " — ", raw)
+    raw = re.sub(r"(?i)</tr>\s*", "\n", raw)
+    raw = re.sub(r"(?i)<br\s*/?>", " ", raw)
+    raw = re.sub(r"<[^>]+>", "", raw)
+    lines: List[str] = []
+    for line in raw.splitlines():
+        s = " ".join(line.split())
+        if s:
+            lines.append(s)
+    return "\n".join(lines)
+
+
 def _extract_text_from_block(block: Dict) -> str:
     text = block.get("text")
     if isinstance(text, str) and text.strip():
         return text
+
+    # MinerU ``type: table`` — parameter explanations live in ``table_body`` (HTML).
+    tb = block.get("table_body")
+    if isinstance(tb, str) and tb.strip():
+        parts: List[str] = []
+        parts.extend(_mineru_string_list_to_lines(block.get("table_caption")))
+        plain = _table_body_html_to_plain_text(tb)
+        if plain:
+            parts.append(plain)
+        parts.extend(_mineru_string_list_to_lines(block.get("table_footnote")))
+        if parts:
+            return "\n".join(parts)
 
     content = block.get("content")
     if not isinstance(content, dict):
