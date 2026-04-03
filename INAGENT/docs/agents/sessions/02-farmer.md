@@ -22,6 +22,12 @@
 - **采购**：只处理已决策 chunk（如 `accept`）；`staging` 相关 gap 与采购产出一致
 - **农场主**：消费 `FillRequest`，执行 `apply_fill_request`；**不做** GraphRAG 结构写入
 
+### 知识本体塑形 vs 树（移交自树宪章）
+
+- **根 / 枝 / 叶 语义**（例如：多 CLI 场景、多场景重叠、架构叙事是否算「根」）：由 **农民元数据 + 农场主 GraphRAG 结构** 塑形；**不是**树会话在宪章里裁定的对象。
+- **`knowledge_base/input`** 中除 `command_tree` XML 外的材料（spec、design、架构 PDF、Bug 叙事等）：入库分类、`document_category`、chunk 字段、是否与某 `node_id` 对齐——**农民与采购/管线** 负责；树只提供 **稳定键与扩展挂钩**（见 `sessions/01-tree-extensibility.md`）。
+- **禁止**：为挂接 spec/场景而 **擅自改写** `cli_keyword_graph.json` 或已发布骨架中的 **`node_id` / 拓扑**；若必须改树结构，走 **树会话** 的显式脚本与 PR，且遵守该文档 **§0 非破坏性** 约束。
+
 ### 同一叶子判定（与树对齐）
 
 - **权威键**：富化 chunk 的 `tree_node_id`（或解析结果）与骨架 `metadata.node_id` 一致，即视为与图谱 **同一 CLI 叶** 的补充叙述（非正文拷贝）。
@@ -33,6 +39,7 @@
 
 - `INAGENT/rag/knowledge_schema.py` — `FillRequest`、`SchemaGapEntry`
 - `INAGENT/docs/DATA_FLOW.md` — L0 / L1 字段
+- `INAGENT/docs/agents/sessions/01-tree-extensibility.md` — 树侧挂钩；**扩展不得破坏现有 CLI 树信息**
 
 ## 开场白（可复制）
 

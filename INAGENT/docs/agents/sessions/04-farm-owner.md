@@ -43,10 +43,17 @@
 - 读 **农民/采购** 的 gap；向 **农民** 下发 `FillRequest`
 - 与 **树** 会话协调：若 gap 源于 CLI 实体与图结构不一致，优先明确数据归属再改代码
 
+### 产品知识本体与树（移交说明）
+
+- **根 / 枝 / 叶** 等产品本体层次：由 **农场主（GraphRAG 实体/关系）+ 农民（chunk 元数据）** 在统一平面上塑形；**树**只保证 CLI **拓扑真相源** 与 **橡皮泥式挂钩**（`node_id`、`artifact_links` 等），见 `sessions/01-tree-extensibility.md`。
+- **`input` 多源文档**（spec、架构、Bug 等）与 CLI 的关联：优先通过 **GraphRAG 关系**、`FillRequest`、以及（若采用）`skeleton_index.add_link` 等 **叠加层** 表达；**不得**依赖「静默改写」`cli_keyword_graph` 或骨架契约来完成关联。
+- **非破坏性**：任何农场主导向的扩展应 **默认不改变** 已有 CLI 树节点 id 与边语义；若需树级变更，必须与 **树会话** 对齐并走显式重建/迁移。
+
 ## 依赖文档
 
 - `INAGENT/agents/knowledge_farm_owner_agent.py` 模块头注释（职责边界）
 - `INAGENT/docs/DATA_FLOW.md` — GraphRAG 输入前缀与实体类型
+- `INAGENT/docs/agents/sessions/01-tree-extensibility.md` — 树侧挂钩与「扩展不得改变现有树信息」约束
 
 ## 宪章与 Cursor 规则的维护
 

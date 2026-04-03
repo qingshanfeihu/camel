@@ -489,44 +489,88 @@ class KnowledgeFarmerAgent:
         self,
         fill_requests: List[FillRequest],
         ref_dir: Optional[Path] = None,
+        kb_path: Optional[Path] = None,
     ) -> int:
         ref_dir = ref_dir or _REFERENCE_DIR
-        if not fill_requests or not ref_dir.exists():
+        kb_path = kb_path or _KB_PATH
+        if not fill_requests:
             return 0
 
         by_entity: Dict[str, Dict] = {}
+        by_node_id: Dict[str, Dict] = {}
         for req in fill_requests:
             if not req.entity_title or req.action == "discard":
                 continue
-            by_entity.setdefault(req.entity_title, {}).update(req.fill_fields)
+            fields = req.fill_fields
+            nid = req.target_node_id
+            by_entity.setdefault(req.entity_title, {}).update(fields)
+            if nid:
+                by_node_id.setdefault(nid, {}).update(fields)
 
-        if not by_entity:
+        if not by_entity and not by_node_id:
             return 0
 
+        index = self._load_kb_index()
+        for title, fields in list(by_entity.items()):
+            nid = index.get(title)
+            if nid and nid not in by_node_id:
+                by_node_id[nid] = fields
+            slug = _normalize_heading_to_node_slug(title)
+            if slug and slug not in by_node_id:
+                by_node_id[slug] = fields
+
         filled = 0
-        for json_file in sorted(ref_dir.glob("*.json")):
-            if "_bak" in json_file.stem or "_bak_" in json_file.stem:
-                continue
+
+        if kb_path.exists() and by_node_id:
             try:
-                data = json.loads(json_file.read_text(encoding="utf-8"))
+                data = json.loads(kb_path.read_text(encoding="utf-8"))
             except Exception:
-                continue
-            modified = False
-            for item in data:
-                meta = item.get("metadata", {})
-                tid = meta.get("tree_node_id") or meta.get("node_id", "")
-                if tid in by_entity:
-                    for k, v in by_entity[tid].items():
-                        meta[k] = v
-                    item["metadata"] = meta
-                    modified = True
-                    filled += 1
-            if modified:
-                json_file.write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-        logger.info("[农民] apply_fill_request: %d 条已填充", filled)
+                data = None
+            if data:
+                modified = False
+                for item in data:
+                    m = item.get("metadata", {})
+                    nid = m.get("node_id", "")
+                    if nid in by_node_id:
+                        for k, v in by_node_id[nid].items():
+                            m[k] = v
+                        item["metadata"] = m
+                        modified = True
+                        filled += 1
+                if modified:
+                    kb_path.write_text(
+                        json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info("[农民] apply_fill_request: 骨架 %d 节点已更新", filled)
+
+        if ref_dir.exists():
+            for json_file in sorted(ref_dir.glob("*.json")):
+                if json_file.name == kb_path.name:
+                    continue
+                if "_bak" in json_file.stem or "_bak_" in json_file.stem:
+                    continue
+                try:
+                    data = json.loads(json_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                modified = False
+                for item in data:
+                    meta = item.get("metadata", {})
+                    tid = meta.get("tree_node_id") or meta.get("node_id", "")
+                    match_fields = by_node_id.get(tid) or by_entity.get(tid)
+                    if match_fields:
+                        for k, v in match_fields.items():
+                            meta[k] = v
+                        item["metadata"] = meta
+                        modified = True
+                        filled += 1
+                if modified:
+                    json_file.write_text(
+                        json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+        logger.info("[农民] apply_fill_request: 共 %d 条已填充", filled)
         return filled
 
     # ── Step 1: rules ─────────────────────────────────────────────────────────

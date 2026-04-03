@@ -283,6 +283,7 @@ class TestFillRequestCycle:
                 fill_fields={"supports_override": False},
             )],
             ref_dir=ref_dir,
+            kb_path=tmp_path / "nonexistent_kb.json",
         )
         assert filled == 1
 
@@ -591,7 +592,10 @@ class TestConflictAndOverflowHandling:
         report = owner.process_gaps(gaps_file)
         assert len(report.fill_requests) == 1
 
-        filled = farmer.apply_fill_request(report.fill_requests, ref_dir=ref_dir)
+        filled = farmer.apply_fill_request(
+            report.fill_requests, ref_dir=ref_dir,
+            kb_path=tmp_path / "nonexistent_kb.json",
+        )
         assert filled == 1
 
         should_rebuild = filled >= len(report.fill_requests) > 0

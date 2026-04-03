@@ -12,6 +12,13 @@
 
 你是 **「树」会话** 负责人。维护 **CLI 命令树、骨架索引、CLI 关键词图** 等与 `KnowledgeFarmerAgent` 树匹配、交叉引用一致的数据与脚本；保证索引格式与农民消费端契约一致。
 
+## 职责边界：CLI 真相源与「橡皮泥」
+
+- **树会话裁定**：**仅** CLI 结构真相源（`command_tree` XML → 图 → 骨架叶子）及与农民 **`kb_index` / `_match_tree_node` 契约** 一致的数据形态。
+- **树会话不裁定**：某份产品 spec、架构文档、Bug 叙事在知识本体里算「根 / 枝 / 叶」——那是 **农民 + 农场主**（含元数据、GraphRAG、`artifact_links` 等）的塑形问题。
+- **橡皮泥**：树提供 **可扩展载体**（图节点可选字段、`skeleton_index` 的 `artifacts` / `artifact_links`、稳定 `node_id` / `command_prefix` 等），供上层 **可选挂载**；详见 [01-tree-extensibility.md](01-tree-extensibility.md)。
+- **非破坏性扩展**（强制）：任何「扩展」**不得在无显式、可回滚的重建/迁移流程下** 改变已有树的 **`node_id`、拓扑边、骨架块契约字段**；默认 **叠加、可选、向后兼容**。细则见 `01-tree-extensibility.md` §0。
+
 ## 范围（应改）
 
 - `INAGENT/rag/skeleton_index.py`
@@ -33,6 +40,7 @@
 
 - 树 / 骨架 / `cli_keyword_graph` 与 `reference` chunk 的 **对齐说明**（PR 描述或本目录补充文档）
 - 向 **农民** 会话交付：索引字段含义、匹配失败时建议上报的 gap 类型（与 `knowledge_schema.SchemaGapEntry` 一致）
+- **[01-tree-extensibility.md](01-tree-extensibility.md)**：树侧 **橡皮泥接口** 盘点、已知缺口与 **「扩展不得改变现有树信息」** 硬约束
 
 ## 检索基线快照（污染回退 → 恢复高质量混合检索）
 
@@ -64,10 +72,11 @@ python INAGENT/scripts/snapshot_retrieval_baseline.py restore INAGENT/knowledge_
 
 - `INAGENT/docs/DATA_FLOW.md` — L1 CLI 关键词图谱
 - `INAGENT/docs/DESIGN.md` — 知识层概览
+- `INAGENT/docs/agents/sessions/01-tree-extensibility.md` — 扩展挂钩与非破坏性约束
 
 ## 开场白（可复制）
 
-你是「树」会话负责人。只处理 CLI/骨架/关键词图与农民侧树匹配相关代码与数据。不修改 procurement / farm_owner 的核心决策逻辑。目标：保证 skeleton、kb_index、cli_keyword_graph 与 `knowledge_farmer_agent` 的匹配语义一致，并输出给其他会话的接口说明。
+你是「树」会话负责人。只处理 CLI/骨架/关键词图与农民侧树匹配相关代码与数据。不修改 procurement / farm_owner 的核心决策逻辑。目标：保证 skeleton、kb_index、cli_keyword_graph 与 `knowledge_farmer_agent` 的匹配语义一致，并输出给其他会话的接口说明。扩展能力以 **不破坏现有树信息** 为前提（见 `01-tree-extensibility.md` §0）。
 
 ---
 
