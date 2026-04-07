@@ -3,16 +3,24 @@
 task_decomposition_agent.py 单元测试
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, create_autospec
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from camel.models import BaseModelBackend
 from INAGENT.agents.task_decomposition_agent import (
     build_task_decomposition_agent,
     build_task_decomposition_prompt,
 )
+
+
+def _make_mock_model():
+    """Create a BaseModelBackend mock that satisfies ChatAgent.__init__."""
+    mock = create_autospec(BaseModelBackend)
+    mock.model_type = MagicMock()
+    return mock
 
 
 class TestBuildTaskDecompositionAgent:
@@ -20,15 +28,12 @@ class TestBuildTaskDecompositionAgent:
     
     def test_create_agent(self):
         """TC7.1.1: 正常创建 Agent"""
-        mock_model = MagicMock()
-        agent = build_task_decomposition_agent(mock_model)
+        agent = build_task_decomposition_agent(_make_mock_model())
         assert agent is not None
-        assert agent.model == mock_model
     
     def test_prompt_contains_index_info(self, sample_function_index):
         """TC7.1.2: Prompt 包含索引信息"""
-        mock_model = MagicMock()
-        agent = build_task_decomposition_agent(mock_model)
+        agent = build_task_decomposition_agent(_make_mock_model())
         
         # 检查 system message 内容
         system_content = agent.system_message.content

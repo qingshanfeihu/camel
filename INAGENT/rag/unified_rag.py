@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Tuple
 
 from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int
+from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
 
 logger = logging.getLogger(__name__)
 
@@ -568,8 +569,8 @@ class UnifiedRAGRetriever:
             top_k_final: 最终返回文档数（默认 8，覆盖更多命令类型）
             use_graphrag: 是否使用 GraphRAG
             decomposition_result: 任务分解结果（含 rag_queries）
-            document_category_filter: 单个文档分类过滤（如 "test/test_list"）— 旧接口
-            category_whitelist: 允许的文档分类列表 — 新接口，硬过滤
+            document_category_filter: 单个文档分类加权（旧接口，仍基于 document_category）
+            category_whitelist: 允许的树层级列表（如 ["leaf", "branch"]），硬过滤
 
         Returns:
             (context 文本, constraints 约束字典, decomposition_result)
@@ -754,17 +755,14 @@ class UnifiedRAGRetriever:
                 "_source_type": doc.get("_source_type", "unknown"),
             })
 
-        # 3.5 分类白名单硬过滤 — 只保留 document_category 在白名单中的文档
+        # 3.5 树层级硬过滤 — 只保留 tree_level 在策略范围内的文档
         if category_whitelist and documents:
-            docs_before_whitelist = list(documents)
             allow_uncategorized_docs = cfg_bool(
                 "bug_to_case.rag.allow_uncategorized_docs",
                 False,
                 env="BUG_TO_CASE_RAG_ALLOW_UNCATEGORIZED_DOCS",
             )
-            whitelist_set = set(category_whitelist)
-            # 提取每级前缀也纳入匹配（如 "spec/prd" → "spec" 也算命中）
-            whitelist_prefixes = {c.split("/")[0] for c in category_whitelist if "/" in c}
+            level_set = set(category_whitelist)
             before_count = len(documents)
             filtered = []
             for doc in documents:
@@ -772,26 +770,28 @@ class UnifiedRAGRetriever:
                 if meta.get("_graphrag_synthesized"):
                     filtered.append(doc)
                     continue
-                doc_cat = meta.get("document_category", "")
-                if not doc_cat:
-                    regex_meta = meta.get("regex_metadata") or {}
-                    doc_cat = regex_meta.get("document_category", "")
-                if not doc_cat:
-                    doc_cat = _parse_metadata_from_text(doc.get("text", "")).get("document_category", "")
-                if doc_cat in whitelist_set:
+                tree_pos = meta.get("tree_position") or {}
+                doc_level = tree_pos.get("tree_level", "") if isinstance(tree_pos, dict) else ""
+                if not doc_level:
+                    doc_cat = meta.get("document_category", "")
+                    if not doc_cat:
+                        regex_meta = meta.get("regex_metadata") or {}
+                        doc_cat = regex_meta.get("document_category", "")
+                    if not doc_cat:
+                        doc_cat = _parse_metadata_from_text(doc.get("text", "")).get("document_category", "")
+                    doc_level = CATEGORY_TO_TREE_LEVEL.get(doc_cat, "")
+                if doc_level in level_set:
                     filtered.append(doc)
-                elif doc_cat and "/" in doc_cat and doc_cat.split("/")[0] in whitelist_prefixes:
-                    filtered.append(doc)
-                elif not doc_cat and allow_uncategorized_docs:
+                elif not doc_level and allow_uncategorized_docs:
                     filtered.append(doc)
             documents = filtered
             logger.info(
-                "[UnifiedRAG] 分类白名单硬过滤: %d -> %d (whitelist=%s, allow_uncategorized=%s)",
+                "[UnifiedRAG] 树层级硬过滤: %d -> %d (levels=%s, allow_uncategorized=%s)",
                 before_count, len(documents), category_whitelist, allow_uncategorized_docs,
             )
             if not documents:
                 logger.warning(
-                    "[UnifiedRAG] 白名单过滤后结果为空 (query=%s, whitelist=%s)，返回空",
+                    "[UnifiedRAG] 树层级过滤后结果为空 (query=%s, levels=%s)，返回空",
                     query[:80], category_whitelist,
                 )
                 return "", {}, decomposition_result

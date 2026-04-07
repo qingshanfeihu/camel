@@ -396,6 +396,13 @@ def _documents_to_elements(docs: list) -> list[Text]:
             "priority",
             "feature_name",
             "expected_result",
+            # 农民填肉关键字段（向量检索需回传以做命中验证与溯源）
+            "node_id",
+            "tree_node_id",
+            "command_prefix",
+            "command_refs",
+            "func",
+            "scope",
         ):
             value = metadata.get(key)
             if value:

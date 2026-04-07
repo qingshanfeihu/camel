@@ -147,18 +147,15 @@ class TestStep1Rules:
         fields = agent._step1_rules(chunk, 0)
         assert "has_code_block" not in fields
 
-    def test_command_prefix_extracted(self):
+    def test_command_prefix_not_in_step1(self):
+        """command_prefix 不在 _step1_rules 提取，由树匹配阶段确定。"""
         agent = _make_agent()
-        with patch(
-            "INAGENT.agents.knowledge_farmer_agent._get_metadata_rules",
-            return_value={"command_prefixes": {"slb": ["slb "]}, "intents": {}, "config_modes": {}, "product_modules": {}, "protocol_types": {}},
-        ):
-            chunk = {
-                "page_content": "slb virtual http test 1.2.3.4 80",
-                "metadata": {"source_file": "cli.pdf"},
-            }
-            fields = agent._step1_rules(chunk, 0)
-        assert fields.get("command_prefix") == "slb"
+        chunk = {
+            "page_content": "slb virtual http test 1.2.3.4 80",
+            "metadata": {"source_file": "cli.pdf"},
+        }
+        fields = agent._step1_rules(chunk, 0)
+        assert "command_prefix" not in fields
 
     def test_no_command_prefix_for_plain_text(self):
         agent = _make_agent()

@@ -16,9 +16,19 @@
 > **启动方式**: `llm_gateway\start_gateway.bat` 或 `llm_gateway\deploy.bat`
 > **默认端口**: 9000 (对外服务) / 8000 (内部容器)
 
+## OpenCode Go（可选）
+
+- 在 [`config.yaml`](config.yaml) 中配置 `providers.opencode_go`；**默认 `enabled: false`**，不改变现有 DashScope 行为。
+- 启用前在运行环境中设置 **`OPENCODE_GO_API_KEY`**（Zen 控制台订阅 Go 后获取）。
+- 四条对话模型走 OpenAI 兼容 `.../v1/chat/completions`：`glm-5`、`kimi-k2.5`、`mimo-v2-pro`、`mimo-v2-omni`。
+- `minimax-m2.5` / `minimax-m2.7` 走 **Anthropic 风格** `.../v1/messages`（网关内转换为 OpenAI ChatCompletion 响应）；**不支持** `stream=true` 与 `tools`。
+- 当 **仅 DashScope 单条对话模型** 时，行为与升级前一致（不按请求 `model` 切换）。当 **存在多条可路由对话**（启用 Go 等）时，网关按请求体 **`model`** 解析路由；`routing.default_chat_model` 默认为 `qwen-plus`。
+- 嵌入与重排仍仅使用已启用的提供商（默认 DashScope）；Go 未提供同构端点时勿改嵌入模型以免向量维度不一致。
+- 模型列表与端点以 [OpenCode Go 文档](https://opencode.ai/docs/zh-cn/go/) 为准（beta 可能变更）。
+
 ## 功能特性
 
-- ✅ **多模型并发调用**：同时使用3个对话模型（GLM-Z1-9B、Qwen3-8B、DeepSeek-R1-Qwen3-8B）
+- ✅ **多模型并发调用**：可同时注册多条对话模型（含可选 OpenCode Go）
 - ✅ **Race模式**：并发调用所有模型，返回最快响应
 - ✅ **三级限速**：全局、提供商、模型三级速率限制
 - ✅ **OpenAI兼容**：完全兼容OpenAI API格式

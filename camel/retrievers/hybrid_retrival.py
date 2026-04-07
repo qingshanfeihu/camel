@@ -146,7 +146,17 @@ class HybridRetriever(BaseRetriever):
                 id_to_info[current_id] = info_bm25
                 current_id += 1
             else:
-                id_to_info[text_to_id[text]].setdefault('bm25_rank', rank)
+                existing = id_to_info[text_to_id[text]]
+                existing.setdefault('bm25_rank', rank)
+                bm25_meta = result.get('metadata')
+                if bm25_meta and isinstance(bm25_meta, dict):
+                    cur_meta = existing.get('metadata')
+                    if isinstance(cur_meta, dict):
+                        for k, v in bm25_meta.items():
+                            if k not in cur_meta or not cur_meta[k]:
+                                cur_meta[k] = v
+                    else:
+                        existing['metadata'] = bm25_meta
 
         vector_ranks = np.array(
             [

@@ -4,6 +4,92 @@
 
 ---
 
+## [v10.2] - 2026-04-04
+
+### 🚀 GraphRAG 直接从结构图构建 — 零 LLM 调用
+
+将 GraphRAG 索引构建从昂贵的 LLM 实体提取改为直接从 `cli_keyword_graph.json` 转换，实现零 LLM 调用 + 100% 覆盖率。
+
+#### 根本原因
+
+`cli_keyword_graph.json` 本身即是完整知识图谱（5505 nodes，25750 edges），用 LLM 从文本重新提取是对已有结构数据的有损重建，既浪费 token 又覆盖率不足。
+
+#### 新增脚本 `scripts/build_graphrag_from_graph.py`
+
+```bash
+# 生成全部 parquet（无 embedding）
+python -m INAGENT.scripts.build_graphrag_from_graph
+
+# 同时生成 embedding 写入 LanceDB
+python -m INAGENT.scripts.build_graphrag_from_graph --embed
+```
+
+| 产物 | 规模 |
+|------|------|
+| entities.parquet | 5401 实体（COMMAND/MODULE/PARAMETER） |
+| relationships.parquet | 22985 关系边 |
+| text_units.parquet | 140 文本单元（按 product_module 分组） |
+| communities.parquet | 140 社区（一模块一社区） |
+| LanceDB 向量表 | 5401 × 1024-dim description_embedding |
+
+#### KB 覆盖率
+
+| 指标 | 旧 LLM 索引 | 新直接构建 |
+|------|------------|----------|
+| KB node_id 覆盖率 | ~84% (2496/3570) | **100% (3570/3570)** |
+| 实体数量 | 6814 | 5401（去重） |
+| 索引耗时 | 数小时（796 docs × LLM 抽取） | ~5 min（仅 embedding API） |
+| 引用完整性 | 断链 | 通过 |
+
+#### 4-way 诊断结果
+
+```
+┌─────────────┬────────┬────────┐
+│ 数据源       │ 命中   │ 命中率 │
+├─────────────┼────────┼────────┤
+│ Command Tree │ 50/50 │ 100%   │
+│ KB           │ 50/50 │ 100%   │
+│ Vector       │ 50/50 │ 100%   │
+│ GraphRAG     │ 50/50 │ 100%   │
+└─────────────┴────────┴────────┘
+```
+
+#### 重要注意事项
+
+- **不要在已有 parquet 时运行 `graphrag index`**，会覆盖 entities.parquet 破坏一致性
+- `--embed` 会先调用 `build()`（重新生成 parquet），再生成 embedding；如 parquet 已存在且一致，可直接用 `python -c "from INAGENT.scripts.build_graphrag_from_graph import populate_lancedb; populate_lancedb()"` 仅更新 LanceDB
+
+#### 其他修复
+
+- 给 `populate_lancedb()` 添加 5 次重试 + 指数退避，应对 API 限速
+- 清理根目录临时文件 `_gr_gap_audit.py`
+
+---
+
+## [v10.1] - 2026-04-03
+
+### 🔧 农场主 TreeContext 缓存 & GraphRAG NaN 修复
+
+两项性能/正确性修复，ircookie 三方 E2E 端到端耗时从 ~8 min 降到 ~5 min。
+
+#### 农场主 TreeContext 按 entity_title 缓存
+
+- `KnowledgeFarmOwnerAgent._tree_context_cache`：同一 `process_gap_entries` 批次内，相同 `entity_title` 的 7 步树查询只执行一次
+- 缓存在每次 `process_gap_entries` 入口自动清空，不跨批次
+
+#### GraphRAG LocalSearchMixedContext NaN 修复
+
+- `graphrag_integration.py` `_init_context_builder`：在调用 `read_indexer_entities` 前对 `degree`/`frequency` 列做 `fillna(0)`
+- 修复 `cannot convert float NaN to integer` 导致 MixedContext 初始化失败、回退到全 LLM `local_search` 的问题
+- UnifiedRAG P5D 查询从 ~15s/条（LLM）降到 <1s/条（纯 embedding context build）
+
+#### GraphRAG entities.parquet 断链修复
+
+- `graphrag_integration.py` `upsert_entities`：`source_id` 为文件名（非 hash）时，`text_unit_ids` 设为空列表
+- 修复 `_check_referential_integrity` 因 `cli_keyword_graph.json` 不在 `text_units.parquet` 而拒绝加载整个 GraphRAG
+
+---
+
 ## [v10.0] - 2026-03-30
 
 ### 🏗️ RAG 基础设施全面升级

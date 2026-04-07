@@ -16,7 +16,6 @@ try:
     import json_repair
 except ImportError:
     json_repair = None
-from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -31,10 +30,9 @@ from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
-    from openai import OpenAI, RateLimitError
+    from openai import OpenAI
 except Exception:  # pragma: no cover - optional dependency at runtime
     OpenAI = None
-    RateLimitError = Exception
 
 BASE_DIR = Path(__file__).parent
 # DOC_LOCAL_DIR 指向 INAGENT/knowledge_base（与 manage_database.py 一致）
@@ -48,7 +46,7 @@ logger = logging.getLogger("auto_convert")
 
 # Bump this when auto_convert logic changes in a way that should invalidate cache
 # (e.g., text extraction, metadata extraction, block selection).
-AUTO_CONVERT_SCHEMA_VERSION = "2026-01-26.1"
+AUTO_CONVERT_SCHEMA_VERSION = "2026-06-30.1"
 
 
 def _match_protocols_word_boundary(
@@ -271,7 +269,7 @@ def _parse_json_array(response_text: str) -> List[int]:
 
 def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
     """
-    使用 LLM 过滤前置页（已统一使用硅基流动）
+    使用 LLM 过滤前置页
     """
     config = _load_project_config()
     llm_config = config.get("llm-aided-config", {})
@@ -287,8 +285,7 @@ def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
         )
         return blocks
 
-    # 统一使用硅基流动
-    runtime = _get_siliconflow_runtime()
+    runtime = _get_llm_gateway_runtime()
     api_key = str(runtime.get("api_key") or "")
     base_url = str(runtime.get("base_url") or "")
     model = str(runtime.get("model") or "")
@@ -320,8 +317,7 @@ def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
             base_url=base_url,
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=_siliconflow_temperature(),  # 统一使用硅基流动温度
-            allow_fallback=False,  # frontmatter filter 不需要故障转移
+            temperature=_llm_temperature(),
         )
         content = response.choices[0].message.content or ""
         drop_pages = _parse_json_array(content)
@@ -362,45 +358,14 @@ DOCKER_VLLM_URL = (
 # Cached availability checks
 _VLLM_AVAILABLE: Optional[bool] = None
 _LLM_METADATA_AVAILABLE: Optional[bool] = None
-_QIANFAN_AVAILABLE: Optional[bool] = None
+_LLM_GATEWAY_AVAILABLE: Optional[bool] = None
 
-# Force all OpenAI-compatible LLM calls to use LLM Gateway runtime settings.
-# 已弃用其他提供商（百度千帆、腾讯混元），统一使用 LLM Gateway。
-FORCE_SILICONFLOW = cfg_str(
-    "auto_convert.force_siliconflow",
-    "1",
-    env="AUTO_CONVERT_FORCE_SILICONFLOW",
-).strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "n",
-}
-# 向后兼容
-FORCE_QIANFAN = FORCE_SILICONFLOW
-
-# 双API供应商负载均衡：已禁用
-# 所有请求都使用硅基流动
-ENABLE_DUAL_PROVIDER_LOAD_BALANCE = False  # 已禁用，统一使用硅基流动
-
-# 提供商选择器（用于负载均衡）
-_provider_selector_lock = threading.Lock()
-_provider_selector_counter = 0
-
-# 固定的模型配置（简化逻辑）
-# 已统一使用 LLM Gateway，弃用其他提供商。
-# 模型优先从环境变量 LLM_GATEWAY_CHAT_MODEL 读取，未配置时使用默认模型。
-SILICONFLOW_MODEL = (
+# LLM Gateway 模型配置，优先从 LLM_GATEWAY_CHAT_MODEL 环境变量读取
+LLM_GATEWAY_MODEL = (
     cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL").strip()
     or cfg_str("llm.siliconflow.chat_model", "mineru-vlm", env="SILICONFLOW_CHAT_MODEL")
 )
-
-# 向后兼容：QIANFAN_MODEL 现在返回硅基流动模型
-QIANFAN_MODEL = SILICONFLOW_MODEL
-
-# 为兼容旧的模型校验逻辑，保留允许模型集合（现阶段不做严格校验，仅避免 NameError）
-QIANFAN_ALLOWED_MODELS: set[str] = set()
-SILICONFLOW_ALLOWED_CHAT_MODELS: set[str] = set()
+SILICONFLOW_MODEL = LLM_GATEWAY_MODEL  # compat alias
 
 # 简单的 cache：logs 下存在同名 cache.json 就视为已转换
 
@@ -419,231 +384,46 @@ NET_TIMEOUT = cfg_float(
     8.0,
     env="AUTO_CONVERT_NET_TIMEOUT",
 )
-HUGGINGFACE_API_CHECK = cfg_str(
-    "auto_convert.network.hf_check_url",
-    "https://huggingface.co/api/models/opendatalab/PDF-Extract-Kit-1.0",
-    env="AUTO_CONVERT_HF_CHECK",
-)
-
-def get_baidu_access_token() -> str:
-    """
-    获取百度 Access Token。
-    如果是 bce-v3 格式的 API Key，直接返回。
-    否则尝试使用 Client Credentials Flow 获取 Token。
-    
-    注意：使用统一的配置管理，不硬编码默认值
-    """
-    # 使用统一的配置管理
-    from INAGENT.utils.llm_config import get_qianfan_config
-    
-    try:
-        config = get_qianfan_config()
-        api_key = config.get("api_key", "")
-        # 如果配置中有 secret_key，需要单独获取
-        secret_key = cfg_str("llm.baidu.secret_key", "", env="BAIDU_SECRET_KEY")
-    except Exception as e:
-        logger.warning("从统一配置获取 API Key 失败，回退到环境变量: %s", e)
-        api_key = cfg_str("llm.baidu.qianfan_api_key", "", env="QIANFAN_API_KEY") or cfg_str(
-            "llm.baidu.api_key",
-            "",
-            env="BAIDU_API_KEY",
-        )
-        secret_key = cfg_str("llm.baidu.secret_key", "", env="BAIDU_SECRET_KEY")
-
-    if not api_key:
-        logger.warning(
-            "QIANFAN_API_KEY 或 BAIDU_API_KEY 未配置。"
-            "请在 INAGENT/.env 文件中配置 API Key。"
-        )
-        return ""
-
-    # 如果是 V2 风格的 Key (bce-v3/...)，直接作为 Token 使用
-    if api_key.startswith("bce-v3"):
-        return api_key
-
-    # 兼容旧版 V1 鉴权
-    url = f"https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={api_key}&client_secret={secret_key}"
-    
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req) as response:
-            result = response.read()
-            return json.loads(result).get("access_token", "")
-    except Exception as e:
-        logger.error(f"Failed to get Baidu access token: {e}")
-        return ""
 
 
-class _SlidingWindowRateLimiter:
-    r"""A lightweight sliding-window limiter for RPM and approximate TPM.
-
-    Notes:
-    - TPM is best-effort: we estimate tokens from input/output text length.
-    - Intended to be conservative and avoid 429s; not a guarantee of provider
-      limits.
-    - 参考硅基流动文档：https://github.com/siliconflow/siliconcloud-cookbook/blob/main/examples/rate-limit/how-to-handle-rate-limit-in-siliconcloud.ipynb
-    """
-
-    def __init__(self, *, rpm: int, tpm: int) -> None:
-        self._rpm = max(0, int(rpm))
-        self._tpm = max(0, int(tpm))
-        self._req_ts: deque[float] = deque()
-        self._tok_ts: deque[Tuple[float, int]] = deque()
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _estimate_tokens(text: str) -> int:
-        # Rough heuristic: 1 token ≈ 4 chars for mixed EN/ZH.
-        if not text:
-            return 1
-        return max(1, (len(text) + 3) // 4)
-
-    def acquire(self, *, estimated_tokens: int = 0) -> None:
-        """获取限速许可，如果需要等待则自动等待"""
-        if self._rpm <= 0 and self._tpm <= 0:
-            return
-
-        with self._lock:
-            now = time.time()
-            window_start = now - 60.0
-
-            # 清理过期的时间戳
-            while self._req_ts and self._req_ts[0] < window_start:
-                self._req_ts.popleft()
-            while self._tok_ts and self._tok_ts[0][0] < window_start:
-                self._tok_ts.popleft()
-
-            req_count = len(self._req_ts)
-            tok_count = sum(t for _ts, t in self._tok_ts)
-
-            wait_s = 0.0
-            # 检查RPM限制
-            if self._rpm > 0 and req_count >= self._rpm:
-                wait_s = max(wait_s, (self._req_ts[0] + 60.0) - now)
-
-            # 检查TPM限制
-            if self._tpm > 0 and tok_count + max(0, estimated_tokens) > self._tpm:
-                if self._tok_ts:
-                    wait_s = max(wait_s, (self._tok_ts[0][0] + 60.0) - now)
-                else:
-                    wait_s = max(wait_s, 1.0)
-
-            # 如果需要等待，记录日志并等待
-            if wait_s > 0:
-                # 统一格式的限速日志
-                provider_name = "未知"
-                if hasattr(self, '_provider_name'):
-                    provider_name = self._provider_name
-                logger.info(
-                    "[rate-limit] %s 限速等待 %.2fs (rpm=%d/%d, tpm=%d/%d)",
-                    provider_name,
-                    wait_s,
-                    req_count,
-                    self._rpm,
-                    tok_count,
-                    self._tpm,
-                )
-                time.sleep(wait_s)
-
-            # 记录本次请求
-            now2 = time.time()
-            self._req_ts.append(now2)
-            if self._tpm > 0:
-                self._tok_ts.append((now2, max(1, int(estimated_tokens))))
 
 
-_QIANFAN_RATE_LIMITER: Optional[_SlidingWindowRateLimiter] = None
-_SILICONFLOW_RATE_LIMITER: Optional[_SlidingWindowRateLimiter] = None
 
 
-def _get_qianfan_runtime() -> Dict[str, object]:
-    """
-    获取主 LLM 运行时设置（已统一使用硅基流动）
-    
-    向后兼容函数，实际返回硅基流动配置。
-    限速标准：Gateway → DashScope qwen-plus (RPM 10000, TPM 2000000)
-    """
-    # 统一使用硅基流动
-    return _get_siliconflow_runtime()
-
-def _siliconflow_temperature() -> float:
-    """获取硅基流动温度参数。
-    
-    硅基流动支持温度范围 [0, 2.0]，默认使用 0.7。
-    """
+def _llm_temperature() -> float:
+    """获取 LLM 温度参数，默认 0.7。"""
     raw = cfg_str("llm.siliconflow.temperature", "0.7", env="SILICONFLOW_TEMPERATURE")
     try:
         value = float(raw)
     except Exception:
         value = 0.7
-    # 硅基流动支持范围 [0, 2.0]
-    if value < 0.0:
-        value = 0.0
-    if value > 2.0:
-        value = 2.0
-    return value
+    return max(0.0, min(2.0, value))
 
 
-def _qianfan_temperature() -> float:
-    """获取温度参数（向后兼容，实际返回硅基流动温度）。"""
-    return _siliconflow_temperature()
+_siliconflow_temperature = _llm_temperature  # compat alias
+_qianfan_temperature = _llm_temperature  # compat alias
 
 
-def _is_qianfan_base_url(base_url: str) -> bool:
-    """Return True if the base_url appears to be SiliconFlow (向后兼容).
-    
-    已统一使用硅基流动，此函数现在识别硅基流动的 URL。
-    """
-    # 统一返回是否为硅基流动的判断结果
-    return _is_siliconflow_base_url(base_url)
 
 
-def _qianfan_rate_limiter() -> _SlidingWindowRateLimiter:
-    """获取主提供商限速器（向后兼容，实际返回硅基流动限速器）"""
-    return _siliconflow_rate_limiter()
 
-
-def _validate_model_name(model: str, provider: str) -> tuple[bool, str]:
-    """
-    验证模型名称（简化版本）
-    
-    Args:
-        model: 模型名称
-        provider: 提供商名称 ("qianfan" 或 "siliconflow")
-    
-    Returns:
-        (is_valid, error_message)
-    """
-    # 简化逻辑：总是返回 True，因为我们使用固定的模型配置
-    return True, ""
-
-
-def _get_siliconflow_runtime() -> Dict[str, object]:
-    """
-    获取硅基流动运行时设置
-    
-    默认使用 Qwen/Qwen3-8B 模型（由 LLM_GATEWAY_CHAT_MODEL 覆盖）
-    """
+def _get_llm_gateway_runtime() -> Dict[str, object]:
+    """获取 LLM Gateway 运行时设置。"""
     try:
         from INAGENT.utils.llm_config import get_siliconflow_config
         config = get_siliconflow_config()
-        
-        # 确保base_url为网关地址
+
         base_url = config.get("base_url", "")
         if not base_url or not str(base_url).strip():
             raise ValueError(
                 "LLM_GATEWAY_BASE_URL 未配置，auto_convert 禁止直连 API。"
             )
-        
+
         return {
             "api_key": config.get("api_key", ""),
             "base_url": base_url,
-            "model": SILICONFLOW_MODEL,  # 默认 Qwen/Qwen3-8B
+            "model": LLM_GATEWAY_MODEL,
             "timeout": config.get("timeout", 60),
-            # 客户端限速：Gateway 路由到 DashScope qwen-plus (官方 RPM=30000, TPM=5000000)
-            # 保守取一半，避免突发流量触发阿里侧保护
-            "rpm": 10000,
-            "tpm": 2000000,
         }
     except Exception as e:
         logger.warning("从统一配置获取运行时设置失败: %s", e)
@@ -652,35 +432,8 @@ def _get_siliconflow_runtime() -> Dict[str, object]:
         )
 
 
-def _is_siliconflow_base_url(base_url: str) -> bool:
-    """判断是否为硅基流动的 base_url"""
-    if not base_url:
-        return False
-    normalized = base_url.strip().lower()
-    return "siliconflow" in normalized or "api.siliconflow.cn" in normalized
-
-
-def _siliconflow_rate_limiter() -> _SlidingWindowRateLimiter:
-    global _SILICONFLOW_RATE_LIMITER
-    if _SILICONFLOW_RATE_LIMITER is None:
-        runtime = _get_siliconflow_runtime()
-        _SILICONFLOW_RATE_LIMITER = _SlidingWindowRateLimiter(
-            rpm=int(runtime.get("rpm", 0) or 0),
-            tpm=int(runtime.get("tpm", 0) or 0),
-        )
-        # 标记提供商名称用于日志
-        _SILICONFLOW_RATE_LIMITER._provider_name = "LLM Gateway"
-    return _SILICONFLOW_RATE_LIMITER
-
-
-def _get_rate_limiter(base_url: str) -> Optional[_SlidingWindowRateLimiter]:
-    """返回硅基流动限速器（已统一使用硅基流动）
-    
-    限速标准（Gateway → DashScope 路由）：
-    - 对话模型：RPM 10000, TPM 2000000
-    """
-    # 统一使用硅基流动限速器
-    return _siliconflow_rate_limiter()
+_get_siliconflow_runtime = _get_llm_gateway_runtime  # compat alias
+_get_qianfan_runtime = _get_llm_gateway_runtime  # compat alias
 
 
 def _call_llm_with_retry_and_fallback(
@@ -699,54 +452,15 @@ def _call_llm_with_retry_and_fallback(
     allow_fallback: bool = True,
     fallback_config: Optional[Dict[str, Any]] = None,
 ) -> Any:
-    """
-    统一的LLM API调用函数，包含限速、指数退避重试和故障转移
-    
-    参考硅基流动文档：
-    https://github.com/siliconflow/siliconcloud-cookbook/blob/main/examples/rate-limit/how-to-handle-rate-limit-in-siliconcloud.ipynb
-    
-    Args:
-        client: OpenAI客户端实例
-        base_url: API基础URL
-        model: 模型名称
-        messages: 消息列表
-        temperature: 温度参数
-        response_format: 响应格式（如JSON）
-        stream: 是否流式响应
-        max_retries: 最大重试次数
-        initial_delay: 初始延迟（秒）
-        exponential_base: 指数退避基数
-        jitter: 是否添加随机抖动
-        allow_fallback: 是否允许故障转移
-        fallback_config: 故障转移配置（包含text, meta, config等）
-    
-    Returns:
-        API响应对象
-    
-    Raises:
-        Exception: 如果所有重试和故障转移都失败
-    """
+    """LLM Gateway API 调用，含指数退避重试。allow_fallback/fallback_config 保留签名兼容性但已忽略。"""
     import random
-    
-    # 估算token数量（用于限速）
-    prompt_text = "\n".join([msg.get("content", "") for msg in messages])
-    limiter = _get_rate_limiter(base_url)
-    estimated_tokens = (
-        limiter._estimate_tokens(prompt_text) if limiter else 0
-    )
-    
-    # 应用限速
-    if limiter:
-        limiter.acquire(estimated_tokens=estimated_tokens)
-    
-    # 指数退避重试
+
     num_retries = 0
     delay = initial_delay
-    
+
     while True:
         try:
-            # 构建请求参数
-            request_kwargs = {
+            request_kwargs: Dict[str, Any] = {
                 "model": model,
                 "messages": messages,
                 "temperature": temperature,
@@ -757,147 +471,24 @@ def _call_llm_with_retry_and_fallback(
                 request_kwargs["stream"] = stream
             if max_tokens is not None:
                 request_kwargs["max_tokens"] = max_tokens
-            
-            # 调用API
             return client.chat.completions.create(**request_kwargs)
-        
-        except (RateLimitError, Exception) as e:
-            error_msg = str(e)
-            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-            
-            # 统一格式：识别提供商名称
-            provider_name = "LLM Gateway"
-            
-            # 检查是否是429错误或限速相关错误
-            is_rate_limit = (
-                error_code == 429 or
-                "429" in error_msg or
-                "rate limit" in error_msg.lower() or
-                "TPM limit" in error_msg or
-                "RPM limit" in error_msg or
-                isinstance(e, RateLimitError)
-            )
-            
-            # 如果是限速错误，尝试重试
-            if is_rate_limit:
-                num_retries += 1
-                
-                # 检查是否达到最大重试次数
-                if num_retries > max_retries:
-                    # 如果允许故障转移，尝试切换到备用提供商
-                    if allow_fallback and fallback_config:
-                        logger.warning(
-                            "[LLM] %s 达到最大重试次数 (%d/%d)，尝试故障转移到备用提供商",
-                            provider_name,
-                            num_retries,
-                            max_retries
-                        )
-                        try:
-                            return _try_fallback_provider_call(
-                                fallback_config,
-                                messages,
-                                temperature,
-                                response_format,
-                                stream,
-                            )
-                        except Exception as fallback_error:
-                            logger.error(
-                                "[LLM] %s 故障转移也失败: %s", provider_name, fallback_error
-                            )
-                            raise Exception(
-                                f"所有重试和故障转移都失败。最后错误: {error_msg}"
-                            ) from e
-                    else:
-                        raise Exception(
-                            f"{provider_name} 达到最大重试次数 ({max_retries})。错误: {error_msg}"
-                        ) from e
-                
-                # 计算延迟时间（指数退避 + 随机抖动）
-                if jitter:
-                    delay_with_jitter = delay * (1 + random.random())
-                else:
-                    delay_with_jitter = delay
-                
-                # 统一格式的重试日志
-                logger.warning(
-                    "[LLM] %s 遇到限速错误 (429)，第 %d/%d 次重试，等待 %.2f 秒后重试 (model=%s)",
-                    provider_name,
-                    num_retries,
-                    max_retries,
-                    delay_with_jitter,
-                    model,
+        except Exception as e:
+            num_retries += 1
+            if num_retries > max_retries:
+                logger.error(
+                    "[LLM] 达到最大重试次数 (%d)，model=%s: %s", max_retries, model, e
                 )
-                
-                time.sleep(delay_with_jitter)
-                delay *= exponential_base
-                
-            else:
-                # 非限速错误，如果是允许故障转移的错误，尝试故障转移
-                provider_name = "LLM Gateway"
-                if allow_fallback and fallback_config:
-                    logger.warning(
-                        "[LLM] %s 遇到非限速错误，尝试故障转移: %s (model=%s)",
-                        provider_name,
-                        error_msg,
-                        model
-                    )
-                    try:
-                        return _try_fallback_provider_call(
-                            fallback_config,
-                            messages,
-                            temperature,
-                            response_format,
-                            stream,
-                        )
-                    except Exception as fallback_error:
-                        logger.error(
-                            "[LLM] %s 故障转移失败: %s", provider_name, fallback_error
-                        )
-                        raise Exception(
-                            f"{provider_name} API调用失败且故障转移失败。错误: {error_msg}"
-                        ) from e
-                else:
-                    # 不允许故障转移或没有配置，直接抛出异常
-                    logger.error(
-                        "[LLM] %s API调用失败: %s (model=%s)",
-                        provider_name,
-                        error_msg,
-                        model
-                    )
-                    raise
+                raise
+            delay_with_jitter = delay * (1 + random.random()) if jitter else delay
+            logger.warning(
+                "[LLM] 调用失败，第 %d/%d 次重试，等待 %.2f 秒 (model=%s): %s",
+                num_retries, max_retries, delay_with_jitter, model, e,
+            )
+            time.sleep(delay_with_jitter)
+            delay *= exponential_base
 
 
-def _try_fallback_provider_call(
-    fallback_config: Dict[str, Any],
-    messages: List[Dict[str, str]],
-    temperature: float,
-    response_format: Optional[Dict[str, str]],
-    stream: bool,
-) -> Any:
-    """
-    尝试使用备用提供商进行API调用（已弃用）
-    
-    由于已统一使用硅基流动，故障转移功能已禁用。
-    此函数保留用于向后兼容，但会直接抛出异常。
-    """
-    # 已统一使用硅基流动，不再支持故障转移
-    failed_base_url = fallback_config.get("failed_base_url", "")
-    failed_model = fallback_config.get("failed_model", "")
-    
-    logger.warning(
-        "[fallback] 故障转移已禁用（已统一使用硅基流动）。"
-        "原始请求失败: base_url=%s, model=%s",
-        failed_base_url,
-        failed_model
-    )
-    
-    raise Exception(
-        f"LLM Gateway API 调用失败，故障转移已禁用。"
-        f"原始 base_url: {failed_base_url}, model: {failed_model}"
-    )
-
-
-def _probe_siliconflow_chat(
+def _probe_llm_gateway_chat(
     *,
     base_url: str,
     api_key: str,
@@ -905,9 +496,6 @@ def _probe_siliconflow_chat(
     timeout: float,
 ) -> Tuple[bool, str]:
     """Probe LLM Gateway OpenAI-compatible chat completions.
-    
-    使用统一的API调用函数，包含限速和重试机制。
-    预检失败不会阻止程序运行（通过AUTO_CONVERT_ASSUME_YES控制）。
 
     Returns:
         (ok, message)
@@ -919,7 +507,6 @@ def _probe_siliconflow_chat(
     if not model:
         return False, "LLM Gateway model 未配置"
 
-    # 使用OpenAI客户端和统一API调用函数（如果可用）
     if OpenAI is not None:
         try:
             client = OpenAI(
@@ -927,54 +514,27 @@ def _probe_siliconflow_chat(
                 base_url=base_url,
                 timeout=timeout,
             )
-            
-            # 使用统一的API调用函数，但预检不需要故障转移
-            # 预检失败时返回False，让调用者决定是否继续
             response = _call_llm_with_retry_and_fallback(
                 client=client,
                 base_url=base_url,
                 model=model,
                 messages=[{"role": "user", "content": "ping"}],
-                temperature=_siliconflow_temperature(),
-                max_tokens=1,  # 预检只需要1个token
-                allow_fallback=False,  # 预检不需要故障转移
-                max_retries=3,  # 预检减少重试次数
+                temperature=_llm_temperature(),
+                max_tokens=1,
+                max_retries=3,
             )
-            
-            # 如果调用成功，返回True
             if response and response.choices:
                 return True, "LLM Gateway 预检成功"
-            else:
-                return False, "LLM Gateway 预检返回空响应"
-        
+            return False, "LLM Gateway 预检返回空响应"
         except Exception as exc:
-            error_msg = str(exc)
-            # 检查是否是429错误
-            error_code = getattr(exc, 'status_code', None) or getattr(exc, 'code', None)
-            is_rate_limit = (
-                error_code == 429 or
-                "429" in error_msg or
-                "rate limit" in error_msg.lower() or
-                "TPM limit" in error_msg or
-                "RPM limit" in error_msg or
-                isinstance(exc, RateLimitError)
-            )
-            
-            if is_rate_limit:
-                # 429错误：预检时遇到限速，记录警告但返回False
-                # 调用者可以通过AUTO_CONVERT_ASSUME_YES继续运行
-                return False, f"LLM Gateway 限速 (HTTP 429): {error_msg}"
-            else:
-                return False, f"LLM Gateway 预检失败: {error_msg}"
-    
-    # 如果OpenAI客户端不可用，回退到urllib方式（但不应用限速）
-    # 这种情况应该很少见，因为OpenAI是核心依赖
+            return False, f"LLM Gateway 预检失败: {exc}"
+
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 1,
-        "temperature": _siliconflow_temperature(),
+        "temperature": _llm_temperature(),
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -996,21 +556,8 @@ def _probe_siliconflow_chat(
         return False, f"LLM Gateway 预检失败: {str(exc)}"
 
 
-# 向后兼容
-def _probe_qianfan_chat(
-    *,
-    base_url: str,
-    api_key: str,
-    model: str,
-    timeout: float,
-) -> Tuple[bool, str]:
-    """向后兼容函数，实际调用 LLM Gateway 预检"""
-    return _probe_siliconflow_chat(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        timeout=timeout,
-    )
+_probe_siliconflow_chat = _probe_llm_gateway_chat  # compat alias
+_probe_qianfan_chat = _probe_llm_gateway_chat  # compat alias
 
 
 def _is_under_doc_local(path: Path) -> bool:
@@ -1151,7 +698,6 @@ def convert_office_file(file_path: Path) -> None:
     3. 对生成的知识块运行 metadata 增强（规则 + LLM）
     4. 写入 reference/ 目录，与 PDF 流水线输出合并
     """
-    from INAGENT.data_tools.document_classifier import classify_document, infer_product_module_from_path
     from INAGENT.data_tools.spec_parser import parse_spec_document
     from INAGENT.data_tools.testlist_parser import parse_test_list
 
@@ -1180,35 +726,26 @@ def convert_office_file(file_path: Path) -> None:
     except Exception as e:
         logger.warning("[office] 预览读取失败 %s: %s", file_path.name, e)
 
-    category, confidence = classify_document(file_path, content_preview)
-    product_module = infer_product_module_from_path(file_path)
-    logger.info(
-        "[office] 分类结果: %s -> %s (confidence=%.2f, module=%s)",
-        file_path.name, category, confidence, product_module,
-    )
-
-    # 2. 根据分类调用对应解析器
+    # 路由：按文件扩展名选择解析器（不再用 classify_document）
     suffix = file_path.suffix.lower()
+    doc_type = "spec/design"  # 默认
+    if suffix in {".xlsx", ".xls"}:
+        doc_type = "test/test_list"
+    logger.info("[office] 解析路由: %s -> %s", file_path.name, doc_type)
+
     knowledge_blocks: List[Dict[str, Any]] = []
 
-    if suffix in {".xlsx", ".xls"} or category.startswith("test/test_list"):
+    if doc_type == "test/test_list":
         knowledge_blocks = parse_test_list(
             file_path,
-            product_module=product_module,
-            document_category=category,
-        )
-    elif suffix in {".docx", ".doc"} or category.startswith("spec/") or category.startswith("test/"):
-        knowledge_blocks = parse_spec_document(
-            file_path,
-            document_category=category,
-            product_module=product_module,
+            product_module="",
+            document_category=doc_type,
         )
     else:
-        # 回退：尝试规格解析
         knowledge_blocks = parse_spec_document(
             file_path,
-            document_category=category or "unknown",
-            product_module=product_module,
+            document_category=doc_type,
+            product_module="",
         )
 
     if not knowledge_blocks:
@@ -1245,20 +782,22 @@ def convert_office_file(file_path: Path) -> None:
     # 增强 scenario_id / step_type
     _enhance_metadata_with_function_index(knowledge_blocks)
 
-    # 4. 写入 JSON
+    # 4. 农民匹配 + 农场主决策：将知识块挂载到命令树
+    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, file_path)
+
+    # 5. 写入 JSON
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    # 5. 写入缓存
+    # 6. 写入缓存
     cache_payload = {
         "source_file": str(file_path),
         "source_file_fingerprint": _compute_file_fingerprint(file_path),
         "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
-        "document_category": category,
-        "document_category_confidence": confidence,
-        "product_module": product_module,
+        "doc_type": doc_type,
+        "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
     }
@@ -1427,13 +966,9 @@ def convert_text_file(file_path: Path) -> None:
     2. 用 document_classifier 分类
     3. 根据分类选择解析方式（bug_fix 专用解析 / 通用段落解析）
     4. 运行 metadata 增强
-    5. 写入 reference/ 目录
+    5. 农民匹配 + 农场主决策
+    6. 写入 reference/ 目录
     """
-    from INAGENT.data_tools.document_classifier import (
-        classify_document,
-        infer_product_module_from_path,
-    )
-
     stem = _output_stem_for_file(file_path)
     source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
@@ -1449,23 +984,13 @@ def convert_text_file(file_path: Path) -> None:
     logger.info("[text] 开始处理: %s", file_path.name)
 
     text = file_path.read_text(encoding="utf-8", errors="replace")
-    content_preview = text[:2000]
 
-    category, confidence = classify_document(file_path, content_preview)
-    product_module = infer_product_module_from_path(file_path)
-    logger.info(
-        "[text] 分类结果: %s -> %s (confidence=%.2f, module=%s)",
-        file_path.name,
-        category,
-        confidence,
-        product_module,
-    )
-
-    # 根据分类选择解析方式
-    if category == "review/bug_fix":
+    # 按内容启发式路由解析器（不调 classify_document）
+    _is_bug_fix = bool(re.search(r"Bug\s+\d+", text[:2000], re.IGNORECASE))
+    if _is_bug_fix:
         knowledge_blocks = _parse_bug_fix_text(text, source_label)
     else:
-        knowledge_blocks = _parse_generic_text(text, source_label, category)
+        knowledge_blocks = _parse_generic_text(text, source_label, "text")
 
     if not knowledge_blocks:
         logger.warning("[text] 未生成任何知识块: %s", file_path.name)
@@ -1484,8 +1009,6 @@ def convert_text_file(file_path: Path) -> None:
         content = str(block.get("page_content") or "")
         lower_text = content.lower()
 
-        if product_module and product_module != "unknown":
-            meta.setdefault("product_module", product_module)
         if not meta.get("product_module") or meta["product_module"] == "unknown":
             for module, keywords in product_modules_map.items():
                 if any(k.lower() in lower_text for k in keywords):
@@ -1499,6 +1022,9 @@ def convert_text_file(file_path: Path) -> None:
 
     _enhance_metadata_with_function_index(knowledge_blocks)
 
+    # 农民匹配 + 农场主决策
+    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, file_path)
+
     # 写入 JSON
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
@@ -1510,9 +1036,7 @@ def convert_text_file(file_path: Path) -> None:
         "source_file": str(file_path),
         "source_file_fingerprint": _compute_file_fingerprint(file_path),
         "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
-        "document_category": category,
-        "document_category_confidence": confidence,
-        "product_module": product_module,
+        "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
     }
@@ -1535,10 +1059,6 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
     """当 MinerU 不可用时，回退为 MarkItDown 纯文本抽取。"""
     try:
         from camel.loaders.markitdown import MarkItDownLoader
-        from INAGENT.data_tools.document_classifier import (
-            classify_document,
-            infer_product_module_from_path,
-        )
     except Exception as exc:
         logger.warning("[pdf-fallback] 依赖不可用，无法回退: %s", exc)
         return False
@@ -1557,10 +1077,8 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
         logger.warning("[pdf-fallback] 抽取文本为空: %s", pdf.name)
         return False
 
-    category, confidence = classify_document(pdf, text[:2000])
-    product_module = infer_product_module_from_path(pdf)
     source_label = json_path.name
-    knowledge_blocks = _parse_generic_text(text, source_label, category or "spec/design")
+    knowledge_blocks = _parse_generic_text(text, source_label, "pdf_fallback")
     if not knowledge_blocks:
         logger.warning("[pdf-fallback] 未生成知识块: %s", pdf.name)
         return False
@@ -1576,8 +1094,6 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
         meta = block.get("metadata", {})
         content = str(block.get("page_content") or "")
         lower_text = content.lower()
-        if product_module and product_module != "unknown":
-            meta.setdefault("product_module", product_module)
         if not meta.get("product_module") or meta["product_module"] == "unknown":
             for module, keywords in product_modules_map.items():
                 if any(k.lower() in lower_text for k in keywords):
@@ -1589,6 +1105,9 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
                 meta["protocol_type"] = found_protocols
 
     _enhance_metadata_with_function_index(knowledge_blocks)
+
+    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
+
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1597,9 +1116,7 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
         "source_file": str(pdf),
         "source_file_fingerprint": _compute_file_fingerprint(pdf),
         "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
-        "document_category": category,
-        "document_category_confidence": confidence,
-        "product_module": product_module,
+        "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
         "fallback_parser": "markitdown",
@@ -1793,16 +1310,99 @@ def _clean_chunk_text(text: str) -> str:
     return text.strip()
 
 def _apply_llm_metadata_extraction(text: str, meta: Dict[str, object], config: Dict) -> None:
-    """外部接口，调用内部实现"""
-    _apply_llm_metadata_extraction_internal(text, meta, config, allow_fallback=True)
+    """Apply LLM metadata extraction for a single chunk (delegates to batch)."""
+    _apply_llm_metadata_extraction_batch([(text, meta)], config)
 
 
 # ---------------------------------------------------------------------------
-# Batch LLM metadata extraction  (reduces API calls by ~10x)
+# Batch LLM metadata extraction
+# - Fixed system prompt enables KV-cache on compatible inference servers
+# - Token-aware sub-batching stays within model context limits
 # ---------------------------------------------------------------------------
 
-_BATCH_LLM_SIZE = 40  # chunks per LLM call (was 10; 40 fits within 8K-context models)
-_BATCH_TEXT_LIMIT = 500  # chars per chunk in batch prompt (was 800; trimmed to fit larger batches)
+_BATCH_LLM_SIZE = cfg_int("auto_convert.batch.size", 40, env="LLM_BATCH_SIZE")
+_BATCH_TEXT_LIMIT = 500      # chars per chunk snippet in prompt
+_BATCH_TOKEN_BUDGET = cfg_int("auto_convert.batch.token_budget", 6000, env="LLM_BATCH_TOKEN_BUDGET")
+_CHARS_PER_TOKEN = 3.5       # rough estimate for mixed EN/ZH
+
+
+def _build_batch_system_prompt(meta_rules: Dict) -> str:
+    """Build the fixed system prompt (cached by LLM inference servers)."""
+    valid_intents = list(meta_rules.get("intents", {}).keys())
+    valid_config_modes = list(meta_rules.get("config_modes", {}).keys())
+    valid_protocol_types = list(meta_rules.get("protocol_types", {}).keys())
+    valid_command_prefixes = list(meta_rules.get("command_prefixes", {}).keys())
+    product_modules_map = meta_rules.get("product_modules", {})
+    pm_descs = [f"{m} ({', '.join(kws[:3])})" for m, kws in product_modules_map.items()]
+    return (
+        "You are a batch metadata extractor for technical documentation chunks.\n"
+        "Extract metadata for EACH chunk. Return a JSON array (one object per chunk, in order).\n\n"
+        "Per-chunk fields:\n"
+        "- product_module: functional module (SLB/LLB/基础网络/安全). "
+        "Infer from section path (highest priority) > section title > command prefix > content keywords. "
+        "The 'path=' header shows the full chapter hierarchy (e.g. path=高可用性（HA） > 概述 means this chunk belongs to HA module). "
+        "Use 'unknown' only for pure frontmatter (TOC/copyright/about-us). "
+        "Protocols (HTTP/TCP) go in protocol_type, NOT here.\n"
+        "- protocol_type: list of protocols mentioned, [] if none\n"
+        "- intent: from valid list\n"
+        "- config_mode: cli | console | api\n"
+        "- command_prefix: first command word if CLI syntax, '' otherwise\n"
+        "- description: max 30 words\n"
+        "- required_keywords: list of important technical terms\n"
+        "- section_title: from content, strip chapter numbers (e.g. '11.3.1. HTTP' → 'HTTP')\n"
+        "- parent_section: parent section, strip numbers\n"
+        "- scenario_id: e.g. HTTP_SLB_CONFIG, or 'unknown'\n"
+        "- step_type: e.g. basic_config/health_checks/policies_and_algorithms, or ''\n"
+        "- function_hierarchy: e.g. 'SLB > Health Check > HTTP' (no numbers)\n"
+        "- chunk_type: single_command | command_list | narrative\n"
+        "- override_commands: command names that support override/覆盖, [] otherwise\n\n"
+        f"Valid Intents: {valid_intents}\n"
+        f"Valid Config Modes: {valid_config_modes}\n"
+        f"Valid Modules: {', '.join(pm_descs[:20])}\n"
+        f"Valid Protocols: {valid_protocol_types}\n"
+        f"Valid Prefixes: {valid_command_prefixes}\n\n"
+        "Return ONLY a JSON array. No markdown, no explanation."
+    )
+
+
+def _merge_llm_meta(llm_meta: Dict, meta_item: Dict, meta_rules: Dict) -> None:
+    """Merge LLM-extracted fields into meta_item in-place."""
+    if llm_meta.get("intent"):
+        meta_item["intent"] = llm_meta["intent"]
+    if llm_meta.get("config_mode"):
+        meta_item["config_mode"] = llm_meta["config_mode"]
+    if llm_meta.get("required_keywords") and isinstance(llm_meta["required_keywords"], list):
+        meta_item["required_keywords"] = llm_meta["required_keywords"]
+    if llm_meta.get("product_module"):
+        pm = str(llm_meta["product_module"]).strip()
+        pm = {"未知": "unknown", "未知模块": "unknown"}.get(pm, pm)
+        meta_item["product_module"] = "unknown" if pm.lower() in {"unknown", "未知", ""} else pm
+    if llm_meta.get("protocol_type") and isinstance(llm_meta["protocol_type"], list):
+        meta_item["protocol_type"] = llm_meta["protocol_type"]
+    if llm_meta.get("command_prefix"):
+        meta_item["command_prefix"] = llm_meta["command_prefix"]
+    if llm_meta.get("description"):
+        meta_item["description"] = llm_meta["description"]
+    if llm_meta.get("section_title"):
+        meta_item["section_title"] = _remove_section_number(str(llm_meta["section_title"]))
+    if llm_meta.get("parent_section"):
+        meta_item["parent_section"] = _remove_section_number(str(llm_meta["parent_section"]))
+    if llm_meta.get("scenario_id"):
+        meta_item["scenario_id"] = str(llm_meta["scenario_id"])
+    if llm_meta.get("step_type"):
+        meta_item["step_type"] = str(llm_meta["step_type"])
+    if llm_meta.get("function_hierarchy"):
+        fh = str(llm_meta["function_hierarchy"]).strip()
+        if fh:
+            meta_item["function_hierarchy"] = " > ".join(
+                _remove_section_number(p.strip()) for p in fh.split(">")
+            )
+    if llm_meta.get("command_structure") and isinstance(llm_meta["command_structure"], dict):
+        meta_item["command_structure"] = llm_meta["command_structure"]
+    if llm_meta.get("chunk_type"):
+        meta_item["chunk_type"] = str(llm_meta["chunk_type"])
+    if llm_meta.get("override_commands") and isinstance(llm_meta["override_commands"], list):
+        meta_item["override_commands"] = llm_meta["override_commands"]
 
 
 def _apply_llm_metadata_extraction_batch(
@@ -1811,27 +1411,29 @@ def _apply_llm_metadata_extraction_batch(
 ) -> None:
     """Apply LLM metadata extraction for a batch of (clean_text, meta) pairs.
 
-    Merges up to _BATCH_LLM_SIZE chunks into a single prompt, asks the LLM
-    to return a JSON array of metadata objects (one per chunk, in order).
-    Falls back to per-item extraction on any parse failure.
+    Uses a fixed system prompt (KV-cache friendly) and variable user messages.
+    Token-aware sub-batching splits items when estimated tokens exceed
+    _BATCH_TOKEN_BUDGET to stay within model limits.
     """
     if not items:
         return
 
-    global _QIANFAN_AVAILABLE, _LLM_METADATA_AVAILABLE
-    if _QIANFAN_AVAILABLE is False or _LLM_METADATA_AVAILABLE is False:
-        return
-
-    selected_api_key, selected_base_url, selected_model = _select_provider_for_thread()
-    if not (selected_api_key and selected_base_url and selected_model):
-        runtime = _get_siliconflow_runtime()
-        selected_api_key = str(runtime.get("api_key") or "")
-        selected_base_url = str(runtime.get("base_url") or "")
-        selected_model = str(runtime.get("model") or "")
-    if not selected_api_key:
+    global _LLM_GATEWAY_AVAILABLE, _LLM_METADATA_AVAILABLE
+    if _LLM_GATEWAY_AVAILABLE is False or _LLM_METADATA_AVAILABLE is False:
         return
 
     if OpenAI is None:
+        return
+
+    try:
+        runtime = _get_llm_gateway_runtime()
+    except Exception:
+        return
+
+    selected_api_key = str(runtime.get("api_key") or "")
+    selected_base_url = str(runtime.get("base_url") or "")
+    selected_model = str(runtime.get("model") or "")
+    if not selected_api_key:
         return
 
     if _LLM_METADATA_AVAILABLE is None:
@@ -1851,628 +1453,137 @@ def _apply_llm_metadata_extraction_batch(
 
     full_config = _load_project_config()
     meta_rules = full_config.get("metadata_rules", {})
-    valid_intents = list(meta_rules.get("intents", {}).keys())
-    valid_config_modes = list(meta_rules.get("config_modes", {}).keys())
-    product_modules_map = meta_rules.get("product_modules", {})
-    valid_product_modules = list(product_modules_map.keys())
-    valid_protocol_types = list(meta_rules.get("protocol_types", {}).keys())
-    valid_command_prefixes = list(meta_rules.get("command_prefixes", {}).keys())
-    pm_descs = [f"{m} (kw: {', '.join(kws[:3])})" for m, kws in product_modules_map.items()]
-
-    # build per-chunk summaries
-    chunk_lines = []
-    for idx, (text, meta_item) in enumerate(items):
-        sec = str(meta_item.get("section_title") or "").strip()
-        par = str(meta_item.get("parent_section") or "").strip()
-        src = str(meta_item.get("source_file") or "")
-        snippet = text[:_BATCH_TEXT_LIMIT]
-        header = f"[CHUNK {idx}]"
-        if sec:
-            header += f" section={sec}"
-        if par:
-            header += f" parent={par}"
-        if src:
-            header += f" source={src}"
-        chunk_lines.append(f"{header}\n{snippet}")
-
-    chunks_block = "\n---\n".join(chunk_lines)
-
-    prompt = (
-        "You are a batch metadata extractor for technical documentation chunks.\n"
-        "Extract metadata for EACH chunk below. Return a JSON array with one object per chunk, in order.\n\n"
-        "For each chunk, extract:\n"
-        "- product_module (string, feature module like SLB/LLB/基础网络/安全)\n"
-        "- protocol_type (list of strings, e.g. ['HTTP','TCP'])\n"
-        "- intent (string)\n"
-        "- config_mode (string: cli/console/api)\n"
-        "- command_prefix (string, first command word if CLI)\n"
-        "- description (string, max 30 words)\n"
-        "- required_keywords (list of strings)\n"
-        "- section_title (string, no numbering)\n"
-        "- parent_section (string, no numbering)\n"
-        "- scenario_id (string)\n"
-        "- step_type (string)\n"
-        "- function_hierarchy (string, e.g. 'SLB > Health Check > HTTP')\n"
-        "- chunk_type (string: 'single_command' | 'command_list' | 'narrative'; "
-        "use 'command_list' for appendix/list pages documenting multiple commands, "
-        "'single_command' for pages documenting exactly one CLI command)\n"
-        "- override_commands (list of strings: bare command names that support "
-        "override/支持覆盖 as listed in the chunk; empty list [] otherwise)\n\n"
-        f"Valid Intents: {valid_intents}\n"
-        f"Valid Config Modes: {valid_config_modes}\n"
-        f"Valid Modules: {', '.join(pm_descs[:20])}\n"
-        f"Valid Protocols: {valid_protocol_types}\n"
-        f"Valid Prefixes: {valid_command_prefixes}\n\n"
-        "Return ONLY a JSON array of objects. No markdown. No explanation.\n\n"
-        f"{chunks_block}"
+    system_prompt = _build_batch_system_prompt(meta_rules)
+    client = OpenAI(
+        api_key=selected_api_key,
+        base_url=selected_base_url,
+        timeout=config.get("timeout", 120),
     )
 
-    try:
-        client = OpenAI(
-            api_key=selected_api_key,
-            base_url=selected_base_url,
-            timeout=config.get("timeout", 120),
-        )
-        response = _call_llm_with_retry_and_fallback(
-            client=client,
-            base_url=selected_base_url,
-            model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=_siliconflow_temperature(),
-            response_format={"type": "json_object"},
-            allow_fallback=False,
-            fallback_config=None,
-        )
-        content = response.choices[0].message.content or "[]"
-        if "```" in content:
-            match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-        # The API returns json_object which is a single object. We asked for an
-        # array, but some models wrap it: {"results": [...]} or just [...].
-        if json_repair:
-            parsed = json_repair.loads(content)
-        else:
-            parsed = json.loads(content)
+    def _process_sub_batch(sub_items: List[Tuple[str, Dict[str, object]]]) -> None:
+        chunk_lines = []
+        for idx, (text, meta_item) in enumerate(sub_items):
+            sec = str(meta_item.get("section_title") or "").strip()
+            par = str(meta_item.get("parent_section") or "").strip()
+            spath = str(meta_item.get("section_path") or "").strip()
+            src = str(meta_item.get("source_file") or "")
+            snippet = text[:_BATCH_TEXT_LIMIT]
+            header = f"[CHUNK {idx}]"
+            if spath:
+                header += f" path={spath}"
+            elif sec:
+                header += f" section={sec}"
+            if par and par != sec and not spath:
+                header += f" parent={par}"
+            if src:
+                header += f" source={src}"
+            chunk_lines.append(f"{header}\n{snippet}")
 
-        if isinstance(parsed, dict):
-            # Unwrap {"results": [...]} or {"chunks": [...]} etc.
-            for key in ("results", "chunks", "data", "items", "metadata"):
-                if key in parsed and isinstance(parsed[key], list):
-                    parsed = parsed[key]
-                    break
-            else:
-                # Single dict — wrap as one-element list
-                parsed = [parsed]
+        user_content = "\n---\n".join(chunk_lines)
 
-        if not isinstance(parsed, list):
-            raise ValueError(f"Expected list, got {type(parsed)}")
-
-    except Exception as e:
-        logger.warning("[batch-llm] Failed to parse batch response (%s); falling back to per-item", e)
-        # Fallback: call per-item extraction
-        for text, meta_item in items:
-            _apply_llm_metadata_extraction_internal(text, meta_item, config, allow_fallback=True)
-        return
-
-    # Merge results back
-    for idx, (text, meta_item) in enumerate(items):
-        if idx < len(parsed) and isinstance(parsed[idx], dict):
-            llm_meta = parsed[idx]
-        else:
-            # Missing entry — do per-item fallback for this chunk
-            _apply_llm_metadata_extraction_internal(text, meta_item, config, allow_fallback=True)
-            continue
-
-        # Apply same merge logic as per-item version
-        if llm_meta.get("intent"):
-            meta_item["intent"] = llm_meta["intent"]
-        if llm_meta.get("config_mode"):
-            meta_item["config_mode"] = llm_meta["config_mode"]
-        if llm_meta.get("required_keywords") and isinstance(llm_meta["required_keywords"], list):
-            meta_item["required_keywords"] = llm_meta["required_keywords"]
-        if llm_meta.get("product_module"):
-            pm = str(llm_meta["product_module"]).strip()
-            pm = {"未知": "unknown", "未知模块": "unknown"}.get(pm, pm)
-            meta_item["product_module"] = "unknown" if pm.lower() in ["unknown", "未知", ""] else pm
-        if llm_meta.get("protocol_type") and isinstance(llm_meta["protocol_type"], list):
-            meta_item["protocol_type"] = llm_meta["protocol_type"]
-        if llm_meta.get("command_prefix"):
-            meta_item["command_prefix"] = llm_meta["command_prefix"]
-        if llm_meta.get("description"):
-            meta_item["description"] = llm_meta["description"]
-        if llm_meta.get("section_title"):
-            meta_item["section_title"] = llm_meta["section_title"]
-        if llm_meta.get("parent_section"):
-            meta_item["parent_section"] = llm_meta["parent_section"]
-        if llm_meta.get("scenario_id"):
-            meta_item["scenario_id"] = llm_meta["scenario_id"]
-        if llm_meta.get("step_type"):
-            meta_item["step_type"] = llm_meta["step_type"]
-        if llm_meta.get("function_hierarchy"):
-            meta_item["function_hierarchy"] = llm_meta["function_hierarchy"]
-        if llm_meta.get("command_structure") and isinstance(llm_meta["command_structure"], dict):
-            meta_item["command_structure"] = llm_meta["command_structure"]
-        if llm_meta.get("chunk_type"):
-            meta_item["chunk_type"] = str(llm_meta["chunk_type"])
-        if llm_meta.get("override_commands") and isinstance(llm_meta["override_commands"], list):
-            meta_item["override_commands"] = llm_meta["override_commands"]
-
-
-def _select_provider_for_thread() -> Tuple[str, str, str]:
-    """
-    为当前线程选择提供商（已统一使用 LLM Gateway）
-    
-    Returns:
-        (api_key, base_url, model) 元组
-    """
-    thread_id = threading.get_ident()
-    
-    try:
-        # 统一使用 LLM Gateway
-        runtime = _get_siliconflow_runtime()
-        api_key = str(runtime.get("api_key") or "")
-        base_url = str(runtime.get("base_url") or "")
-        model = str(runtime.get("model") or "")
-        
-        # 诊断日志
-        if not api_key:
-            logger.warning("[gateway] api_key 未配置，请检查 LLM_GATEWAY_API_KEY 环境变量")
-        if not base_url:
-            logger.warning("[gateway] base_url 未配置，请检查 LLM_GATEWAY_BASE_URL 环境变量")
-        if not model:
-            logger.warning("[gateway] model 未配置，请检查 LLM_GATEWAY_CHAT_MODEL 环境变量")
-        
-        if api_key and base_url and model:
-            logger.debug("[gateway] 线程 %d 使用网关 (model=%s)", thread_id, model)
-            return api_key, base_url, model
-        else:
-            logger.error(
-                "[gateway] 网关配置不完整 (api_key=%s, base_url=%s, model=%s)",
-                "已配置" if api_key else "未配置",
-                "已配置" if base_url else "未配置",
-                "已配置" if model else "未配置"
-            )
-            return None, None, None
-    except Exception as e:
-        logger.error("[gateway] 线程 %d 获取配置时出错: %s", thread_id, e)
-        return None, None, None
-
-
-def _apply_llm_metadata_extraction_internal(
-    text: str, 
-    meta: Dict[str, object], 
-    config: Dict,
-    allow_fallback: bool = False  # 已禁用故障转移
-) -> None:
-    """
-    应用 LLM 进行元数据提取（已统一使用 LLM Gateway）
-    """
-    global _QIANFAN_AVAILABLE  # 保留变量名用于向后兼容
-    if _QIANFAN_AVAILABLE is False:
-        return
-
-    # 统一使用 LLM Gateway
-    selected_api_key, selected_base_url, selected_model = _select_provider_for_thread()
-    
-    if selected_api_key and selected_base_url and selected_model:
-        api_key = selected_api_key
-        base_url = selected_base_url
-        model = selected_model
-    else:
-        # 如果 _select_provider_for_thread 返回空，直接从网关配置获取
-        runtime = _get_siliconflow_runtime()
-        api_key = str(runtime.get("api_key") or "")
-        base_url = str(runtime.get("base_url") or "")
-        model = str(runtime.get("model") or "")
-        
-        # 如果仍然没有配置，记录警告
-        if not api_key:
-            logger.warning(
-                "LLM_GATEWAY_API_KEY 未配置。"
-                "请在 INAGENT/.env 文件中配置网关 API Key。"
-            )
-        if not base_url:
-            logger.warning(
-                "LLM_GATEWAY_BASE_URL 未配置。"
-                "请在 INAGENT/.env 文件中配置网关地址。"
-            )
-        if not model:
-            logger.warning(
-                "LLM_GATEWAY_CHAT_MODEL 未配置。"
-                "请在 INAGENT/.env 文件中配置网关模型名称。"
-            )
-
-    if not api_key:
-        logger.warning(
-            "LLM_GATEWAY_API_KEY 未配置，跳过 LLM 元数据提取。"
-        )
-        return
-
-    global _LLM_METADATA_AVAILABLE
-    if _LLM_METADATA_AVAILABLE is False:
-        return
-
-    try:
-        if OpenAI is None:
-            logger.warning("OpenAI client not available for LLM metadata extraction.")
-            return
-
-        if _LLM_METADATA_AVAILABLE is None:
-            if not base_url:
-                logger.warning("base_url not defined for metadata_extraction; skipping.")
-                _LLM_METADATA_AVAILABLE = False
-                return
-
-            # Simple check if the URL is reachable, no complex auth needed for this check
-            _LLM_METADATA_AVAILABLE = _ensure_urls_reachable(
-                [base_url],
-                attempts=NET_RETRY_ATTEMPTS,
-                delay=NET_RETRY_DELAY,
-                timeout=NET_TIMEOUT,
-                label="llm-metadata",
-                accept_http_error=True,
-            )
-            if not _LLM_METADATA_AVAILABLE:
-                logger.warning(f"LLM endpoint '{base_url}' not reachable; skipping.")
-                return
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=config.get("timeout", 60),
-        )
-        
-        # 统一使用硅基流动
-        provider_name = "硅基流动"
-        thread_id = threading.get_ident()
-        
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[LLM] 线程 %d 调用 metadata extraction (提供商=%s, model=%s, base_url=%s, text_length=%d)", 
-                        thread_id, provider_name, model, base_url, len(text))
-        else:
-            # INFO级别也记录提供商信息（但频率较低，每10次记录一次）
-            if not hasattr(_apply_llm_metadata_extraction_internal, '_provider_log_counter'):
-                _apply_llm_metadata_extraction_internal._provider_log_counter = {}
-            if provider_name not in _apply_llm_metadata_extraction_internal._provider_log_counter:
-                _apply_llm_metadata_extraction_internal._provider_log_counter[provider_name] = 0
-            _apply_llm_metadata_extraction_internal._provider_log_counter[provider_name] += 1
-            
-            # 每10次调用记录一次，或者提供商切换时记录
-            if (_apply_llm_metadata_extraction_internal._provider_log_counter[provider_name] % 10 == 1 or
-                not hasattr(_apply_llm_metadata_extraction_internal, '_last_logged_provider') or
-                _apply_llm_metadata_extraction_internal._last_logged_provider != provider_name):
-                logger.info("[LLM] 线程 %d 使用提供商: %s (model=%s, 已调用 %d 次)", 
-                           thread_id, provider_name, model,
-                           _apply_llm_metadata_extraction_internal._provider_log_counter[provider_name])
-                _apply_llm_metadata_extraction_internal._last_logged_provider = provider_name
-
-        full_config = _load_project_config()
-        meta_rules = full_config.get("metadata_rules", {})
-        valid_intents = list(meta_rules.get("intents", {}).keys())
-        valid_config_modes = list(meta_rules.get("config_modes", {}).keys())
-
-        # Get section context if available (for better product module inference)
-        # Extract section_title from clean_text if it looks like a section header
-        # Pattern: starts with numbers (e.g., "11.3.1. HTTP/TCP...")
-        section_title = str(meta.get("section_title") or "").strip()
-        parent_section = str(meta.get("parent_section") or "").strip()
-
-        if section_title:
-            section_title = _remove_section_number(section_title)
-        elif meta.get("clean_text"):
-            clean_text = str(meta.get("clean_text", "")).strip()
-            # Match section headers: "11.3.1. ..." or "11.3.1 ..." or "第11章 ..."
-            section_match = re.match(
-                r"^(?:\d+\.)+\s*[^\n]+|^第\d+[章节]\s+[^\n]+",
-                clean_text,
-            )
-            if section_match:
-                section_title_raw = section_match.group(0).strip()
-                section_title = _remove_section_number(section_title_raw)
-
-        if parent_section:
-            parent_section = _remove_section_number(parent_section)
-
-        # Get candidate lists from metadata_rules with descriptions
-        product_modules_map = meta_rules.get("product_modules", {})
-        # Build product module descriptions for better LLM understanding
-        product_modules_desc = []
-        for module, keywords in product_modules_map.items():
-            desc = f"{module} (keywords: {', '.join(keywords[:3])})"
-            product_modules_desc.append(desc)
-        valid_product_modules = list(product_modules_map.keys())
-        
-        protocol_types_map = meta_rules.get("protocol_types", {})
-        valid_protocol_types = list(protocol_types_map.keys())
-        
-        command_prefixes_map = meta_rules.get("command_prefixes", {})
-        valid_command_prefixes = list(command_prefixes_map.keys())
-
-        cli_format_rules = meta_rules.get("cli_format_rules", {})
-        format_rules_text = "\n".join([f"- {k}: {v}" for k, v in cli_format_rules.items()])
-
-        # Build enhanced prompt with better guidance and examples
-        # Check if text is likely generic (table of contents, copyright, etc.)
-        text_lower = text.lower()
-        is_generic = any(kw in text_lower for kw in ["目录", "copyright", "版权", "商标", "合格声明", "关于我们", "联系我们", "table of contents"])
-        
-        # Build product module descriptions with examples
-        product_modules_desc = []
-        for module, keywords in product_modules_map.items():
-            desc = f"{module} (keywords: {', '.join(keywords[:5])})"
-            product_modules_desc.append(desc)
-        
-        # Detect document type from source_file or content
-        source_file = meta.get("source_file", "")
-        is_cli_doc = "cli" in source_file.lower()
-        is_app_doc = "app" in source_file.lower()
-        
-        doc_type_hint = ""
-        if is_cli_doc:
-            doc_type_hint = "This is from a CLI command manual. Focus on command syntax, command prefixes, and CLI-specific patterns."
-        elif is_app_doc:
-            doc_type_hint = "This is from an application/configuration guide. Focus on configuration examples, descriptions, and conceptual explanations. Even without CLI syntax, extract product_module from section titles and content keywords."
-        else:
-            doc_type_hint = "This could be from either CLI or APP documentation. Apply appropriate extraction rules based on content."
-        
-        prompt = (
-            "You are analyzing a technical documentation chunk (CLI manual or Application/Configuration guide). "
-            "Extract comprehensive metadata that works for BOTH command syntax and configuration examples.\n\n"
-            f"{doc_type_hint}\n\n"
-            "CRITICAL RULES FOR METADATA EXTRACTION:\n\n"
-            "1. **product_module (功能模块)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - **完全基于内容分析**：根据数据块标题和内容自主识别功能模块，不要依赖预设列表\n"
-            "   - **识别策略**（按优先级）：\n"
-            "     a) 从章节标题识别：分析章节标题中的功能关键词\n"
-            "        - 示例：'HTTP协议的服务器负载均衡配置' -> 识别为'SLB'\n"
-            "        - 示例：'路由配置' -> 识别为'基础网络'\n"
-            "     b) 从命令前缀识别（CLI文档）：\n"
-            "        - 'slb'命令 -> 识别为'SLB'\n"
-            "        - 'llb'命令 -> 识别为'LLB'\n"
-            "        - 'interface'/'route'命令 -> 识别为'基础网络'\n"
-            "     c) 从内容关键词识别：\n"
-            "        - 'virtual service'/'backend service'/'健康检查' -> 'SLB'\n"
-            "        - 'interface'/'route'/'vlan'/'ip地址' -> '基础网络'\n"
-            "        - 'firewall'/'acl'/'ssl'/'证书' -> '安全'\n"
-            "   - **模块命名规则**：\n"
-            "     - 使用简洁的功能名称（如'SLB'、'LLB'、'基础网络'、'安全'等）\n"
-            "     - 如果无法确定具体模块，使用'基础网络'作为默认值\n"
-            "     - 只有真正通用的内容（目录、版权、关于我们、联系我们、商标/合格声明）才使用'unknown'\n"
-            "     - 不能仅因内容简短就选择'unknown'，应优先根据章节标题推断模块\n"
-            "   - **协议类型 vs 功能模块**：\n"
-            "     - HTTP、HTTPS、TCP、UDP等是协议类型，不是功能模块\n"
-            "     - 功能模块应该是功能性的（如SLB、LLB、基础网络、安全等）\n"
-            "     - 协议类型应该放在'protocol_type'字段中\n"
-            "   - **不能是章节编号**：不能将'11.3.1'等编号识别为product_module\n\n"
-            "2. **protocol_type (协议类型)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - 提取所有提到的协议类型（HTTP、HTTPS、TCP、UDP、ICMP、DNS、FTP、SIP、RTSP等）\n"
-            "   - 协议类型是约束条件，不是功能模块\n"
-            "   - 可以为空列表[]（如果内容不涉及协议）\n"
-            "   - 示例：'HTTP协议的服务器负载均衡配置' -> protocol_type: ['HTTP']\n\n"
-            "3. **step_type (步骤类型)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - 根据内容推断步骤类型（如health_checks、virtual_services、basic_config等）\n"
-            "   - 使用通用的步骤类型名称（不带模块前缀）\n"
-            "   - 后续会添加模块前缀（如slb_health_checks）\n\n"
-            "4. **section_title (章节标题，去除编号)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - 从clean_text中提取章节标题\n"
-            "   - **必须去除章节编号**（如'11.3.1. HTTP配置' -> 'HTTP配置'）\n"
-            "   - 只保留有意义的标题内容\n"
-            "   - 用于功能树节点的显示名称\n\n"
-            "5. **parent_section (父章节，去除编号)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - 从MinerU的parent_section提取或从层级关系推断\n"
-            "   - **必须去除章节编号**\n"
-            "   - 用于建立功能树的父子关系\n\n"
-            "6. **function_hierarchy (功能层级)** - MUST BE FIRST DETERMINED ⭐\n"
-            "   - 从section_title和parent_section构建\n"
-            "   - 格式：'SLB > Health Check > HTTP'（不包含编号）\n"
-            "   - 用于确定数据块在功能树中的位置\n"
-            "   - 用于判断是新功能还是已有功能的子功能\n\n"
-            "7. **数据块分类决策**\n"
-            "   - 如果function_hierarchy只有一层，且product_module是新出现的 -> 新功能模块\n"
-            "   - 如果function_hierarchy有多层 -> 已有功能的子功能\n"
-            "   - 如果有明确的parent_section -> 已有功能的子功能\n\n"
-            "Return JSON with these keys:\n"
-            "- 'intent' (string from Valid Intents)\n"
-            "- 'config_mode' (string from Valid Config Modes: 'cli' for CLI syntax, 'console' for GUI/WebUI descriptions, 'api' for API docs)\n"
-            "- 'product_module' (string, REQUIRED - 根据内容自主识别，不要依赖预设列表。必须是功能性的，不能是协议类型或章节编号)\n"
-            "- 'protocol_type' (list of strings, 所有提到的协议类型，空[]如果无协议)\n"
-            "- 'command_prefix' (string, first command word if CLI syntax present, '' otherwise)\n"
-            "- 'command_structure' (object, only if CLI syntax: {command_body, subcommands, required_params, optional_params, choice_groups}, {{}} otherwise)\n"
-            "- 'function_hierarchy' (string, 从section_title和parent_section构建，格式：'SLB > Health Check > HTTP'，不包含编号)\n"
-            "- 'description' (string, max 50 words)\n"
-            "- 'required_keywords' (list of strings, important technical terms)\n"
-            "- 'section_title' (string, 从clean_text提取，**必须去除编号**，如'11.3.1. HTTP配置' -> 'HTTP配置')\n"
-            "- 'parent_section' (string, 从parent_section metadata提取或推断，**必须去除编号**)\n"
-            "- 'scenario_id' (string, infer from section_title and content, e.g., 'HTTP_SLB_CONFIG', 'TCP_SLB_CONFIG', or 'unknown' if cannot infer)\n"
-            "- 'step_type' (string, infer from content, e.g., 'basic_config', 'health_checks', 'policies_and_algorithms', or '' if cannot infer)\n\n"
-            f"Valid Intents: {valid_intents}\n"
-            f"Valid Config Modes: {valid_config_modes}\n"
-            f"Valid Product Modules:\n" + "\n".join([f"  - {desc}" for desc in product_modules_desc]) + "\n"
-            f"Valid Protocol Types: {valid_protocol_types}\n"
-            f"Valid Command Prefixes: {valid_command_prefixes}\n"
-            f"CLI Format Rules (only applies if CLI syntax present):\n{format_rules_text}\n"
-            + (f"Section Title: {section_title}\n" if section_title else "")
-            + f"Existing Metadata: {json.dumps({k: v for k, v in meta.items() if k not in ['clean_text', 'page_content']}, ensure_ascii=False)}\n\n"
-            "CONCRETE EXAMPLES (BOTH CLI and APP docs):\n"
-            "1. CLI: 'slb real <ip> [port]' -> {product_module: 'SLB', command_prefix: 'slb', config_mode: 'cli', command_structure: {...}, section_title: '', scenario_id: 'unknown', step_type: ''}\n"
-            "2. APP: '11. 服务器负载均衡（SLB）' -> {product_module: 'SLB', config_mode: 'console', section_title: '11. 服务器负载均衡（SLB）', scenario_id: 'unknown', step_type: ''}\n"
-            "3. APP: 'HTTP health check configuration for virtual service' -> {product_module: 'SLB', protocol_type: ['HTTP'], config_mode: 'console', scenario_id: 'HTTP_SLB_CONFIG', step_type: 'health_check'}\n"
-            "4. APP: '配置示例：如何配置HTTP类型的SLB服务' -> {product_module: 'SLB', protocol_type: ['HTTP'], config_mode: 'console', scenario_id: 'HTTP_SLB_CONFIG', step_type: 'basic_config'}\n"
-            "5. CLI: 'interface eth0 ip <address>' -> {product_module: '基础网络', command_prefix: 'interface', config_mode: 'cli', section_title: '', scenario_id: 'unknown', step_type: ''}\n"
-            "6. APP: '11.3.1. HTTP/TCP/FTP/UDP/HTTPS/TCPS/DNS协议的负载均衡配置' -> {product_module: 'SLB', protocol_type: ['HTTP', 'TCP', 'FTP', 'UDP', 'HTTPS', 'TCPS', 'DNS'], config_mode: 'console', section_title: '11.3.1. HTTP/TCP/FTP/UDP/HTTPS/TCPS/DNS协议的负载均衡配置', scenario_id: 'HTTP_SLB_CONFIG', step_type: 'basic_config', function_hierarchy: 'SLB > HTTP > 基础配置'}\n"
-            "7. CLI: 'show slb virtual-service' -> {product_module: 'SLB', command_prefix: 'show', config_mode: 'cli', section_title: '', scenario_id: 'unknown', step_type: ''}\n"
-            "8. Generic: '目录' -> {product_module: 'unknown', section_title: '', scenario_id: 'unknown', step_type: ''}\n\n"
-            "IMPORTANT: Return ONLY valid JSON object. No Markdown, no code blocks, no explanations.\n"
-            f"Text to analyze:\n{text[:3000]}"
-        )
-
-        llm_start_time = time.perf_counter()
         try:
-            # 使用统一的API调用函数，包含限速、重试和故障转移
             response = _call_llm_with_retry_and_fallback(
                 client=client,
-                base_url=base_url,
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=_siliconflow_temperature(),  # 统一使用硅基流动温度配置
+                base_url=selected_base_url,
+                model=selected_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=_llm_temperature(),
                 response_format={"type": "json_object"},
-                allow_fallback=allow_fallback,
-                fallback_config={
-                    "text": text,
-                    "meta": meta,
-                    "config": config,
-                    "failed_base_url": base_url,
-                    "failed_model": model,
-                } if allow_fallback else None,
+                allow_fallback=False,
+                fallback_config=None,
             )
-        except Exception as e:
-            # 所有重试和故障转移都失败
-            logger.warning(f"LLM metadata extraction failed after retries and fallback: {e}")
-            return
-        llm_elapsed = time.perf_counter() - llm_start_time
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[LLM] metadata extraction 调用完成，耗时 %.2f 秒", llm_elapsed)
-
-        content = response.choices[0].message.content or "{}"
-
-        # Attempt to clean up markdown code blocks if present
-        if "```" in content:
-            # Try to extract content inside ```json ... ``` or ``` ... ```
-            match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-            else:
-                content = content.replace("```json", "").replace("```", "").strip()
-
-        try:
+            content = response.choices[0].message.content or "[]"
+            if "```" in content:
+                match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
+                if match:
+                    content = match.group(1).strip()
             if json_repair:
-                llm_meta = json_repair.loads(content)
+                parsed = json_repair.loads(content)
             else:
-                llm_meta = json.loads(content)
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM JSON response: {e}. Content: {content[:100]}...")
-            llm_meta = {}
+                parsed = json.loads(content)
 
-        if llm_meta.get("intent"):
-            meta["intent"] = llm_meta["intent"]
-        if llm_meta.get("config_mode"):
-            meta["config_mode"] = llm_meta["config_mode"]
-        if llm_meta.get("required_keywords") and isinstance(llm_meta["required_keywords"], list):
-            meta["required_keywords"] = llm_meta["required_keywords"]
-        # Validate and normalize product_module (信任LLM的判断，移除硬编码验证)
-        if llm_meta.get("product_module"):
-            pm_value = str(llm_meta["product_module"]).strip()
-            # Normalize common variations
-            pm_normalized = {
-                "未知": "unknown",
-                "未知模块": "unknown",
-                "关于我们": "unknown",
-                "联系我们": "unknown",
-            }.get(pm_value, pm_value)
-            
-            # 移除硬编码验证，信任LLM的判断
-            # 只做基本的规范化（处理空字符串、未知等）
-            if pm_normalized.lower() in ["unknown", "未知", ""]:
-                meta["product_module"] = "unknown"
-            else:
-                # 直接使用LLM识别的模块名称（不限制在valid_product_modules中）
-                meta["product_module"] = pm_normalized
-                # 记录日志以便后续分析
-                if pm_normalized not in valid_product_modules:
-                    logger.debug(f"LLM识别到新模块: '{pm_normalized}' (不在预设列表中，但已接受)")
-        else:
-            # LLM未返回，使用默认值
-            meta["product_module"] = "基础网络"
-        
-        # Validate protocol_type (must be from valid list)
-        if llm_meta.get("protocol_type") and isinstance(llm_meta["protocol_type"], list):
-            valid_protocols = [p for p in llm_meta["protocol_type"] if str(p).upper() in [pt.upper() for pt in valid_protocol_types]]
-            if valid_protocols:
-                meta["protocol_type"] = valid_protocols
-        
-        # Validate command_prefix (must be from valid list or empty)
-        if llm_meta.get("command_prefix"):
-            cp_value = str(llm_meta["command_prefix"]).strip().lower()
-            if cp_value in [cp.lower() for cp in valid_command_prefixes]:
-                meta["command_prefix"] = cp_value
-            # If not in list but looks like a command, try to extract first word
-            elif cp_value and any(cp in text.lower() for cp in valid_command_prefixes):
-                # Extract first matching command prefix from text
-                for cp in valid_command_prefixes:
-                    if cp.lower() in text.lower():
-                        meta["command_prefix"] = cp.lower()
+            if isinstance(parsed, dict):
+                for key in ("results", "chunks", "data", "items", "metadata"):
+                    if key in parsed and isinstance(parsed[key], list):
+                        parsed = parsed[key]
                         break
-        
-        if llm_meta.get("command_structure") and isinstance(llm_meta["command_structure"], dict):
-            meta["command_structure"] = llm_meta["command_structure"]
-        if llm_meta.get("function_hierarchy"):
-            meta["function_hierarchy"] = llm_meta["function_hierarchy"]
+                else:
+                    parsed = [parsed]
 
-        meta["description"] = llm_meta.get("description", "No description generated.")
-        
-        # Extract new fields: section_title, parent_section, scenario_id, step_type
-        # section_title: 检查LLM返回的值，如果为空字符串则使用fallback，并去除编号
-        llm_section_title = llm_meta.get("section_title", "").strip() if llm_meta.get("section_title") else ""
-        if llm_section_title:
-            # LLM应该已经去除编号，但为了安全再次去除
-            meta["section_title"] = _remove_section_number(llm_section_title)
-        elif section_title:  # Fallback to extracted section_title
-            # section_title已经在提取时去除了编号
-            meta["section_title"] = section_title
-        else:
-            meta["section_title"] = ""
-        
-        # parent_section: 检查LLM返回的值，如果为空字符串则使用fallback，并去除编号
-        llm_parent_section = llm_meta.get("parent_section", "").strip() if llm_meta.get("parent_section") else ""
-        if llm_parent_section:
-            # LLM应该已经去除编号，但为了安全再次去除
-            meta["parent_section"] = _remove_section_number(llm_parent_section)
-        elif parent_section:  # Fallback to MinerU's parent_section (已在前面去除编号)
-            meta["parent_section"] = parent_section
-        else:
-            meta["parent_section"] = ""
-        
-        # function_hierarchy: 确保不包含编号
-        if llm_meta.get("function_hierarchy"):
-            fh_value = str(llm_meta["function_hierarchy"]).strip()
-            # 去除function_hierarchy中每个层级部分的编号
-            if fh_value:
-                # 分割层级，去除每个部分的编号，然后重新组合
-                parts = [part.strip() for part in fh_value.split(">")]
-                cleaned_parts = [_remove_section_number(part) for part in parts]
-                meta["function_hierarchy"] = " > ".join(cleaned_parts)
-            else:
-                meta["function_hierarchy"] = ""
-        else:
-            meta["function_hierarchy"] = ""
-        
-        # Extract scenario_id (validate against function_index if available)
-        # 即使LLM返回"unknown"或空字符串，也要设置，以便增强阶段可以处理
-        if llm_meta.get("scenario_id"):
-            scenario_id_value = str(llm_meta["scenario_id"]).strip()
-            # Normalize: if "unknown", keep it; otherwise validate format
-            if scenario_id_value.lower() == "unknown" or scenario_id_value == "":
-                meta["scenario_id"] = "unknown"
-            else:
-                # Accept scenario_id from LLM (will be validated/enhanced in _enhance_metadata_with_function_index)
-                meta["scenario_id"] = scenario_id_value
-        else:
-            # LLM没有返回scenario_id，设置为"unknown"以便增强阶段可以处理
-            meta["scenario_id"] = "unknown"
-        
-        # Extract step_type (validate against function_index if available)
-        if llm_meta.get("step_type"):
-            step_type_value = str(llm_meta["step_type"]).strip()
-            if step_type_value:
-                meta["step_type"] = step_type_value
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected list, got {type(parsed)}")
 
+        except Exception as e:
+            logger.warning("[batch-llm] sub-batch parse failed (%s); skipping merge", e)
+            return
+
+        for idx, (_, meta_item) in enumerate(sub_items):
+            if idx < len(parsed) and isinstance(parsed[idx], dict):
+                _merge_llm_meta(parsed[idx], meta_item, meta_rules)
+
+    sub_batch: List[Tuple[str, Dict[str, object]]] = []
+    token_count = 0
+    for text, meta_item in items:
+        item_tokens = len(text[:_BATCH_TEXT_LIMIT]) // int(_CHARS_PER_TOKEN)
+        if sub_batch and (token_count + item_tokens > _BATCH_TOKEN_BUDGET or len(sub_batch) >= _BATCH_LLM_SIZE):
+            _process_sub_batch(sub_batch)
+            sub_batch = []
+            token_count = 0
+        sub_batch.append((text, meta_item))
+        token_count += item_tokens
+    if sub_batch:
+        _process_sub_batch(sub_batch)
+
+
+def _run_knowledge_linking(
+    knowledge_blocks: List[Dict[str, Any]],
+    source_file: Path,
+) -> Tuple[List[Dict[str, Any]], dict]:
+    """农民匹配 + 农场主决策：将知识块挂载到命令树。
+
+    如果 CLI graph 不可用，跳过链接（所有块在 merge 时由 validator 处理）。
+    """
+    try:
+        from INAGENT.data_tools.knowledge_linker import link_blocks
+        from INAGENT.rag.cli_graph_store import CLIGraphStore
+
+        cli_graph = CLIGraphStore()
+        cli_graph._ensure_loaded()
+
+        manifest_hints: Dict[str, str] = {}
+        try:
+            manifest_path = Path(__file__).resolve().parent.parent / "knowledge_base" / "input" / "manifest.json"
+            if manifest_path.exists():
+                import json as _json
+                _m = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                for fname, entry in _m.items():
+                    if isinstance(entry, dict) and entry.get("tree_level_hint"):
+                        stem = Path(fname).stem.lower()
+                        manifest_hints[stem] = entry["tree_level_hint"]
+        except Exception:
+            pass
+
+        blocks, stats = link_blocks(
+            knowledge_blocks,
+            cli_graph,
+            manifest_hints=manifest_hints,
+            enable_owner=True,
+        )
+        logger.info(
+            "[link] %s: farmer=%d, owner=%d, escalated=%d / total=%d",
+            source_file.name,
+            stats.get("farmer_matched", 0),
+            stats.get("owner_decided", 0),
+            stats.get("escalated", 0),
+            stats.get("total", 0),
+        )
+        return blocks, stats
     except Exception as e:
-        # 错误已在上面处理，这里只是兜底
-        if allow_fallback:
-            logger.warning(f"LLM metadata extraction failed: {e}")
-        else:
-            raise
+        logger.warning("[link] 知识链接跳过 (%s): %s", source_file.name, e)
+        return knowledge_blocks, {"total": len(knowledge_blocks), "skipped": True, "error": str(e)}
 
 
 def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]) -> None:
@@ -2578,13 +1689,10 @@ def _extract_chunk_metadata(
     text: str, base_meta: Optional[Dict[str, Any]] = None
 ) -> Dict[str, object]:
     config = _load_project_config()
-    meta_rules = config.get("metadata_rules", {})
     llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
 
     clean_text = _clean_chunk_text(text)
     meta: Dict[str, object] = {"clean_text": clean_text}
-    section_title = ""
-    parent_section = ""
     if base_meta:
         section_title = str(base_meta.get("section_title") or "").strip()
         parent_section = str(base_meta.get("parent_section") or "").strip()
@@ -2595,48 +1703,8 @@ def _extract_chunk_metadata(
         section_path = base_meta.get("section_path")
         if section_path:
             meta["section_path"] = section_path
-    lower_text = clean_text.lower()
-    lower_section = f"{section_title} {parent_section}".lower()
 
-    # Rule-based Intent Extraction (Externalized in mineru.json)
-    intents_map = meta_rules.get("intents", {})
-    for intent, keywords in intents_map.items():
-        if any(k.lower() in lower_text for k in keywords):
-            meta["intent"] = intent
-            break
-
-    # Rule-based Product Module Extraction (Externalized in mineru.json)
-    product_modules_map = _merge_product_modules_map(
-        meta_rules.get("product_modules", {})
-    )
-    for module, keywords in product_modules_map.items():
-        if any(k.lower() in lower_text for k in keywords) or any(
-            k.lower() in lower_section for k in keywords
-        ):
-            meta["product_module"] = module
-            break
-
-    # Rule-based Protocol Type Extraction (Externalized in mineru.json)
-    protocol_map = meta_rules.get("protocol_types", {})
-    found_protocols = _match_protocols_word_boundary(protocol_map, lower_text)
-    if found_protocols:
-        meta["protocol_type"] = found_protocols
-
-    # Rule-based Command Prefix Extraction (Externalized in mineru.json)
-    command_prefixes = meta_rules.get("command_prefixes", {})
-    for prefix, keywords in command_prefixes.items():
-        if any(k.lower() in lower_text for k in keywords):
-            meta["command_prefix"] = prefix
-            break
-
-    # Rule-based Config Mode (Externalized in mineru.json)
-    modes_map = meta_rules.get("config_modes", {})
-    for mode, keywords in modes_map.items():
-        if any(k.lower() in lower_text for k in keywords):
-            meta["config_mode"] = mode
-            break
-
-    # LLM Enhancement (Optional)
+    # LLM Enhancement (Optional, disabled by default)
     if llm_config.get("enable", False):
         _apply_llm_metadata_extraction(clean_text, meta, llm_config)
 
@@ -2978,7 +2046,7 @@ def _classify_frontmatter_pages(
     previews: Dict[int, str], frontmatter_cfg: Dict
 ) -> List[int]:
     """
-    使用 LLM 分类前置页（已统一使用硅基流动）
+    使用 LLM 分类前置页
     """
     if not previews:
         return []
@@ -2989,22 +2057,13 @@ def _classify_frontmatter_pages(
         )
         return []
 
-    # 统一使用硅基流动
-    runtime = _get_siliconflow_runtime()
+    runtime = _get_llm_gateway_runtime()
     api_key = str(runtime.get("api_key") or "")
     base_url = str(runtime.get("base_url") or "")
     model = str(runtime.get("model") or "")
-    
-    # 如果没有配置，记录警告
-    if not api_key:
-        logger.warning("LLM_GATEWAY_API_KEY 未配置，跳过 frontmatter filter")
-    if not base_url:
-        logger.warning("LLM_GATEWAY_BASE_URL 未配置，跳过 frontmatter filter")
-    if not model:
-        logger.warning("LLM_GATEWAY_CHAT_MODEL 未配置，跳过 frontmatter filter")
 
     if not api_key:
-        logger.warning("硅基流动 api_key 未配置，跳过 frontmatter filter")
+        logger.warning("LLM_GATEWAY_API_KEY 未配置，跳过 frontmatter filter")
         return []
 
     # Simple connectivity check (lenient for 4xx HTTP status).
@@ -3046,17 +2105,14 @@ def _classify_frontmatter_pages(
                         base_url, model, len(previews))
         llm_start_time = time.perf_counter()
         try:
-            # 使用统一的API调用函数，包含限速和重试
-            # frontmatter filter 不是关键功能，失败时返回空列表即可
             response = _call_llm_with_retry_and_fallback(
                 client=client,
                 base_url=base_url,
                 model=model,
                 messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
-                temperature=_siliconflow_temperature(),  # 统一使用硅基流动温度
+                temperature=_llm_temperature(),
                 stream=frontmatter_cfg.get("stream", False),
-                allow_fallback=False,  # frontmatter filter 不需要故障转移
-                max_retries=3,  # 减少重试次数（非关键功能）
+                max_retries=3,
             )
         except Exception as e:
             # frontmatter filter 失败不影响主流程，记录警告即可
@@ -3158,7 +2214,7 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
         # Check docs: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#clientopenai-hybrid-http-client
         extra_args = ["-b", "hybrid-http-client", "-u", DOCKER_VLLM_URL]
         logger.info("[mineru] Using Docker vLLM backend: %s", DOCKER_VLLM_URL)
-    urls_to_check = [HUGGINGFACE_API_CHECK]
+    urls_to_check = []
     if USE_DOCKER_VLLM:
         urls_to_check.append(_build_models_url(DOCKER_VLLM_URL))
 
@@ -3241,23 +2297,8 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Classify the PDF document using filename patterns + content preview
-    from INAGENT.data_tools.document_classifier import classify_document, infer_product_module_from_path
-    _content_preview_for_classify = ""
-    if isinstance(blocks, list):
-        _preview_texts = []
-        for _blk in blocks[:10]:
-            if isinstance(_blk, dict):
-                _preview_texts.append(_extract_text_from_block(_blk))
-        _content_preview_for_classify = "\n".join(_preview_texts)[:2000]
-    _pdf_category, _pdf_category_confidence = classify_document(
-        pdf, _content_preview_for_classify
-    )
-    _pdf_product_module = infer_product_module_from_path(pdf)
-    logger.info(
-        "[mineru] 文档分类: %s -> %s (confidence=%.2f, module=%s)",
-        pdf.name, _pdf_category, _pdf_category_confidence, _pdf_product_module,
-    )
+    # 文档分类已移至 knowledge_linker（农民匹配+农场主决策）
+    # 此处不再调用 classify_document
 
     knowledge_blocks: List[Dict[str, object]] = []
     if isinstance(blocks, list):
@@ -3291,17 +2332,14 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                 "section_title": section_context.get("section_title", ""),
                 "parent_section": section_context.get("parent_section", ""),
                 "section_path": section_context.get("section_path", ""),
-                "document_category": _pdf_category,
-                "product_module": _pdf_product_module or "unknown",
+                "product_module": "unknown",
             }
             if img_path:
                 base_meta["img_path"] = img_path
             valid_items.append((text, base_meta))
 
         # 2. 并行处理：使用线程池并发调用 _extract_chunk_metadata
-        # 如果启用双提供商负载均衡，增加线程数以充分利用两个提供商
-        # 默认线程数：单提供商16，双提供商32
-        default_workers = 32 if ENABLE_DUAL_PROVIDER_LOAD_BALANCE else 16
+        default_workers = 16
         max_workers = cfg_int(
             "auto_convert.parallel.max_workers",
             default_workers,
@@ -3415,14 +2453,10 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
 
                 return [meta_out for _, meta_out in rule_results]
 
-            provider_info = ""
-            if ENABLE_DUAL_PROVIDER_LOAD_BALANCE:
-                provider_info = " (双提供商负载均衡: 百度千帆 + 硅基流动)"
             logger.info(
-                "[parallel] 开始提取 metadata: %d 个块 (线程数=%d%s)...",
+                "[parallel] 开始提取 metadata: %d 个块 (线程数=%d)...",
                 total,
                 max_workers,
-                provider_info,
             )
             
             # Run the batch processing in a separate thread to unblock the event loop
@@ -3477,7 +2511,10 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     except Exception as e:
         logger.warning("[auto-identify] 自动识别失败: %s", e)
         document_metadata = {}
-    
+
+    # 农民匹配 + 农场主决策：将知识块挂载到命令树
+    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
+
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -3492,10 +2529,8 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
         "frontmatter_pages": frontmatter_pages,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
-        "document_category": _pdf_category,
-        "document_category_confidence": _pdf_category_confidence,
-        "product_module": _pdf_product_module,
-        "document_metadata": document_metadata,  # 保存文档识别结果
+        "link_stats": link_stats,
+        "document_metadata": document_metadata,
     }
     cache_path.write_text(
         json.dumps(cache_payload, ensure_ascii=False, indent=2),
@@ -3675,7 +2710,7 @@ def _cleanup_orphan_files(pdfs: List[Path], office_files: Optional[List[Path]] =
         valid_stems |= {p.stem for p in office_files}
     # Keep merged/derived knowledge base files even though they do not
     # correspond to a single PDF stem.
-    reserved_reference_files = {"knowledge_base.json"}
+    reserved_reference_files = {"knowledge_base.json", "commandtree_base.json"}
     
     # 1. Cleanup reference/*.json
     if REFERENCE_DIR.exists():
@@ -3796,7 +2831,8 @@ async def main() -> None:
                     "[vllm] 推理探针未通过(可能是冷启动/多模态模型限制)，但 /v1/models 可达；继续使用该地址。"
                 )
             DOCKER_VLLM_URL = candidate
-            logger.info("[vllm] 使用可用地址: %s", DOCKER_VLLM_URL)
+            os.environ["MINERU_VLM_MODEL"] = model_name
+            logger.info("[vllm] 使用可用地址: %s, 模型: %s", DOCKER_VLLM_URL, model_name)
             ok = True
             break
         if not ok:
@@ -3810,29 +2846,21 @@ async def main() -> None:
             USE_DOCKER_VLLM = False
 
     # LLM Gateway preflight: probe real /chat/completions
-    global _QIANFAN_AVAILABLE
-    if _QIANFAN_AVAILABLE is None:
-        runtime = _get_siliconflow_runtime()
+    global _LLM_GATEWAY_AVAILABLE
+    if _LLM_GATEWAY_AVAILABLE is None:
+        runtime = _get_llm_gateway_runtime()
         base_url = str(runtime.get("base_url") or "")
         model = str(runtime.get("model") or "")
 
-        # 如果可用 vLLM，优先使用其真实模型名
-        if USE_DOCKER_VLLM:
-            detected_model = _fetch_vllm_model_name(
-                DOCKER_VLLM_URL, timeout=VLLM_MODELS_TIMEOUT
-            )
-            if detected_model and not cfg_str("llm.gateway.chat_model", "", env="LLM_GATEWAY_CHAT_MODEL").strip():
-                os.environ["LLM_GATEWAY_CHAT_MODEL"] = detected_model
-                model = detected_model
-                logger.info("[gateway] 检测到 vLLM 模型: %s", detected_model)
+        # MINERU_VLM_MODEL 已在 vLLM 探测阶段写入 os.environ，此处无需重复探测
 
-        ok, detail = _probe_siliconflow_chat(
+        ok, detail = _probe_llm_gateway_chat(
             base_url=base_url,
             api_key=str(runtime.get("api_key") or ""),
             model=model,
             timeout=float(runtime.get("timeout") or NET_TIMEOUT),
         )
-        _QIANFAN_AVAILABLE = ok
+        _LLM_GATEWAY_AVAILABLE = ok
         if not ok:
             logger.warning(
                 "[gateway] 预检失败 (base_url=%s, model=%s): %s",

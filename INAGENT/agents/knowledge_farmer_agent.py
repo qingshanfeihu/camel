@@ -46,7 +46,7 @@ from camel.models import BaseModelBackend
 
 from INAGENT.agents.knowledge_procurement_agent import ChunkDecision
 from INAGENT.rag.knowledge_schema import FillRequest, SchemaGapEntry
-from INAGENT.utils.env_utils import load_inagent_env
+from INAGENT.utils.env_utils import load_inagent_env, get_product_name
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +313,20 @@ class KnowledgeFarmerAgent:
 
             # Tree node matching (ac_meta carries section_title / LLM tree hints)
             tree_node_id = self._match_tree_node(content, meta, ac_meta)
+            ambiguous_candidates = list(getattr(self, "_last_ambiguous_candidates", []))
             if tree_node_id:
                 meta["tree_node_id"] = tree_node_id
                 enriched.append("tree_node_id")
+                index = self._load_kb_index()
+                if index:
+                    keys_for_node = [k for k, n in index.items() if n == tree_node_id]
+                    if keys_for_node:
+                        best_cp = max(keys_for_node, key=len)
+                        cur_cp = str(meta.get("command_prefix") or "")
+                        if cur_cp.lower() not in {k.lower() for k in keys_for_node}:
+                            meta["command_prefix"] = best_cp
+                            if "command_prefix" not in enriched:
+                                enriched.append("command_prefix")
 
             # Cross-reference detection
             cross_refs = self._detect_cross_refs(content, meta.get("command_prefix"))
@@ -350,7 +361,20 @@ class KnowledgeFarmerAgent:
                 cmd_prefix = (
                     ac_meta.get("command_prefix") or meta.get("command_prefix", "")
                 )
-                if cmd_prefix:
+                if ambiguous_candidates:
+                    # 歧义匹配：多个候选节点，交给农场主裁决
+                    gaps.append(SchemaGapEntry(
+                        gap_type="ambiguous_match",
+                        entity_title=str(cmd_prefix or "?"),
+                        field_name="tree_node_id",
+                        entity_description=str(ac_meta.get("description", "")),
+                        evidence=content[:200],
+                        source_file=cd.source_file,
+                        timestamp=datetime.now().isoformat(),
+                        chunk_content=content[:500],
+                        ambiguous_candidates=ambiguous_candidates,
+                    ))
+                elif cmd_prefix:
                     gaps.append(SchemaGapEntry(
                         gap_type="overflow",
                         entity_title=str(cmd_prefix),
@@ -386,6 +410,358 @@ class KnowledgeFarmerAgent:
             ))
 
         return results
+
+    def enrich_scenario_nodes(
+        self,
+        *,
+        force_reenrich: bool = False,
+        refresh_hybrid_vectors: bool = False,
+        hybrid_vectors_force: bool = True,
+    ) -> Dict[str, Any]:
+        """为农场主创建的枝干骨架节点填充内容（农民加肉）。
+
+        读取 scenarios_scaffold.json（由农场主 cultivate_scenarios 生成），
+        对每个 _scaffold=True 的骨架节点，用 LLM 生成完整的场景描述，
+        写入 scenarios_synthesized.json（document_category='scenario/guide'）。
+
+        Args:
+            force_reenrich: 是否重新处理已有 synthesized 条目（默认跳过）。
+            refresh_hybrid_vectors: 写入后是否刷新 Qdrant/BM25。
+            hybrid_vectors_force: 刷新时是否强制重嵌。
+
+        Returns:
+            {"total": int, "enriched": int, "skipped": int, "errors": List[str]}
+        """
+        _ref_dir = Path(__file__).resolve().parent.parent / "knowledge_base" / "reference"
+        _scaffold_path = _ref_dir / "scenarios_scaffold.json"
+        _out_path = _ref_dir / "scenarios_synthesized.json"
+
+        summary: Dict[str, Any] = {
+            "total": 0,
+            "enriched": 0,
+            "skipped": 0,
+            "errors": [],
+        }
+
+        if not _scaffold_path.exists():
+            summary["errors"].append(
+                f"骨架文件不存在，请先运行农场主 cultivate_scenarios(): {_scaffold_path}"
+            )
+            return summary
+
+        scaffolds: List[Dict] = json.loads(_scaffold_path.read_text(encoding="utf-8"))
+        scaffolds = [s for s in scaffolds if isinstance(s, dict)]
+        summary["total"] = len(scaffolds)
+
+        existing_synth: List[Dict] = []
+        if _out_path.exists():
+            try:
+                existing_synth = json.loads(_out_path.read_text(encoding="utf-8"))
+                if not isinstance(existing_synth, list):
+                    existing_synth = []
+            except Exception:
+                existing_synth = []
+
+        existing_fids: set = {
+            e.get("metadata", {}).get("tree_node_id", "") for e in existing_synth
+        }
+        existing_fids.discard("")
+
+        new_docs: List[Dict] = []
+
+        for scaffold in scaffolds:
+            m = scaffold.get("metadata", {})
+            fid = m.get("tree_node_id", "")
+            if not fid:
+                continue
+            if not force_reenrich and fid in existing_fids:
+                summary["skipped"] += 1
+                continue
+
+            logger.info("enrich_scenario_nodes: 填充场景 %s", fid)
+            try:
+                enriched_doc = self._enrich_one_scaffold(scaffold, fid)
+                new_docs.append(enriched_doc)
+                summary["enriched"] += 1
+            except Exception as exc:
+                msg = f"填充失败 {fid}: {exc}"
+                logger.warning(msg)
+                summary["errors"].append(msg)
+
+        if new_docs:
+            if force_reenrich:
+                new_fids = {d["metadata"]["tree_node_id"] for d in new_docs}
+                merged = [e for e in existing_synth if e.get("metadata", {}).get("tree_node_id", "") not in new_fids]
+            else:
+                merged = list(existing_synth)
+            merged.extend(new_docs)
+            _out_path.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(
+                "enrich_scenario_nodes: 写入 %s (%d 条，新增 %d)",
+                _out_path.name, len(merged), len(new_docs),
+            )
+
+        if refresh_hybrid_vectors and (new_docs or summary["skipped"] > 0):
+            try:
+                from INAGENT.data_tools.merge_knowledge_base import merge_knowledge_base
+                merge_knowledge_base(_ref_dir, _ref_dir / "knowledge_base.json")
+            except Exception as exc:
+                summary["errors"].append(f"merge_knowledge_base 失败: {exc}")
+            try:
+                from INAGENT.workflow_config_generator import refresh_hybrid_vector_index
+                refresh_hybrid_vector_index(force=hybrid_vectors_force)
+            except Exception as exc:
+                summary["errors"].append(f"向量索引刷新失败: {exc}")
+
+        logger.info(
+            "enrich_scenario_nodes 完成: total=%d enriched=%d skipped=%d errors=%d",
+            summary["total"], summary["enriched"], summary["skipped"], len(summary["errors"]),
+        )
+        return summary
+
+    def _enrich_one_scaffold(self, scaffold: Dict, feature_id: str) -> Dict:
+        """对单个骨架节点用 LLM 加肉，返回 scenario/guide 或 module/guide 条目。"""
+        m = scaffold.get("metadata", {})
+        fh = m.get("function_hierarchy", "")
+        module = m.get("product_module", "")
+        node_level = m.get("_node_level", "branch")
+        section_title = m.get("section_title", feature_id.replace("_", " ") + " 功能配置指南")
+        cmd_prefixes = [c.strip() for c in m.get("scenario_command_prefixes", "").split("|") if c.strip()]
+        node_ids = m.get("scenario_commands", "")
+        product = get_product_name()
+
+        # 农场主写的 HyDE 规格作为农民的写作说明
+        hyde_query = m.get("_hyde_query", "")
+        hyde_hints = m.get("_hyde_coverage_hints", "")
+        required_fields = m.get("_required_fields", "")
+
+        page_content = self._llm_enrich_scenario(
+            feature_id=feature_id,
+            cmd_prefixes=cmd_prefixes,
+            function_hierarchy=fh,
+            product=product,
+            hyde_query=hyde_query,
+            hyde_hints=hyde_hints,
+            required_fields=required_fields,
+            node_level=node_level,
+        )
+
+        out_category = {
+            "root": "product/guide",
+            "trunk": "module/guide",
+        }.get(node_level, "scenario/guide")
+
+        return {
+            "page_content": page_content,
+            "metadata": {
+                "document_category": out_category,
+                "tree_node_id": feature_id,
+                "_tree_feature_id": feature_id,
+                "_node_level": node_level,
+                "section_title": section_title,
+                "function_hierarchy": fh,
+                "product_module": module,
+                "source_file": "synthesized",
+                "word_count": str(len(page_content)),
+                "scenario_commands": node_ids,
+                "_synthesized": "True",
+            },
+        }
+
+    def _llm_enrich_scenario(
+        self,
+        feature_id: str,
+        cmd_prefixes: List[str],
+        function_hierarchy: str,
+        product: str,
+        *,
+        hyde_query: str = "",
+        hyde_hints: str = "",
+        required_fields: str = "",
+        node_level: str = "branch",
+    ) -> str:
+        """调用农民自己的 ChatAgent 填充场景文档内容。
+
+        如果农场主提供了 HyDE 规格（hyde_query + hyde_hints），
+        则以此作为写作方向约束，确保内容可被目标查询命中。
+        """
+        if node_level == "root":
+            return self._llm_enrich_root(feature_id=feature_id, product=product,
+                                           hyde_query=hyde_query, hyde_hints=hyde_hints,
+                                           required_fields=required_fields)
+        if node_level == "trunk":
+            return self._llm_enrich_trunk(feature_id=feature_id, scaffold_meta=m,
+                                            product=product, hyde_query=hyde_query,
+                                            hyde_hints=hyde_hints, required_fields=required_fields)
+
+        if not cmd_prefixes:
+            return f"[{feature_id}] 功能场景，命令信息不完整。"
+
+        fid_label = feature_id.replace("_", " ")
+
+        kb_path = Path(__file__).resolve().parent.parent / "knowledge_base" / "reference" / "knowledge_base.json"
+        cmd_descs: List[str] = []
+        if kb_path.exists():
+            try:
+                kb = json.loads(kb_path.read_text(encoding="utf-8"))
+                cp_to_desc: Dict[str, str] = {}
+                for item in kb:
+                    meta = item.get("metadata", {})
+                    cp = str(meta.get("command_prefix", "")).lower()
+                    desc = meta.get("_enriched_description", "") or item.get("page_content", "")[:80]
+                    if cp and desc and cp not in cp_to_desc:
+                        cp_to_desc[cp] = desc
+                for cp in cmd_prefixes:
+                    desc = cp_to_desc.get(cp.lower(), "")
+                    cmd_descs.append(f"  - `{cp}`: {desc}" if desc else f"  - `{cp}`")
+            except Exception:
+                cmd_descs = [f"  - `{cp}`" for cp in cmd_prefixes]
+        else:
+            cmd_descs = [f"  - `{cp}`" for cp in cmd_prefixes]
+
+        cmds_text = "\n".join(cmd_descs)
+
+        # 农场主 HyDE 规格插入（如有）
+        hyde_section = ""
+        if hyde_query:
+            hyde_section += f"\n农场主规格（必须覆盖）:\n  目标查询: {hyde_query}"
+        if hyde_hints:
+            hyde_section += f"\n  内容要点: {hyde_hints}"
+        if required_fields:
+            hyde_section += f"\n  必须包含的字段: {required_fields}"
+
+        prompt = (
+            f"你是 {product} 网络设备知识库的文档撰写专家。\n"
+            f"请为以下功能组生成一份完整的场景配置指南，供 RAG 检索系统使用。\n\n"
+            f"功能 ID: {feature_id}\n"
+            f"功能层级: {function_hierarchy}\n"
+            f"包含的 CLI 命令（共 {len(cmd_prefixes)} 条）:\n{cmds_text}"
+            f"{hyde_section}\n\n"
+            f"要求：\n"
+            f"1. 用中文撰写，面向网络工程师\n"
+            f"2. 包含：功能简介、适用场景、配置步骤（按命令使用顺序）、注意事项\n"
+            f"3. 在配置步骤中自然地引用每条命令的作用\n"
+            f"4. 若有「目标查询」，确保文档内容能回答该查询\n"
+            f"5. 直接输出纯文本，不要代码块标记或 JSON\n"
+            f"6. 长度 200-500 字"
+        )
+
+        if self._chat_agent is not None:
+            try:
+                user_msg = BaseMessage.make_user_message(role_name="user", content=prompt)
+                resp = self._chat_agent.step(user_msg)
+                content = resp.msgs[0].content if resp.msgs else ""
+                if content.strip():
+                    return content.strip()
+            except Exception as exc:
+                logger.warning("LLM 填充失败 (%s): %s，回退内联模板", feature_id, exc)
+
+        fh_label = function_hierarchy or fid_label
+        lines = [
+            f"【{fid_label} 功能配置指南】",
+            "",
+            f"产品：{product}  功能层级：{fh_label}",
+            "",
+            f"本功能由以下 {len(cmd_prefixes)} 条命令组成：",
+        ]
+        for i, cp in enumerate(cmd_prefixes, 1):
+            lines.append(f"{i}. {cp}")
+        lines += [
+            "",
+            "配置时请按上述顺序执行，配置完成后使用 show 命令验证。",
+        ]
+        return "\n".join(lines)
+
+    def _llm_enrich_trunk(
+        self,
+        feature_id: str,
+        scaffold_meta: Dict,
+        product: str,
+        *,
+        hyde_query: str = "",
+        hyde_hints: str = "",
+        required_fields: str = "",
+    ) -> str:
+        """为 trunk(模块) 层骨架生成概述文档。"""
+        trunk_label = scaffold_meta.get("trunk_label", feature_id)
+        child_fids = [f.strip() for f in scaffold_meta.get("child_feature_ids", "").split(",") if f.strip()]
+
+        hyde_section = ""
+        if hyde_query:
+            hyde_section += f"\n目标查询: {hyde_query}"
+        if hyde_hints:
+            hyde_section += f"\n内容要点: {hyde_hints}"
+
+        prompt = (
+            f"你是 {product} 知识库文档专家。\n"
+            f"请为以下功能模块生成概述文档，供 RAG 检索系统使用。\n\n"
+            f"模块名: {trunk_label}\n"
+            f"子功能: {', '.join(child_fids[:10])}\n"
+            f"{hyde_section}\n\n"
+            f"要求：\n"
+            f"1. 用中文，面向网络工程师\n"
+            f"2. 包含：模块简介、子功能目录及适用场景、典型使用顺序\n"
+            f"3. 若有「目标查询」，确保文档能回答它\n"
+            f"4. 直接输出纯文本，150-350 字"
+        )
+
+        if self._chat_agent is not None:
+            try:
+                user_msg = BaseMessage.make_user_message(role_name="user", content=prompt)
+                resp = self._chat_agent.step(user_msg)
+                content = resp.msgs[0].content if resp.msgs else ""
+                if content.strip():
+                    return content.strip()
+            except Exception as exc:
+                logger.warning("LLM trunk 填充失败 (%s): %s，回退模板", feature_id, exc)
+
+        lines = [f"【{trunk_label} 模块概述】", "", f"产品：{product}", ""]
+        if child_fids:
+            lines += ["子功能列表："] + [f"- {f}" for f in child_fids] + [""]
+        lines.append("请参阅各子功能文档获取详细配置步骤。")
+        return "\n".join(lines)
+
+    def _llm_enrich_root(
+        self,
+        feature_id: str,
+        product: str,
+        *,
+        hyde_query: str = "",
+        hyde_hints: str = "",
+        required_fields: str = "",
+    ) -> str:
+        """为 root(产品) 层骨架生成产品全览文档。"""
+        hyde_section = ""
+        if hyde_query:
+            hyde_section += f"\n目标查询: {hyde_query}"
+        if hyde_hints:
+            hyde_section += f"\n内容要点: {hyde_hints}"
+
+        prompt = (
+            f"你是 {product} 产品文档专家。\n"
+            f"请生成一份产品功能全览介绍，供 RAG 检索系统使用。\n"
+            f"{hyde_section}\n\n"
+            f"要求：\n"
+            f"1. 面向网络工程师，中文\n"
+            f"2. 包含：产品简介、主要功能模块、典型部署场景\n"
+            f"3. 若有「目标查询」，确保文档能回答它\n"
+            f"4. 直接输出纯文本，150-300 字"
+        )
+
+        if self._chat_agent is not None:
+            try:
+                user_msg = BaseMessage.make_user_message(role_name="user", content=prompt)
+                resp = self._chat_agent.step(user_msg)
+                content = resp.msgs[0].content if resp.msgs else ""
+                if content.strip():
+                    return content.strip()
+            except Exception as exc:
+                logger.warning("LLM root 填充失败 (%s): %s，回退模板", feature_id, exc)
+
+        return f"【{product} 产品简介】\n\n{product} 是一款企业级负载均衡设备，支持多种负载均衡策略和安全防护功能。\n请参阅各功能模块文档获取详细信息。"
 
     def write_to_reference(
         self,
@@ -481,6 +857,7 @@ class KnowledgeFarmerAgent:
                     "timestamp": gap.timestamp,
                     "nearest_matches": gap.nearest_matches,
                     "chunk_content": gap.chunk_content,
+                    "ambiguous_candidates": gap.ambiguous_candidates,
                 }, ensure_ascii=False, default=str) + "\n")
         logger.info("[农民] emit_schema_gaps: %d 条写入 %s", len(all_gaps), gaps_file)
         return len(all_gaps)
@@ -634,11 +1011,7 @@ class KnowledgeFarmerAgent:
         if _CLI_COMMAND_LINE_RE.search(content):
             fields["has_code_block"] = True
 
-        rules = _get_metadata_rules()
-        for prefix, patterns in rules.get("command_prefixes", {}).items():
-            if any(content.lstrip().startswith(p) for p in patterns):
-                fields["command_prefix"] = prefix
-                break
+        # command_prefix 由 _match_tree_node 通过 CLI 树权威确定，不在此猜测
 
         # Promote suggested_category from procurement decision if category missing
         if not meta.get("document_category"):
@@ -695,21 +1068,35 @@ class KnowledgeFarmerAgent:
         meta: Dict,
         ac_meta: Optional[Dict] = None,
     ) -> Optional[str]:
-        """Resolve skeleton node_id: authoritative ids first, then kb_index + prefix."""
+        """Resolve skeleton node_id: authoritative ids first, then kb_index + prefix.
+
+        Priority order (high → low):
+          1. Explicit tree_node_id / node_id in meta or ac_meta
+          2. section_title slug match in skeleton / alias
+          2b. section_title stripped of parameter syntax → kb_index lookup
+          3. command_prefix exact match in kb_index (with content-lead validation)
+          4. first_line slug (only when consistent with command_prefix or cp absent)
+             If first_line slug conflicts with command_prefix → treat as ambiguous,
+             record in self._last_ambiguous_candidates and return None.
+          5. _extract_cli_prefix_strings longest-prefix fallback
+        """
         ac_meta = ac_meta or {}
         skeleton = self._load_skeleton()
         index = self._load_kb_index()
         alias = self._load_tree_alias_map()
+        self._last_ambiguous_candidates: List[Dict] = []
 
         def _tid_in_skeleton(tid: str) -> Optional[str]:
             t = str(tid or "").strip()
             return t if t and t in skeleton else None
 
+        # Priority 1: explicit node_id
         for src in (meta, ac_meta):
             hit = _tid_in_skeleton(src.get("tree_node_id") or src.get("node_id"))
             if hit:
                 return hit
 
+        # Priority 2: section_title slug
         for src in (meta, ac_meta):
             st = str(src.get("section_title") or "").strip()
             if st:
@@ -721,6 +1108,49 @@ class KnowledgeFarmerAgent:
                     if mapped and mapped in skeleton:
                         return mapped
 
+        # Priority 2b: section_title stripped of parameter syntax → kb_index
+        # Handles titles like "crontab {enable|disable}", "ip route <prefix>",
+        # "vlan add [vlan-id]" — strip trailing parameter syntax, then look up
+        # the base-command portion in the kb_index (exact → shortest-key family).
+        if index:
+            for src in (meta, ac_meta):
+                st = str(src.get("section_title") or "").strip()
+                if not st:
+                    continue
+                st_base = re.sub(r"\s*[{<\[\(].*", "", st).strip()
+                if not st_base or len(st_base) <= 2:
+                    continue
+                exact = index.get(st_base)
+                if exact:
+                    return exact
+                st_lower = st_base.lower()
+                family = [
+                    (k, n) for k, n in index.items()
+                    if k.lower() == st_lower
+                    or k.lower().startswith(st_lower + " ")
+                ]
+                if family:
+                    family.sort(key=lambda x: len(x[0]))
+                    return family[0][1]
+
+        # Priority 3: command_prefix exact match in kb_index
+        # Validate: cp must appear in the leading portion of content to guard
+        # against mixed-section chunks where auto_convert tagged a later section.
+        # Exception: if content is empty, the meta is authoritative — skip validation.
+        cp = str(meta.get("command_prefix") or "").strip()
+        if not cp:
+            cp = str(ac_meta.get("command_prefix") or "").strip()
+        cp_node: Optional[str] = None
+        if index and cp:
+            cp_node = index.get(cp)
+            if cp_node:
+                if not content.strip():
+                    return cp_node
+                content_lead = (content or "")[:300].lower()
+                if cp.lower() in content_lead:
+                    return cp_node
+
+        # Priority 4: first_line slug — but validate against command_prefix
         first_line = ""
         if content.strip():
             first_line = content.strip().split("\n")[0].strip()
@@ -730,22 +1160,32 @@ class KnowledgeFarmerAgent:
             and first_line[0].isalpha()
         ):
             slug = _normalize_heading_to_node_slug(first_line)
+            fl_node: Optional[str] = None
             if slug:
                 if slug in skeleton:
-                    return slug
-                mapped = alias.get(slug)
-                if mapped and mapped in skeleton:
-                    return mapped
+                    fl_node = slug
+                else:
+                    mapped = alias.get(slug)
+                    if mapped and mapped in skeleton:
+                        fl_node = mapped
+            if fl_node:
+                # Check consistency: if cp points to a different node → ambiguous
+                cp_idx_node = _longest_prefix_match_node_id(index, cp.lower()) if (index and cp) else None
+                if cp_idx_node and cp_idx_node != fl_node:
+                    # Conflicting signals — record ambiguity and escalate to farm owner
+                    self._last_ambiguous_candidates = [
+                        {"source": "first_line_slug", "node_id": fl_node,
+                         "evidence": first_line[:120]},
+                        {"source": "command_prefix", "node_id": cp_idx_node,
+                         "evidence": cp},
+                    ]
+                    return None
+                return fl_node
 
         if not index:
             return None
 
-        cp = str(meta.get("command_prefix") or "").strip()
-        if not cp:
-            cp = str(ac_meta.get("command_prefix") or "").strip()
-        if cp and cp in index:
-            return index[cp]
-
+        # Priority 5: _extract_cli_prefix_strings longest-prefix fallback
         if ac_meta.get("chunk_type") and ac_meta["chunk_type"] != "single_command":
             return None
         for cand in _extract_cli_prefix_strings(content):

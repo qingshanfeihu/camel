@@ -1,5 +1,14 @@
 # Gateway Service Configuration
 # LLM Gateway - 统一使用阿里云百炼 (DashScope)
+# OpenCode Go 为可选第二供应商（默认关闭，见 providers.opencode_go.enabled）
+
+routing:
+  # 当存在多条可路由 chat（多模型/多供应商）时，网关会按请求体 model 解析路由
+  default_chat_model: "qwen-plus"
+  # true：请求中的 model 若无法识别则返回 400（不静默回落）
+  strict_model_match: false
+  # true：用量统计桶使用 provider:model_id（会改变 /metrics/usage 的 key 形状）
+  metrics_usage_bucket_include_provider: false
 
 service:
   name: "INFOAGEN LLM Gateway"
@@ -67,6 +76,66 @@ providers:
           rpm: 1000
           tpm: 500000
         description: "gte-rerank-v2"
+
+  # OpenCode Go：订阅后设置 OPENCODE_GO_API_KEY；默认关闭，不影响现有 DashScope 调用
+  opencode_go:
+    name: "OpenCode Go"
+    enabled: false
+    base_url: "https://opencode.ai/zen/go/v1"
+    messages_base_url: "https://opencode.ai/zen/go/v1"
+    api_key: "${OPENCODE_GO_API_KEY}"
+    limits:
+      rpm: 0
+      tpm: 0
+    chat_models:
+      - id: "glm-5"
+        model: "glm-5"
+        enabled: true
+        api_style: "openai_chat"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "GLM-5 (OpenCode Go)"
+      - id: "kimi-k2.5"
+        model: "kimi-k2.5"
+        enabled: true
+        api_style: "openai_chat"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "Kimi K2.5 (OpenCode Go)"
+      - id: "mimo-v2-pro"
+        model: "mimo-v2-pro"
+        enabled: true
+        api_style: "openai_chat"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "MiMo-V2-Pro (OpenCode Go)"
+      - id: "mimo-v2-omni"
+        model: "mimo-v2-omni"
+        enabled: true
+        api_style: "openai_chat"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "MiMo-V2-Omni (OpenCode Go)"
+      - id: "minimax-m2.7"
+        model: "minimax-m2.7"
+        enabled: true
+        api_style: "anthropic_messages"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "MiniMax M2.7 (Anthropic /messages)"
+      - id: "minimax-m2.5"
+        model: "minimax-m2.5"
+        enabled: true
+        api_style: "anthropic_messages"
+        limits:
+          rpm: 0
+          tpm: 0
+        description: "MiniMax M2.5 (Anthropic /messages)"
 
 retry:
   max_attempts: 3

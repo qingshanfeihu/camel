@@ -2,9 +2,9 @@
 
 Rules:
 1. MinLength — reject chunks with <20 chars of content
-2. CategoryRescue — rescue unknown category via classifier + CLI graph keywords
+2. TreePositionCheck — quarantine chunks without tree_position
 3. SimHashDedup — cross-source near-duplicate detection (64-bit SimHash)
-4. HierarchyEnrich — backfill function_hierarchy from CLI graph
+4. HierarchyEnrich — backfill function_hierarchy + product_module from CLI graph
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class IngestReport:
     rejected_category: int = 0
     quarantined: int = 0
     duplicates: int = 0
-    category_rescued: int = 0
+    tree_linked: int = 0
     hierarchy_backfilled: int = 0
     module_inferred: int = 0
     tree_attached: int = 0
@@ -61,7 +61,7 @@ class IngestReport:
             "rejected_category": self.rejected_category,
             "quarantined": self.quarantined,
             "duplicates": self.duplicates,
-            "category_rescued": self.category_rescued,
+            "tree_linked": self.tree_linked,
             "hierarchy_backfilled": self.hierarchy_backfilled,
             "module_inferred": self.module_inferred,
             "tree_attached": self.tree_attached,
@@ -119,18 +119,31 @@ class IngestValidator:
             self._report.rejected_short += 1
             return "reject", "short_content"
 
-        # Rule 2: CategoryRescue
-        cat = meta.get("document_category", "")
-        if not cat or cat == "unknown":
-            rescued = self._rescue_category(chunk, content)
-            if rescued:
-                meta["document_category"] = rescued
-                meta["_category_rescued"] = True
-                self._report.category_rescued += 1
+        # Rule 2: TreePositionCheck — tree_position 必须存在且有效
+        tp = meta.get("tree_position")
+        if isinstance(tp, dict) and tp.get("tree_level"):
+            self._report.tree_linked += 1
+        else:
+            # 无 tree_position — 尝试用旧字段兼容（document_category → tree_level 映射）
+            old_cat = meta.get("document_category", "")
+            if old_cat and old_cat != "unknown":
+                _CAT_TO_LEVEL = {
+                    "cli": "leaf", "app": "branch", "spec": "trunk",
+                    "architecture": "root", "review": "branch", "test": "branch",
+                }
+                prefix = old_cat.split("/")[0] if "/" in old_cat else old_cat
+                level = _CAT_TO_LEVEL.get(prefix, "branch")
+                meta["tree_position"] = {
+                    "tree_level": level,
+                    "linked_nodes": [],
+                    "confidence": 0.5,
+                    "knowledge_role": f"migrated_from_{old_cat}",
+                }
+                self._report.tree_linked += 1
             else:
                 self._report.quarantined += 1
                 self._quarantine.append(chunk)
-                return "quarantine", "unknown_category"
+                return "quarantine", "no_tree_position"
 
         # Rule 3: SimHash dedup
         h = _simhash(content[:500])
@@ -165,29 +178,6 @@ class IngestValidator:
         self._report.accepted += 1
         return "accept", ""
 
-    def _rescue_category(self, chunk: dict, content: str) -> Optional[str]:
-        meta = chunk.get("metadata") or {}
-        source = meta.get("source_file", "")
-
-        if source:
-            try:
-                from INAGENT.data_tools.document_classifier import classify_document
-                cat, conf = classify_document(Path(source), content[:2000])
-                if cat != "unknown" and conf >= 0.5:
-                    return cat
-            except Exception:
-                pass
-
-        content_lower = content[:2000].lower()
-        if any(kw in content_lower for kw in ("root cause", "fixed details", "bug", "affected release")):
-            return "review/bug_fix"
-        if any(kw in content_lower for kw in ("test types", "expected result", "sub item")):
-            return "test/test_list"
-        if any(kw in content_lower for kw in ("function specification", "sw functional")):
-            return "spec/func_spec"
-
-        return None
-
     def _infer_module(self, content: str) -> Optional[str]:
         content_lower = content[:1000].lower()
         mkw = self._get_module_keywords()
@@ -202,13 +192,12 @@ class IngestValidator:
             return best_mid
         return None
 
-    _CATEGORY_TO_SOURCE_KEY = {
-        "app": "app",
-        "cli": "cli",
-        "spec": "spec",
-        "review": "bugfix",
-        "architecture": "design",
-        "test": "app",
+    _TREE_LEVEL_TO_SOURCE_KEY = {
+        "leaf": "cli",
+        "new_leaf": "cli",
+        "branch": "app",
+        "trunk": "design",
+        "root": "design",
     }
 
     def _attach_to_tree(self, meta: dict) -> None:
@@ -216,17 +205,26 @@ class IngestValidator:
         if not self._cli_graph:
             return
 
+        tp = meta.get("tree_position", {})
+        tree_level = tp.get("tree_level", "") if isinstance(tp, dict) else ""
+        linked_nodes = tp.get("linked_nodes", []) if isinstance(tp, dict) else []
+
         fh = meta.get("function_hierarchy", "")
         module = meta.get("product_module", "")
-        cat = meta.get("document_category", "")
-        if not fh and not module:
+        if not fh and not module and not linked_nodes:
             return
 
-        cat_prefix = cat.split("/")[0] if "/" in cat else cat
-        source_key = self._CATEGORY_TO_SOURCE_KEY.get(cat_prefix, cat_prefix)
+        source_key = self._TREE_LEVEL_TO_SOURCE_KEY.get(tree_level, tree_level or "app")
 
         feature_id = ""
-        if fh:
+
+        if linked_nodes:
+            for nid in linked_nodes:
+                if self._cli_graph._nodes_by_id.get(nid):
+                    feature_id = nid
+                    break
+
+        if not feature_id and fh:
             fh_lower = fh.lower().replace(" ", "")
             self._cli_graph._ensure_loaded()
             self._cli_graph._build_l2_index()

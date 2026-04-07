@@ -49,6 +49,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from llm_gateway.rate_limiter import UnifiedRateLimiter
 from llm_gateway.multi_model_caller import MultiModelCaller
+from llm_gateway.chat_router import normalize_model_name, resolve_chat_route
+from llm_gateway.anthropic_messages_client import anthropic_messages_chat_completion
 
 
 def _force_utf8_console() -> None:
@@ -164,6 +166,9 @@ embedding_configs: Dict[str, Dict[str, Any]] = {}
 reranker_clients: Dict[str, AsyncOpenAI] = {}
 reranker_http_clients: Dict[str, httpx.AsyncClient] = {}
 reranker_configs: Dict[str, Dict[str, Any]] = {}
+anthropic_chat_configs: Dict[str, Dict[str, Any]] = {}
+anthropic_http_client: Optional[httpx.AsyncClient] = None
+KNOWN_CHAT_MODEL_NAMES: set = set()
 
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -187,6 +192,19 @@ _usage_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {
 _gateway_start_time: float = time.time()
 
 
+def _usage_bucket(model_id: str, provider: str = "", metric_key: str = "") -> str:
+    """Usage aggregation key; optional provider prefix when routing.metrics_usage_bucket_include_provider."""
+    use_p = False
+    if config is not None:
+        use_p = bool(
+            config.get("routing", "metrics_usage_bucket_include_provider", default=False)
+        )
+    mid = (model_id or "").strip() or metric_key
+    if use_p and provider:
+        return f"{provider}:{mid}"
+    return mid
+
+
 def _record_request(
     metric_key: str,
     elapsed: float,
@@ -195,6 +213,7 @@ def _record_request(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    provider: str = "",
 ) -> None:
     stats = request_stats.get(metric_key)
     if stats is None:
@@ -204,7 +223,7 @@ def _record_request(
         stats["errors"] += 1
     stats["latencies"].append(elapsed)
 
-    bucket = model_id or metric_key
+    bucket = _usage_bucket(model_id, provider, metric_key)
     today = date.today().isoformat()
 
     day_entry = _usage_by_day[today][bucket]
@@ -237,6 +256,7 @@ def _mask_api_key(api_key: str) -> str:
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
     global config, rate_limiter, chat_caller, embedding_clients, reranker_clients
+    global anthropic_chat_configs, anthropic_http_client, KNOWN_CHAT_MODEL_NAMES
     
     logger.info("=" * 80)
     logger.info("[Gateway] Starting INFOAGEN LLM Gateway Service")
@@ -268,13 +288,28 @@ async def lifespan(app: FastAPI):
     
     # Load providers
     providers = config.get("providers", default={})
-    
+    anthropic_chat_configs.clear()
+    if anthropic_http_client is not None:
+        try:
+            await anthropic_http_client.aclose()
+        except Exception:
+            pass
+        anthropic_http_client = None
+
     for provider_name, provider_config in providers.items():
         if not provider_config.get("enabled", True):
             logger.info(f"[Gateway] Provider {provider_name} is disabled, skipping")
             continue
         
-        base_url = provider_config.get("base_url")
+        base_url = provider_config.get("base_url") or provider_config.get(
+            "messages_base_url"
+        )
+        if not base_url:
+            logger.warning(
+                "[Gateway] Provider %s has no base_url/messages_base_url, skipping",
+                provider_name,
+            )
+            continue
         
         # Support both single api_key and multiple api_keys for load balancing
         # 支持单个 api_key 或多个 api_keys 用于负载均衡
@@ -299,12 +334,10 @@ async def lifespan(app: FastAPI):
         
         # Add provider-level rate limit
         provider_limits = provider_config.get("limits", {})
-        if provider_limits:
-            rate_limiter.set_provider_limits(
-                provider_name,
-                provider_limits.get("rpm", 1000),
-                provider_limits.get("tpm", 50000)
-            )
+        prpm = provider_limits.get("rpm", 1000)
+        ptpm = provider_limits.get("tpm", 50000)
+        if provider_limits and (prpm > 0 or ptpm > 0):
+            rate_limiter.set_provider_limits(provider_name, prpm, ptpm)
         
         # Add chat models
         # For multi-key load balancing: each key gets its own model instance
@@ -318,7 +351,34 @@ async def lifespan(app: FastAPI):
             
             # Add model-level rate limit (per account if multi-key)
             model_limits = model_config.get("limits", {})
-            
+            api_style = (model_config.get("api_style") or "openai_chat").lower()
+
+            if api_style == "anthropic_messages":
+                msgs_base = provider_config.get("messages_base_url") or base_url
+                if not msgs_base:
+                    logger.warning(
+                        "[Gateway] Skip anthropic chat %s: no messages_base_url",
+                        model_id_base,
+                    )
+                    continue
+                mrpm = model_limits.get("rpm", 0)
+                mtpm = model_limits.get("tpm", 0)
+                if mrpm > 0 or mtpm > 0:
+                    rate_limiter.set_model_limits(model_id_base, mrpm, mtpm)
+                anthropic_chat_configs[model_id_base] = {
+                    "id": model_id_base,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "api_key": api_keys[0],
+                    "messages_url": str(msgs_base).rstrip("/"),
+                }
+                logger.info(
+                    "[Gateway] Registered anthropic_messages chat: %s (%s)",
+                    model_id_base,
+                    model_name,
+                )
+                continue
+
             # Create a model instance for each API key
             for key_index, current_api_key in enumerate(api_keys):
                 # Generate unique model ID for each API key
@@ -329,11 +389,10 @@ async def lifespan(app: FastAPI):
                     model_id = model_id_base
                 
                 # Set per-key rate limit
-                rate_limiter.set_model_limits(
-                    model_id,
-                    model_limits.get("rpm", 1000),
-                    model_limits.get("tpm", 50000)
-                )
+                mrpm = model_limits.get("rpm", 1000)
+                mtpm = model_limits.get("tpm", 50000)
+                if mrpm > 0 or mtpm > 0:
+                    rate_limiter.set_model_limits(model_id, mrpm, mtpm)
                 
                 # Add to multi-model caller
                 chat_caller.add_model({
@@ -342,8 +401,8 @@ async def lifespan(app: FastAPI):
                     "api_key": current_api_key,
                     "base_url": base_url,
                     "model": model_name,
-                    "rpm": model_limits.get("rpm", 1000),
-                    "tpm": model_limits.get("tpm", 50000)
+                    "rpm": mrpm,
+                    "tpm": mtpm
                 })
         
         # Initialize embedding clients (use first API key for embeddings)
@@ -376,11 +435,10 @@ async def lifespan(app: FastAPI):
             
             # Add model-level rate limit
             model_limits = model_config.get("limits", {})
-            rate_limiter.set_model_limits(
-                model_id,
-                model_limits.get("rpm", 2000),
-                model_limits.get("tpm", 500000)
-            )
+            erpm = model_limits.get("rpm", 2000)
+            etpm = model_limits.get("tpm", 500000)
+            if erpm > 0 or etpm > 0:
+                rate_limiter.set_model_limits(model_id, erpm, etpm)
             
             logger.info(f"[Gateway] Registered embedding model: {model_id} ({model_config['model']})")
         
@@ -415,14 +473,39 @@ async def lifespan(app: FastAPI):
             
             # Add model-level rate limit
             model_limits = model_config.get("limits", {})
-            rate_limiter.set_model_limits(
-                model_id,
-                model_limits.get("rpm", 2000),
-                model_limits.get("tpm", 500000)
-            )
+            rrpm = model_limits.get("rpm", 2000)
+            rtpm = model_limits.get("tpm", 500000)
+            if rrpm > 0 or rtpm > 0:
+                rate_limiter.set_model_limits(model_id, rrpm, rtpm)
             
             logger.info(f"[Gateway] Registered reranker model: {model_id} ({model_config['model']})")
     
+    if anthropic_chat_configs:
+        if not SSL_VERIFY:
+            anthropic_http_client = httpx.AsyncClient(verify=False, timeout=chat_timeout)
+        else:
+            anthropic_http_client = httpx.AsyncClient(timeout=chat_timeout)
+
+    KNOWN_CHAT_MODEL_NAMES.clear()
+    for m in chat_caller.models:
+        KNOWN_CHAT_MODEL_NAMES.add(normalize_model_name(m["id"]))
+        um = normalize_model_name(m.get("model", ""))
+        if um:
+            KNOWN_CHAT_MODEL_NAMES.add(um)
+    for cid, acfg in anthropic_chat_configs.items():
+        KNOWN_CHAT_MODEL_NAMES.add(normalize_model_name(cid))
+        um = normalize_model_name(acfg.get("model", ""))
+        if um:
+            KNOWN_CHAT_MODEL_NAMES.add(um)
+
+    _n_routes = len(chat_caller.models) + len(anthropic_chat_configs)
+    logger.info(
+        "[Gateway] Chat routes: openai=%s anthropic=%s resolve_when_multi=%s",
+        len(chat_caller.models),
+        len(anthropic_chat_configs),
+        _n_routes > 1,
+    )
+
     logger.info("=" * 80)
     logger.info("[Gateway] Initialization complete")
     logger.info(f"[Gateway] Mode: {calling_mode}")
@@ -439,6 +522,9 @@ async def lifespan(app: FastAPI):
         await client.close()
     for client in reranker_http_clients.values():
         await client.aclose()
+    if anthropic_http_client is not None:
+        await anthropic_http_client.aclose()
+        anthropic_http_client = None
 
     logger.info("[Gateway] Shutting down...")
 
@@ -469,8 +555,12 @@ async def health():
         "status": "healthy",
         "mode": config.get("calling_mode", default="balance"),
         "chat_models": len(chat_caller.models),
+        "chat_models_anthropic": len(anthropic_chat_configs),
         "embedding_models": len(embedding_clients),
-        "reranker_models": len(reranker_clients)
+        "reranker_models": len(reranker_clients),
+        "chat_multi_route": (
+            len(chat_caller.models) + len(anthropic_chat_configs)
+        ) > 1,
     }
 
 
@@ -537,11 +627,30 @@ async def usage_metrics(days: int = 30):
     uptime_s = time.time() - _gateway_start_time
     uptime_h = round(uptime_s / 3600, 2)
 
+    routing_meta = {}
+    if config is not None:
+        routing_meta = {
+            "default_chat_model": config.get(
+                "routing", "default_chat_model", default="qwen-plus"
+            ),
+            "strict_model_match": bool(
+                config.get("routing", "strict_model_match", default=False)
+            ),
+            "metrics_usage_bucket_include_provider": bool(
+                config.get(
+                    "routing",
+                    "metrics_usage_bucket_include_provider",
+                    default=False,
+                )
+            ),
+        }
+
     return JSONResponse(content={
         "uptime_hours": uptime_h,
         "totals_by_model": dict(_usage_totals),
         "daily": daily,
         "weekly": dict(weekly),
+        "routing": routing_meta,
     })
 
 
@@ -568,11 +677,108 @@ async def set_mode(request: ModeUpdateRequest):
 @app.get("/admin/models")
 async def list_models():
     """List registered models."""
+    ids = [model["id"] for model in chat_caller.models]
+    ids.extend(sorted(anthropic_chat_configs.keys()))
     return {
-        "chat_models": [model["id"] for model in chat_caller.models],
+        "chat_models": ids,
         "embedding_models": list(embedding_clients.keys()),
         "reranker_models": list(reranker_configs.keys()),
     }
+
+
+async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str, Any]:
+    """Route chat to OpenAI-compatible pool, subset, or Anthropic /messages."""
+    call_kwargs: Dict[str, Any] = dict(
+        messages=request.messages,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        max_tokens=request.max_tokens,
+        stop=request.stop,
+        stream=request.stream,
+    )
+    if request.response_format is not None:
+        call_kwargs["response_format"] = request.response_format
+    if request.tools is not None:
+        call_kwargs["tools"] = request.tools
+    if request.tool_choice is not None:
+        call_kwargs["tool_choice"] = request.tool_choice
+
+    n_openai = len(chat_caller.models)
+    n_ant = len(anthropic_chat_configs)
+    need_resolve = (n_openai + n_ant) > 1
+
+    strict = bool(config.get("routing", "strict_model_match", default=False))
+    rq = normalize_model_name(request.model)
+    if strict and rq and rq not in KNOWN_CHAT_MODEL_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown chat model: {request.model}",
+        )
+
+    if not need_resolve:
+        return await chat_caller.call(**call_kwargs)
+
+    resolution = resolve_chat_route(
+        request.model,
+        openai_models=chat_caller.models,
+        anthropic_configs=anthropic_chat_configs,
+        default_chat_model=config.get("routing", "default_chat_model", default="qwen-plus"),
+    )
+
+    if resolution.kind == "unresolved":
+        raise HTTPException(
+            status_code=500,
+            detail="No chat route resolved; check routing.default_chat_model and providers",
+        )
+
+    if resolution.kind == "anthropic":
+        if anthropic_http_client is None:
+            raise HTTPException(status_code=503, detail="Anthropic route not initialized")
+        if request.stream:
+            raise HTTPException(
+                status_code=400,
+                detail="stream=true is not supported for anthropic_messages models",
+            )
+        if request.tools:
+            raise HTTPException(
+                status_code=400,
+                detail="tools are not supported for anthropic_messages models in this gateway",
+            )
+        acfg = resolution.anthropic_config or {}
+        est = (
+            sum(len(str(m.get("content", ""))) for m in request.messages) // 4 + 100
+        )
+        rate_limiter.acquire(acfg["provider"], acfg["id"], est)
+        chat_timeout = float(config.get("request_timeout", "chat", default=600))
+        t0 = time.time()
+        cc = await anthropic_messages_chat_completion(
+            http_client=anthropic_http_client,
+            messages_url=acfg["messages_url"],
+            api_key=acfg["api_key"],
+            model=acfg["model"],
+            openai_messages=request.messages,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            stop=request.stop,
+            client_model_id=acfg["id"],
+            timeout=chat_timeout,
+        )
+        elapsed = time.time() - t0
+        return {
+            "success": True,
+            "model_id": acfg["id"],
+            "model_name": acfg["model"],
+            "provider": acfg["provider"],
+            "response": cc,
+            "elapsed_time": elapsed,
+        }
+
+    subset = resolution.openai_subset or []
+    if not subset:
+        raise HTTPException(status_code=500, detail="Empty OpenAI chat subset")
+    kw = {k: v for k, v in call_kwargs.items() if k != "messages"}
+    return await chat_caller.call_on_subset(subset, request.messages, **kw)
 
 
 @app.post("/v1/chat/completions")
@@ -618,22 +824,7 @@ async def chat_completions(request: ChatCompletionRequest):
         # This is just a pre-check
         logger.debug(f"[Gateway] Estimated tokens: {estimated_tokens}")
         
-        # Call multi-model caller (single model selected by mode; response_format for JSON mode)
-        call_kwargs = dict(
-            messages=request.messages,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            max_tokens=request.max_tokens,
-            stop=request.stop,
-            stream=request.stream,
-        )
-        if request.response_format is not None:
-            call_kwargs["response_format"] = request.response_format
-        if request.tools is not None:
-            call_kwargs["tools"] = request.tools
-        if request.tool_choice is not None:
-            call_kwargs["tool_choice"] = request.tool_choice
-        result = await chat_caller.call(**call_kwargs)
+        result = await _dispatch_chat_completion(request)
         
         if not result["success"]:
             error_msg = result.get("error", "Model call failed")
@@ -648,18 +839,47 @@ async def chat_completions(request: ChatCompletionRequest):
         if request.stream:
             async def stream_generator():
                 """Generate SSE stream from OpenAI AsyncStream."""
+                usage_prompt = 0
+                usage_compl = 0
+                usage_total = 0
                 try:
                     async for chunk in response:
-                        # Convert chunk to SSE format
                         chunk_data = chunk.model_dump_json()
                         yield f"data: {chunk_data}\n\n"
+                        try:
+                            d = chunk.model_dump()
+                            u = d.get("usage")
+                            if u:
+                                usage_prompt = int(u.get("prompt_tokens") or 0) or usage_prompt
+                                usage_compl = int(u.get("completion_tokens") or 0) or usage_compl
+                                usage_total = int(u.get("total_tokens") or 0) or usage_total
+                        except Exception:
+                            pass
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     logger.error(f"[Gateway] Stream error: {e}")
                     error_chunk = {"error": str(e)}
                     yield f"data: {json.dumps(error_chunk)}\n\n"
                 finally:
-                    _record_request("chat", time.time() - start_time, model_id=result.get("model_id", ""))
+                    pt, ct, tt = usage_prompt, usage_compl, usage_total
+                    if tt <= 0:
+                        pt = MultiModelCaller._estimate_tokens(request.messages)
+                        ct = max(1, pt // 10)
+                        tt = pt + ct
+                        logger.debug(
+                            "[Gateway] Stream usage fallback (estimated): pt=%s ct=%s",
+                            pt,
+                            ct,
+                        )
+                    _record_request(
+                        "chat",
+                        time.time() - start_time,
+                        model_id=result.get("model_id", ""),
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        total_tokens=tt,
+                        provider=result.get("provider", ""),
+                    )
             
             return StreamingResponse(
                 stream_generator(),
@@ -729,16 +949,28 @@ async def chat_completions(request: ChatCompletionRequest):
                 "X-Elapsed-Time": str(result["elapsed_time"])
             }
         )
-        _record_request("chat", time.time() - start_time,
-                         model_id=result.get("model_id", ""),
-                         prompt_tokens=_p_tok, completion_tokens=_c_tok, total_tokens=_t_tok)
+        _record_request(
+            "chat",
+            time.time() - start_time,
+            model_id=result.get("model_id", ""),
+            prompt_tokens=_p_tok,
+            completion_tokens=_c_tok,
+            total_tokens=_t_tok,
+            provider=result.get("provider", ""),
+        )
         return response_payload
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[Gateway] Error in chat_completions: {e}", exc_info=True)
-        _record_request("chat", time.time() - start_time, is_error=True, model_id=request.model)
+        _record_request(
+            "chat",
+            time.time() - start_time,
+            is_error=True,
+            model_id=request.model,
+            provider="",
+        )
         err_str = str(e)
         # Return 504 when upstream timed out (e.g. "Model call failed: Request timed out.")
         if "timed out" in err_str.lower() or "timeout" in err_str.lower():
@@ -845,13 +1077,26 @@ async def embeddings(request: EmbeddingRequest):
 
         _e_tok = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
         response_payload = JSONResponse(content=response.model_dump())
-        _record_request("embeddings", time.time() - start_time,
-                         model_id=model_id, total_tokens=_e_tok, prompt_tokens=_e_tok)
+        _emb_prov = embedding_configs.get(model_id, {}).get("provider", "")
+        _record_request(
+            "embeddings",
+            time.time() - start_time,
+            model_id=model_id,
+            total_tokens=_e_tok,
+            prompt_tokens=_e_tok,
+            provider=_emb_prov,
+        )
         return response_payload
 
     except Exception as e:
         logger.error(f"[Gateway] Error in embeddings: {e}", exc_info=True)
-        _record_request("embeddings", time.time() - start_time, is_error=True, model_id=request.model)
+        _record_request(
+            "embeddings",
+            time.time() - start_time,
+            is_error=True,
+            model_id=request.model,
+            provider="",
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -965,13 +1210,25 @@ async def rerank(request: RerankRequest):
             response.raise_for_status()
             response_payload = JSONResponse(content=response.json())
         _r_tok = estimated_tokens
-        _record_request("rerank", time.time() - start_time,
-                         model_id=model_id, total_tokens=_r_tok, prompt_tokens=_r_tok)
+        _record_request(
+            "rerank",
+            time.time() - start_time,
+            model_id=model_id,
+            total_tokens=_r_tok,
+            prompt_tokens=_r_tok,
+            provider=model_config.get("provider", ""),
+        )
         return response_payload
 
     except Exception as e:
         logger.error(f"[Gateway] Error in rerank: {e}", exc_info=True)
-        _record_request("rerank", time.time() - start_time, is_error=True, model_id=request.model)
+        _record_request(
+            "rerank",
+            time.time() - start_time,
+            is_error=True,
+            model_id=request.model,
+            provider="",
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 

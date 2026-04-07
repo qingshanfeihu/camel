@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT.parent))
 logger = logging.getLogger(__name__)
 
 GRAPH_PATH = ROOT / "knowledge_base" / "cli_keyword_graph.json"
+_CT_PATH = ROOT / "knowledge_base" / "reference" / "commandtree_base.json"
 
 # ── 协议关键词映射（keyword → 标准协议名）─────────────────────────
 # 用于从 command keywords 中推导 protocol_stack
@@ -110,6 +111,81 @@ WEBUI_MODULE_IDS = {"webagent", "webui", "web"}
 
 def load_graph(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _derive_cn_aliases(
+    graph: Dict[str, Any],
+    ct_path: Path = _CT_PATH,
+) -> Dict[str, List[str]]:
+    """从 CommandTree 的 product_module 字段推导每个 MODULE 的中文别名。
+
+    路径: CT entry.node_id → graph child_of edge → parent MODULE → 收集所有 CN product_module。
+    """
+    if not ct_path.exists():
+        logger.warning("CommandTree not found at %s, skip cn_aliases", ct_path)
+        return {}
+
+    ct = json.loads(ct_path.read_text(encoding="utf-8"))
+    module_ids = {n["id"] for n in graph["nodes"] if n.get("type") == "module"}
+
+    cmd_to_module: Dict[str, str] = {}
+    for edge in graph["edges"]:
+        if edge.get("type") == "child_of" and edge["target"] in module_ids:
+            cmd_to_module[edge["source"]] = edge["target"]
+
+    result: Dict[str, Set[str]] = defaultdict(set)
+    for entry in ct:
+        meta = entry.get("metadata", {})
+        pm = meta.get("product_module", "")
+        nid = meta.get("node_id", "")
+        if not pm or not nid:
+            continue
+        has_cn = any("\u4e00" <= c <= "\u9fff" for c in pm)
+        if not has_cn:
+            continue
+        mod = cmd_to_module.get(nid, "")
+        if not mod:
+            cmd = meta.get("command_prefix", "")
+            root = cmd.split()[0].lower() if cmd else ""
+            if root in module_ids:
+                mod = root
+        if mod:
+            result[mod].add(pm)
+
+    return {k: sorted(v) for k, v in result.items()}
+
+
+def _synthesize_description(node: Dict[str, Any]) -> str:
+    """从 MODULE 节点现有字段动态合成 description。
+
+    上游增删字段后无需改这里 —— 所有列表/字符串字段都会被纳入。
+    """
+    _SKIP = {"id", "type", "size", "commands_count", "description"}
+    parts: List[str] = []
+
+    label = node.get("label", "")
+    if label:
+        parts.append(label)
+
+    cn = node.get("cn_aliases", [])
+    if cn:
+        parts.append("中文名称: " + ", ".join(cn))
+
+    hs = node.get("help_string", "")
+    if hs:
+        parts.append(hs)
+
+    layer = node.get("layer", "")
+    if layer:
+        parts.append(f"OSI层级: {layer}")
+
+    for key in ("protocol_stack", "feature_tags", "related_modules", "keywords",
+                "address_family", "interface_types"):
+        val = node.get(key, [])
+        if val:
+            parts.append(f"{key}: {', '.join(str(v) for v in val)}")
+
+    return ". ".join(parts) if parts else node.get("id", "")
 
 
 def save_graph(graph: Dict[str, Any], path: Path) -> None:
@@ -249,11 +325,11 @@ def enrich_graph(graph: Dict[str, Any]) -> Dict[str, int]:
     """Enrich module nodes with tech features. Returns stats."""
     module_kw_counts = _collect_module_keywords(graph)
     module_neighbors = _collect_module_neighbors(graph)
+    cn_aliases_map = _derive_cn_aliases(graph)
 
     node_map = {n["id"]: n for n in graph["nodes"]}
-    # Module-only map (avoids command nodes with same id overriding module labels)
     module_map = {n["id"]: n for n in graph["nodes"] if n.get("type") == "module"}
-    stats = {"enriched": 0, "total_modules": 0}
+    stats = {"enriched": 0, "total_modules": 0, "cn_aliased": 0}
 
     for node in graph["nodes"]:
         if node.get("type") != "module":
@@ -263,7 +339,6 @@ def enrich_graph(graph: Dict[str, Any]) -> Dict[str, int]:
         kw_counts = module_kw_counts.get(mod_id, Counter())
         neighbors = module_neighbors.get(mod_id, set())
 
-        # Infer fields
         protocol_stack = _infer_protocol_stack(kw_counts)
         address_family = _infer_address_family(kw_counts)
         layer = _infer_layer(protocol_stack)
@@ -273,13 +348,19 @@ def enrich_graph(graph: Dict[str, Any]) -> Dict[str, int]:
         )
         feature_tags = _infer_feature_tags(kw_counts)
 
-        # Write back
         node["protocol_stack"] = protocol_stack
         node["address_family"] = address_family
         node["layer"] = layer
         node["interface_types"] = interface_types
         node["related_modules"] = related_modules
         node["feature_tags"] = feature_tags
+
+        cn = cn_aliases_map.get(mod_id, [])
+        if cn:
+            node["cn_aliases"] = cn
+            stats["cn_aliased"] += 1
+
+        node["description"] = _synthesize_description(node)
         stats["enriched"] += 1
 
     return stats
@@ -297,11 +378,14 @@ def print_summary(graph: Dict[str, Any]) -> None:
         iface = ", ".join(node.get("interface_types", [])) or "—"
         related = ", ".join(node.get("related_modules", [])) or "—"
         tags = ", ".join(node.get("feature_tags", [])) or "—"
+        cn = ", ".join(node.get("cn_aliases", [])) or "—"
+        desc_preview = (node.get("description", "") or "—")[:80]
         print(
-            f"{label:20s} | 协议: {proto:30s} | 地址族: {af:12s} | "
-            f"层级: {layer:6s} | 接口: {iface:10s} | "
-            f"关联: {related:40s} | 标签: {tags}"
+            f"{label:20s} | CN: {cn:20s} | 协议: {proto:30s} | "
+            f"层级: {layer:6s} | 标签: {tags}"
         )
+        if desc_preview != "—":
+            print(f"{'':20s}   desc: {desc_preview}...")
 
 
 def main() -> None:
@@ -317,7 +401,10 @@ def main() -> None:
     logger.info("Nodes: %d, Edges: %d", len(graph["nodes"]), len(graph["edges"]))
 
     stats = enrich_graph(graph)
-    logger.info("Enriched %d / %d modules", stats["enriched"], stats["total_modules"])
+    logger.info(
+        "Enriched %d / %d modules (%d with CN aliases)",
+        stats["enriched"], stats["total_modules"], stats["cn_aliased"],
+    )
 
     print("\n" + "=" * 140)
     print_summary(graph)

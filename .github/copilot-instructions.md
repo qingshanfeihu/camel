@@ -52,7 +52,7 @@ ReviewPipeline (review/pipeline.py)
   Stage 2: Workforce (5 Workers: Coverage/CLI/Spec/Load → Synthesis)
        ↓
 KnowledgeRouter (rag/knowledge_router.py)
-  mode → MODE_CATEGORY_WHITELIST → UnifiedRAGRetriever
+  mode → MODE_TREE_STRATEGY → UnifiedRAGRetriever
   + TestRulesEngine (test_write / test_review modes only)
        ↓
 UnifiedRAGRetriever (rag/unified_rag.py)
@@ -61,9 +61,9 @@ UnifiedRAGRetriever (rag/unified_rag.py)
 
 ### RAG System
 
-- **Config**: `INAGENT/rag/knowledge_config.py` — `MODE_CATEGORY_WHITELIST` maps each mode (`explain` / `config` / `test_write` / `test_review`) to allowed document categories
+- **Config**: `INAGENT/rag/knowledge_config.py` — `MODE_TREE_STRATEGY` maps each mode (`explain` / `config` / `test_write` / `test_review`) to allowed tree levels (leaf/new_leaf/branch/trunk/root)
 - **Vector store**: persistent Qdrant at `INAGENT/vector_store/qdrant/` — do NOT wipe without intent
-- **GraphRAG index**: `INAGENT/graphrag_index/` (parquet files); rebuild with `python -m INAGENT.scripts.init_graphrag --build`
+- **GraphRAG index**: `INAGENT/graphrag_index/` (parquet files); rebuild with `python -m INAGENT.scripts.build_graphrag_from_graph --embed` (zero LLM, direct from cli_keyword_graph.json; 5401 entities, 22985 edges, 100% KB coverage). Do **NOT** run `graphrag index` manually — it overwrites parquet and breaks referential integrity.
 - **Knowledge base source**: `INAGENT/knowledge_base/reference/` (JSON files per document type)
 - **Unified retrieval direction**: all modes go through `UnifiedRAGRetriever`; the old 4-layer CLI/RULES/DESIGN/TEST dispatch is removed
 
@@ -95,7 +95,8 @@ pytest INAGENT/unit_tests/
 ### Common Pitfalls
 
 - **Do not rebuild the vector store or GraphRAG index** unless explicitly asked — they are persistent and expensive to rebuild
+- **Never use backup data from `reference/backup/`** — backup files may come from a different source PDF (e.g., full `app.pdf` vs. partial `app_1-40.pdf`). Always regenerate from the actual PDFs in `knowledge_base/input/` using auto_convert. If auto_convert output is unusable, ask the user — do not silently fall back to backup files.
 - **`run_test_review.py` / `run_bug_to_case.py` are deleted** — use `run_review.py`
-- **KnowledgeRouter no longer dispatches by layer** — it routes through `UnifiedRAGRetriever` with category whitelist; do not re-introduce the old 4-layer pattern
+- **KnowledgeRouter no longer dispatches by layer** — it routes through `UnifiedRAGRetriever` with tree-level filtering (`MODE_TREE_STRATEGY`); do not re-introduce the old 4-layer or document_category pattern
 - **Product name is dynamic** — never hardcode "NSAE"; read from `get_product_name()`
 - **`graphrag_workspace/` is renamed** to `graphrag_index/`; update any path references accordingly

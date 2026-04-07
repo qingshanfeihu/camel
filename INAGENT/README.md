@@ -16,7 +16,9 @@ v0.8.1 评审命中率优化：横切面模块 Scope 保护 + 配置并存检查
 
 v0.9.0 引入 **Self-Refine 自我改进循环**：ReviewEvaluator 混合评分（程序化+LLM）+ ReviewRefiner 迭代改进 + 报告清洗（5 阶段后处理）。
 
-v10.0 **RAG 基础设施全面升级**：并行检索（GraphRAG+向量 ThreadPoolExecutor）、fail-stop 健康检查、Gateway 并发 embedding（5 路 asyncio.gather）、向量库 28933 points + GraphRAG 3412 entities。
+v10.0 **RAG 基础设施全面升级**：并行检索（GraphRAG+向量 ThreadPoolExecutor）、fail-stop 健康检查、Gateway 并发 embedding（5 路 asyncio.gather）、向量库 3570 points + GraphRAG 3412 entities。
+
+v10.2 **GraphRAG 直接从结构图构建**：`build_graphrag_from_graph.py` 零 LLM 调用，从 `cli_keyword_graph.json` 直接生成 GraphRAG parquet，KB 覆盖率 100%（5401 entities，22985 edges，4-way 全 100%）。
 
 ## 文档索引
 
@@ -76,7 +78,8 @@ INAGENT/
 │   └── merge_knowledge_base.py # 知识库合并
 ├── scripts/                    # 工具脚本
 │   ├── model_helpers.py        # 模型辅助工具
-│   ├── init_graphrag.py        # GraphRAG 初始化/构建
+│   ├── build_graphrag_from_graph.py  # ★ GraphRAG 直接从 cli_keyword_graph.json 构建（零 LLM）
+│   ├── init_graphrag.py        # GraphRAG 初始化/构建（LLM 方式，已不推荐）
 │   ├── graphrag_batch_manager.py  # GraphRAG 批量管理
 │   └── ...                     # 其他辅助脚本
 ├── docs/                       # 项目文档

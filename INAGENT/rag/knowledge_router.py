@@ -12,11 +12,11 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
-知识路由器 — 统一 GraphRAG 检索 + 模式白名单
+知识路由器 — 统一 GraphRAG 检索 + 树层级策略
 
 所有知识检索统一经过 UnifiedRAGRetriever:
-1. 根据 mode 查 MODE_CATEGORY_WHITELIST 确定允许的 document_category
-2. 将白名单传入 UnifiedRAGRetriever.retrieve() 做硬过滤
+1. 根据 mode 查 MODE_TREE_STRATEGY 确定允许的树层级
+2. 将层级列表传入 UnifiedRAGRetriever.retrieve() 做硬过滤
 3. Rules 引擎（确定性规则/模板）仍作为独立补充注入
 
 旧的四层关键词路由已移除；所有 CLI/设计/测试文档均通过 GraphRAG 索引检索。
@@ -26,7 +26,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from INAGENT.config.project_config import cfg_bool
-from INAGENT.rag.knowledge_config import MODE_CATEGORY_WHITELIST
+from INAGENT.rag.knowledge_config import MODE_TREE_STRATEGY
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class KnowledgeRouter:
     统一知识路由器
 
     所有文档检索经过 UnifiedRAGRetriever（GraphRAG + 向量），
-    通过 MODE_CATEGORY_WHITELIST 约束检索范围。
+    通过 MODE_TREE_STRATEGY 约束检索范围。
     Rules 引擎（确定性规则/模板）作为独立补充。
     """
 
@@ -110,10 +110,10 @@ class KnowledgeRouter:
                 "rag_context": RAG 检索上下文,
                 "similar_tests": [],
                 "constraints": 约束信息,
-                "category_whitelist": 本次使用的分类白名单,
+                "category_whitelist": 本次使用的树层级策略,
             }
         """
-        category_whitelist = MODE_CATEGORY_WHITELIST.get(mode, [])
+        category_whitelist = MODE_TREE_STRATEGY.get(mode, [])
         layers_used = [l.value for l in classify_for_mode(mode)]
 
         result: Dict[str, Any] = {

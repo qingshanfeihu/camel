@@ -1,0 +1,200 @@
+﻿python : 22:15:27 INFO  INAGENT.utils.env_utils: Multiple .env files detected; usin
+g INAGENT/.env only: C:\SynologyDrive\INFOAGEN\INAGENT\.env, C:\SynologyDrive\INFOA
+GEN\INAGENT\graphrag_index\.env
+所在位置 行:1 字符: 1
++ python -m INAGENT.scripts.test_ircookie_three_way_e2e 2>&1 | Tee-Obje ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (22:15:27 INFO  ...hrag_index\.env:Str 
+   ing) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+22:15:30 INFO  INAGENT.rag.graphrag_integration: 加载 6812 个实体
+22:15:30 INFO  INAGENT.rag.graphrag_integration: 加载 12238 个关系
+22:15:30 INFO  INAGENT.rag.graphrag_integration: 加载 889 个社区
+22:15:30 INFO  INAGENT.rag.graphrag_integration: 加载 889 个社区报告
+22:15:30 INFO  INAGENT.rag.graphrag_integration: 加载 855 个文本单元
+22:15:34 WARNING INAGENT.rag.graphrag_integration: LocalSearchMixedContext 初始化失败，将回
+退到 local_search: cannot convert float NaN to integer
+22:15:34 INFO  ircookie_three_way: ================================================
+============
+22:15:34 INFO  ircookie_three_way: P0A: 树完整性预检
+22:15:34 INFO  ircookie_three_way: ================================================
+============
+22:15:35 INFO  INAGENT.rag.cli_graph_store: CLI graph loaded: 5401 nodes, 101 modul
+es, 2606 keywords
+22:15:35 INFO  INAGENT.rag.cli_graph_store: L2 index built: 2476 unique tokens, 806
+ L2 prefixes
+22:15:35 INFO  ircookie_three_way:   \u2713 slb mode ircookie  prefix='SLB > Transm
+ission Mode'  similar=['slb mode ircookie']
+22:15:35 INFO  ircookie_three_way:   △ slb group method ic 不在树中（ic 为参数值），降级到父命令 slb
+ group method \u2713
+22:15:35 INFO  ircookie_three_way: ================================================
+============
+22:15:35 INFO  ircookie_three_way: P0B: 基线检索度量（pre-pipeline）
+22:15:35 INFO  ircookie_three_way: ================================================
+============
+22:15:36 INFO  ircookie_three_way:   基线 Qdrant 总点数: 3553
+[92m22:16:11 - LiteLLM:INFO[0m: utils.py:1621 - Wrapper: Completed Call, calling 
+success_handler
+22:16:11 INFO  LiteLLM: Wrapper: Completed Call, calling success_handler
+22:16:11 WARNING graphrag.query.context_builder.community_context: Warning: No comm
+unity records added when building community context.
+[92m22:16:11 - LiteLLM:INFO[0m: utils.py:3872 - 
+LiteLLM completion() model= qwen-plus; provider = openai
+22:16:11 INFO  LiteLLM: 
+LiteLLM completion() model= qwen-plus; provider = openai
+22:16:33 INFO  ircookie_three_way:   基线 GraphRAG ircookie 实体数: 5
+22:16:33 INFO  ircookie_three_way: ================================================
+============
+22:16:33 INFO  ircookie_three_way: P1: 快照当前知识库
+22:16:33 INFO  ircookie_three_way: ================================================
+============
+22:16:33 INFO  ircookie_three_way: 快照: pre_ircookie_3way_20260403_221633 (reference
+=4, parquet=6, kb=3553 items)
+22:16:33 INFO  ircookie_three_way: 清理残留: cli.json
+22:16:33 INFO  ircookie_three_way: 清理残留: cli.farmer_cache.json
+22:16:33 INFO  ircookie_three_way: 清理残留: ircookie_three_way_gaps.jsonl
+22:16:33 INFO  ircookie_three_way: 从 MinerU 提取 6 个 ircookie chunks
+22:16:33 INFO  ircookie_three_way: 使用 6 个 ircookie chunks
+22:16:33 INFO  INAGENT.utils.llm_config: 已启用 LLM Gateway: http://127.0.0.1:9000/v1
+22:16:33 INFO  ircookie_three_way: ================================================
+============
+22:16:33 INFO  ircookie_three_way: P2: 农民填肉 (6 chunks)
+22:16:33 INFO  ircookie_three_way: ================================================
+============
+22:16:33 INFO  camel.camel.agents.chat_agent: Automatic context compression is enab
+led. Will trigger summarization when context window exceeds 50% of the total token 
+limit.
+22:16:33 INFO  auto_convert: [LLM] 线程 9992 使用提供商: 硅基流动 (model=qwen-plus, 已调用 1 次)
+22:17:30 INFO  ircookie_three_way:   block=cli_5000_1f37e6cb  tree_node=slb_mode_ir
+cookie  refs=[]  gaps=8
+22:17:30 INFO  ircookie_three_way:   block=cli_5001_129531bd  tree_node=no_slb_mode
+_ircookie  refs=[]  gaps=9
+22:17:30 INFO  ircookie_three_way:   block=cli_5002_e5634a42  tree_node=show_slb_mo
+de_ircookie  refs=[]  gaps=9
+22:17:30 INFO  ircookie_three_way:   block=cli_5003_76982ac7  tree_node=clear_slb_m
+ode_ircookie  refs=[]  gaps=9
+22:17:30 INFO  ircookie_three_way:   block=cli_5004_3ec1e3b8  tree_node=slb_group_m
+ethod  refs=[]  gaps=8
+22:17:30 INFO  ircookie_three_way:   block=cli_5005_90d1cc52  tree_node=-  refs=[] 
+ gaps=9
+22:17:30 INFO  INAGENT.agents.knowledge_farmer_agent: [农民] cli.json: +6 块 (共 6)
+22:17:30 INFO  ircookie_three_way: write_to_reference: {'cli': 6}
+22:17:30 INFO  INAGENT.agents.knowledge_farmer_agent: [农民] emit_schema_gaps: 52 条写入
+ C:\SynologyDrive\INFOAGEN\INAGENT\knowledge_base\logs\ircookie_three_way_gaps.json
+l
+22:17:30 INFO  ircookie_three_way: schema_gaps: 52 条 → ircookie_three_way_gaps.json
+l
+22:17:30 INFO  ircookie_three_way: P2 断言汇总:
+22:17:30 INFO  ircookie_three_way:   \u2713 tree_node_id 注入: slb_mode_ircookie
+22:17:30 INFO  ircookie_three_way:   \u2713 tree_node_id 注入: no_slb_mode_ircookie
+22:17:30 INFO  ircookie_three_way:   \u2713 tree_node_id 注入: show_slb_mode_ircookie
+22:17:30 INFO  ircookie_three_way:   \u2713 tree_node_id 注入: clear_slb_mode_ircooki
+e
+22:17:30 INFO  ircookie_three_way:   △ cross-ref 未检测到 slb mode ircookie (refs=[])
+22:17:30 INFO  ircookie_three_way:   \u2713 supports_override gap 检出: 8 条
+22:17:30 INFO  ircookie_three_way: ================================================
+============
+22:17:30 INFO  ircookie_three_way: P3: 农场主 TreeInformed 挖槽 (gaps=52, refresh_hybrid
+_vectors=True)
+22:17:30 INFO  ircookie_three_way: ================================================
+============
+22:17:31 INFO  INAGENT.rag.graphrag_integration: 加载 6812 个实体
+22:17:31 INFO  INAGENT.rag.graphrag_integration: 加载 12238 个关系
+22:17:31 INFO  INAGENT.rag.graphrag_integration: 加载 889 个社区
+22:17:31 INFO  INAGENT.rag.graphrag_integration: 加载 889 个社区报告
+22:17:31 INFO  INAGENT.rag.graphrag_integration: 加载 855 个文本单元
+22:17:31 WARNING INAGENT.rag.graphrag_integration: LocalSearchMixedContext 初始化失败，将回
+退到 local_search: cannot convert float NaN to integer
+22:17:31 INFO  INAGENT.rag.graphrag_integration: snapshot_backup → C:\SynologyDrive
+\INFOAGEN\INAGENT\graphrag_index\snapshots\20260403_221731_farm_owner
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  ircookie_three_way:   [TreeContext] clear_slb_mode_ircookie → exists
+=True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] slb_mode_ircookie → exists=True 
+level=leaf prefix='SLB > Transmission Mode' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 slb_mode_
+ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] no_slb_mode_ircookie → exists=Tr
+ue level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 no_slb_mo
+de_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 show_slb_
+mode_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 show_slb_
+mode_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 show_slb_
+mode_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 show_slb_
+mode_ircookie
+22:17:31 INFO  ircookie_three_way:   [TreeContext] show_slb_mode_ircookie → exists=
+True level=leaf prefix='SLB > Cookie' parent=
+22:17:31 INFO  INAGENT.rag.graphrag_integration: upsert_entities: 跳过已存在实体 show_slb_
+mode_ircookie

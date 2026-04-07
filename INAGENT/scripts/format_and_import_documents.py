@@ -83,9 +83,11 @@ def classify_source(source_file: str, blocks: list) -> str:
     return category
 
 
+MAX_COMMANDS_PER_DOC = 5
+
+
 def format_documents(items: list) -> list:
-    """按来源文件合并并格式化为 GraphRAG 输入文档。"""
-    # 按来源文件分组
+    """按来源文件 + product_module 分组，大模块拆分为子文档。"""
     source_groups: OrderedDict[str, list] = OrderedDict()
     for item in items:
         meta = item.get("metadata", {})
@@ -98,55 +100,67 @@ def format_documents(items: list) -> list:
     stats = {"included": 0, "excluded": 0, "by_category": {}, "by_layer": {}}
 
     for source_file, blocks in source_groups.items():
-        # 过滤专用检索器数据
         if source_file in EXCLUDED_SOURCES:
             logger.info("  跳过 (专用检索器): %s (%d blocks)", source_file, len(blocks))
             stats["excluded"] += len(blocks)
             continue
 
-        # 分类
         category = classify_source(source_file, blocks)
         layer = KNOWLEDGE_LAYER_MAP.get(category, "design")
 
-        # 合并文本
-        parts = []
+        module_groups: OrderedDict[str, list] = OrderedDict()
         for block in blocks:
-            text = block.get("text", "") or block.get("page_content", "")
-            if not text.strip():
+            mod = block.get("metadata", {}).get("product_module", "unknown")
+            module_groups.setdefault(mod, []).append(block)
+
+        for module_name, mod_blocks in module_groups.items():
+            enriched_parts = []
+            for block in mod_blocks:
+                text = block.get("text", "") or block.get("page_content", "")
+                if not text.strip():
+                    continue
+                meta = block.get("metadata", {})
+                meta_prefix = []
+                if category:
+                    meta_prefix.append(f"[分类: {category}]")
+                if module_name and module_name != "unknown":
+                    meta_prefix.append(f"[模块: {module_name}]")
+                enriched = " ".join(meta_prefix) + "\n" + text if meta_prefix else text
+                enriched_parts.append(enriched)
+
+            if not enriched_parts:
                 continue
-            meta = block.get("metadata", {})
 
-            # 构建元数据前缀（仅保留通用字段）
-            meta_prefix = []
-            if category:
-                meta_prefix.append(f"[分类: {category}]")
+            chunks = [
+                enriched_parts[i : i + MAX_COMMANDS_PER_DOC]
+                for i in range(0, len(enriched_parts), MAX_COMMANDS_PER_DOC)
+            ]
+            need_suffix = len(chunks) > 1
 
-            product_module = meta.get("product_module", "")
-            if product_module and product_module != "unknown":
-                meta_prefix.append(f"[模块: {product_module}]")
+            for part_idx, chunk in enumerate(chunks):
+                merged_text = "\n\n".join(chunk)
+                doc_idx = len(documents)
+                if need_suffix:
+                    title = f"{source_file}#{module_name}_p{part_idx + 1:02d}"
+                else:
+                    title = f"{source_file}#{module_name}"
 
-            enriched = " ".join(meta_prefix) + "\n" + text if meta_prefix else text
-            parts.append(enriched)
+                documents.append({
+                    "id": f"src_{doc_idx:04d}",
+                    "text": f"[来源: {source_file}] [模块: {module_name}]\n\n{merged_text}",
+                    "title": title,
+                    "metadata": {
+                        "source_file": source_file,
+                        "document_category": category,
+                        "knowledge_layer": layer,
+                        "product_module": module_name,
+                        "block_count": len(chunk),
+                    },
+                })
+                stats["included"] += len(chunk)
 
-        merged_text = "\n\n".join(parts)
-        if not merged_text.strip():
-            continue
-
-        doc_idx = len(documents)
-        documents.append({
-            "id": f"src_{doc_idx:04d}",
-            "text": f"[来源: {source_file}]\n\n{merged_text}",
-            "title": source_file,
-            "metadata": {
-                "source_file": source_file,
-                "document_category": category,
-                "knowledge_layer": layer,
-                "block_count": len(blocks),
-            }
-        })
-        stats["included"] += len(blocks)
-        stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
-        stats["by_layer"][layer] = stats["by_layer"].get(layer, 0) + 1
+            stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
+            stats["by_layer"][layer] = stats["by_layer"].get(layer, 0) + 1
 
     return documents, stats
 

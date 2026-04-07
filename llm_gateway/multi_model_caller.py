@@ -45,6 +45,7 @@ class MultiModelCaller:
         self.models: List[Dict[str, Any]] = []
         self.clients: Dict[str, AsyncOpenAI] = {}
         self.current_index = 0  # For round-robin in balance mode
+        self._subset_index = 0  # Round-robin when calling a subset only
         self._index_lock = asyncio.Lock()  # Concurrency-safe round-robin
         self.rate_limiter = rate_limiter
         self.default_timeout = default_timeout
@@ -364,3 +365,90 @@ class MultiModelCaller:
             return await self.call_hybrid_mode(messages, **kwargs)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
+
+    async def call_race_mode_subset(
+        self,
+        subset: List[Dict[str, Any]],
+        messages: List[Dict],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if not subset:
+            raise ValueError("call_race_mode_subset: empty subset")
+        logger.info(
+            f"[MultiModelCaller] Race mode (subset): Starting {len(subset)} models"
+        )
+        tasks = [
+            asyncio.create_task(self._call_single_model(mc, messages, **kwargs))
+            for mc in subset
+        ]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            result = await task
+            if result["success"]:
+                for pending_task in pending:
+                    pending_task.cancel()
+                logger.info(
+                    f"[MultiModelCaller] Winner: {result['model_id']} "
+                    f"({result['elapsed_time']:.2f}s)"
+                )
+                return result
+        for pending_task in asyncio.as_completed(pending):
+            try:
+                result = await pending_task
+                if result["success"]:
+                    return result
+            except asyncio.CancelledError:
+                continue
+        logger.error("[MultiModelCaller] All subset models failed in race mode")
+        raise Exception("All models failed to respond")
+
+    async def call_balance_mode_subset(
+        self,
+        subset: List[Dict[str, Any]],
+        messages: List[Dict],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if not subset:
+            raise ValueError("call_balance_mode_subset: empty subset")
+        attempts = 0
+        last_error = None
+        start_time = time.time()
+        n = len(subset)
+        while attempts < n:
+            async with self._index_lock:
+                idx = self._subset_index % n
+                self._subset_index += 1
+            model_config = subset[idx]
+            attempts += 1
+            logger.info(
+                f"[MultiModelCaller] Balance subset: Selected {model_config['id']} "
+                f"(attempt {attempts}/{n})"
+            )
+            result = await self._call_single_model(model_config, messages, **kwargs)
+            if result["success"]:
+                if attempts > 1:
+                    logger.info(
+                        f"[MultiModelCaller] Success after {attempts} attempts, "
+                        f"total time: {time.time() - start_time:.2f}s"
+                    )
+                return result
+            last_error = result.get("error")
+            logger.warning(
+                f"[MultiModelCaller] Model {model_config['id']} failed, trying next in subset"
+            )
+        raise Exception(f"Model call failed: {last_error}")
+
+    async def call_on_subset(
+        self,
+        subset: List[Dict[str, Any]],
+        messages: List[Dict],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Balance/race/hybrid over a subset of registered models (same clients)."""
+        if self.mode == "race":
+            return await self.call_race_mode_subset(subset, messages, **kwargs)
+        if self.mode == "balance":
+            return await self.call_balance_mode_subset(subset, messages, **kwargs)
+        if self.mode == "hybrid":
+            return await self.call_balance_mode_subset(subset, messages, **kwargs)
+        raise ValueError(f"Unknown mode: {self.mode}")

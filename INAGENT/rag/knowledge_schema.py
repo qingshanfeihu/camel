@@ -149,6 +149,7 @@ SchemaGapKind = Literal[
     "new_entity_attribute",
     "conflict",
     "overflow",
+    "ambiguous_match",  # 农民无法区分多个候选节点，交给农场主裁决
 ]
 
 
@@ -169,6 +170,7 @@ class SchemaGapEntry:
     timestamp: str = ""
     nearest_matches: List[Dict[str, Any]] = field(default_factory=list)
     chunk_content: str = ""
+    ambiguous_candidates: List[Dict[str, Any]] = field(default_factory=list)  # ambiguous_match 时的候选节点列表
 
 
 @dataclass

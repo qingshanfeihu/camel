@@ -73,15 +73,19 @@ class BM25Retriever(BaseRetriever):
         
         if isinstance(content_input_path, list) and all(isinstance(e, Element) for e in content_input_path):
             elements = content_input_path
+            self.chunks = elements
         else:
             elements = self.unstructured_modules.parse_file_or_url(
                 content_input_path, **kwargs
             )
-            
-        if elements:
-            self.chunks = self.unstructured_modules.chunk_elements(
-                chunk_type=chunk_type, elements=elements
-            )
+            if elements:
+                self.chunks = self.unstructured_modules.chunk_elements(
+                    chunk_type=chunk_type, elements=elements
+                )
+            else:
+                self.chunks = []
+
+        if self.chunks:
 
             # Convert chunks to a list of strings for tokenization
             tokenized_corpus = [str(chunk).split(" ") for chunk in self.chunks]

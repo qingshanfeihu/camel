@@ -11,7 +11,11 @@ services:
     environment:
       - GATEWAY_CONFIG=/app/llm_gateway/config.yaml
       - GATEWAY_PORT=9000
-      # Load from .env file
+      # DashScope（主线路）
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      # OpenCode Go（可选；config.yaml 中 opencode_go.enabled=true 时需要）
+      - OPENCODE_GO_API_KEY=${OPENCODE_GO_API_KEY}
+      # 兼容旧变量名（若 .env 仍使用）
       - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
       - SILICONFLOW_API_BASE_URL=${SILICONFLOW_API_BASE_URL}
       - SILICONFLOW_CHAT_MODEL=${SILICONFLOW_CHAT_MODEL}

@@ -12,74 +12,57 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
-知识分类配置 — 定义文档分类体系与模式白名单
+知识分类配置 — 基于 command tree 的树层级检索策略
 
-所有模式对 GraphRAG 的检索范围由此处的白名单统一管控。
+所有模式对 GraphRAG 的检索范围由此处的树层级策略统一管控。
 workflow（pipeline、interactive_cli、web 等调用方）不需要知道底层用的是
 GraphRAG / 向量 / BM25，只需声明 mode，路由器会自动约束检索范围。
+
+树层级体系（由 knowledge_linker 在入库时标注）：
+  leaf     — 直接匹配到 command tree 叶子节点的知识块（CLI 命令等）
+  new_leaf — LLM 判定需要在树上新增的叶子节点
+  branch   — 匹配到模块/功能层级分支的知识块（应用配置等）
+  trunk    — 匹配到产品规格/设计层的知识块
+  root     — 架构/顶层设计知识块
 """
 from __future__ import annotations
 
-from typing import Dict, FrozenSet, List
+from typing import Dict, List
 
-# ── 一级文档分类（document_category） ──────────────────────────────
-# 这些值必须与 auto_document_integration / graphrag_adapter 中
-# 写入元数据的 document_category 字段严格一致。
-DOCUMENT_CATEGORIES = [
-    "cli/reference",           # CLI 命令语法手册
-    "app/reference",           # 应用配置参考(WebUI 等)
-    "architecture/design",     # 产品架构设计文档
-    "spec/prd",                # 产品需求文档 (PRD)
-    "spec/func_spec",          # 软件功能规格书
-    "spec/design",             # 软件设计文档
-    "test/test_list",          # 测试用例清单
-    "test/test_strategy",      # 测试策略/计划
-    "test/test_template",      # 测试用例模板
-    "review/rules",            # 测试评审规则/标准
-    "review/bug_fix",          # Bug 修复说明/根因与修复细节
-]
+# ── 合法树层级 ────────────────────────────────────────────────────
+TREE_LEVELS = ["leaf", "new_leaf", "branch", "trunk", "root"]
 
-# ── 模式 → 允许的文档分类白名单 ────────────────────────────────────
-# 每个模式只会检索白名单中的分类。
-# 检索时由 KnowledgeRouter 将白名单传递给 UnifiedRAGRetriever，
-# 后者将其作为 GraphRAG/向量检索的 document_category 过滤条件。
-MODE_CATEGORY_WHITELIST: Dict[str, List[str]] = {
+# ── 模式 → 允许的树层级策略 ────────────────────────────────────────
+# 每个模式只会检索对应层级的文档。
+# 检索时由 KnowledgeRouter 将层级列表传递给 UnifiedRAGRetriever，
+# 后者将其作为 tree_position.tree_level 过滤条件。
+MODE_TREE_STRATEGY: Dict[str, List[str]] = {
     "config": [
-        "cli/reference",
-        "app/reference",
-        "spec/design",
+        "leaf",
+        "new_leaf",
+        "branch",
     ],
     "test_write": [
-        "spec/prd",
-        "spec/func_spec",
-        "test/test_template",
-        "test/test_strategy",
-        "test/test_list",
-        "review/rules",
+        "leaf",
+        "new_leaf",
+        "branch",
+        "trunk",
     ],
     "test_review": [
-        "review/rules",
-        "review/bug_fix",
-        "test/test_list",
-        "spec/prd",
-        "spec/func_spec",
-        "spec/design",
-        "architecture/design",
-        "cli/reference",
-        "app/reference",
+        "leaf",
+        "new_leaf",
+        "branch",
+        "trunk",
+        "root",
     ],
     "explain": [
-        "architecture/design",
-        "spec/design",
-        "spec/prd",
-        "spec/func_spec",
-        "app/reference",
-        "cli/reference",
+        "branch",
+        "trunk",
+        "root",
     ],
 }
 
 # ── 模式 → 检索上下文字符预算权重 ─────────────────────────────────
-# 权重越高，分配到的上下文字符数越多。总量由调用方的 max_context_chars 决定。
 MODE_BUDGET_WEIGHTS: Dict[str, int] = {
     "config":      10,
     "test_write":  10,
@@ -87,9 +70,27 @@ MODE_BUDGET_WEIGHTS: Dict[str, int] = {
     "explain":     10,
 }
 
-# ── 知识层 → document_category 映射 ───────────────────────────────
-# 旧的四层（CLI/RULES/DESIGN/TEST）到新分类的映射。
-# 保留是为了兼容过渡期；新代码应直接使用 MODE_CATEGORY_WHITELIST。
+# ── 旧分类 → 树层级映射（向后兼容迁移） ───────────────────────────
+# 用于运行时将旧 document_category 元数据映射到 tree_level。
+# 新文档不再使用 document_category，此映射仅服务于未重新入库的历史数据。
+CATEGORY_TO_TREE_LEVEL: Dict[str, str] = {
+    "cli/reference": "leaf",
+    "app/reference": "branch",
+    "architecture/design": "root",
+    "spec/prd": "trunk",
+    "spec/func_spec": "trunk",
+    "spec/design": "trunk",
+    "test/test_list": "branch",
+    "test/test_strategy": "trunk",
+    "test/test_template": "branch",
+    "review/rules": "trunk",
+    "review/bug_fix": "leaf",
+}
+
+# ── 向后兼容别名 ──────────────────────────────────────────────────
+# 旧代码可能引用这些名称；新代码应使用 MODE_TREE_STRATEGY。
+DOCUMENT_CATEGORIES = list(CATEGORY_TO_TREE_LEVEL.keys())
+MODE_CATEGORY_WHITELIST = MODE_TREE_STRATEGY
 LAYER_TO_CATEGORIES: Dict[str, List[str]] = {
     "cli":    ["cli/reference", "app/reference"],
     "rules":  ["review/rules", "test/test_template"],

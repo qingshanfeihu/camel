@@ -206,7 +206,12 @@ class GraphRAGRetriever:
             communities = self._communities if self._communities is not None else pd.DataFrame()
             community_reports = self._community_reports if self._community_reports is not None else pd.DataFrame()
 
-            entities_ = read_indexer_entities(self._entities, communities, None)
+            entities_df = self._entities.copy()
+            for col in ("degree", "frequency"):
+                if col in entities_df.columns:
+                    entities_df[col] = entities_df[col].fillna(0)
+
+            entities_ = read_indexer_entities(entities_df, communities, None)
             reports_ = read_indexer_reports(community_reports, communities, community_level)
             text_units_ = read_indexer_text_units(self._text_units)
             relationships_ = read_indexer_relationships(
@@ -908,8 +913,13 @@ class GraphRAGRetriever:
                 if "human_readable_id" in df.columns
                 else len(df) + len(new_rows),
             }
-            if "source_id" in p and p["source_id"]:
-                row["text_unit_ids"] = [p["source_id"]]
+            # 只保留真实的 text_unit hash ID（hex 64 字符），不使用文件名作为 text_unit_id
+            # 否则 _check_referential_integrity 会因断链拒绝加载整个 GraphRAG
+            source_id = p.get("source_id", "")
+            if source_id and len(source_id) >= 32 and "." not in source_id:
+                row["text_unit_ids"] = [source_id]
+            else:
+                row["text_unit_ids"] = []
             new_rows.append(row)
 
         if not new_rows:

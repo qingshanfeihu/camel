@@ -102,6 +102,9 @@ class SkeletonIndex:
         self._try_add_column(
             "artifact_links", "face_type", "TEXT NOT NULL DEFAULT 'general'"
         )
+        self._try_add_column(
+            "artifacts", "tree_level", "TEXT NOT NULL DEFAULT ''"
+        )
         self._conn.commit()
 
     def _try_add_column(self, table: str, column: str, col_def: str) -> None:
@@ -242,7 +245,7 @@ class SkeletonIndex:
         return count
 
     def _compute_kb_fh_stats(self, cli_graph_store) -> Dict[str, Dict[str, int]]:
-        """统计 KB chunks 中各 branch 的 document_category 分布。"""
+        """统计 KB chunks 中各 branch 的 tree_level 分布。"""
         _KB_DIR = Path(__file__).resolve().parent.parent / "knowledge_base"
         kb_path = _KB_DIR / "knowledge_base.json"
         if not kb_path.exists():
@@ -253,6 +256,8 @@ class SkeletonIndex:
                 chunks = json.load(f)
         except Exception:
             return {}
+
+        from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
 
         stats: Dict[str, Dict[str, int]] = {}
         for chunk in chunks:
@@ -265,8 +270,11 @@ class SkeletonIndex:
             if not fh:
                 continue
 
-            cat = meta.get("document_category", "unknown")
-            cat_key = cat.split("/")[0] if "/" in cat else cat
+            tree_pos = meta.get("tree_position") or {}
+            cat_key = tree_pos.get("tree_level", "") if isinstance(tree_pos, dict) else ""
+            if not cat_key:
+                old_cat = meta.get("document_category", "")
+                cat_key = CATEGORY_TO_TREE_LEVEL.get(old_cat, "unknown")
 
             content = str(chunk.get("page_content") or chunk.get("text") or "")
             content_lower = content[:200].lower()
@@ -355,7 +363,7 @@ class SkeletonIndex:
         )
         self._conn.commit()
 
-    _SOURCE_KEYS = ("app", "cli", "spec", "design", "bugfix")
+    _SOURCE_KEYS = ("leaf", "new_leaf", "branch", "trunk", "root")
 
     def get_knowledge_completeness(self, feature_id: str) -> Dict[str, Any]:
         """返回功能节点的知识完整度。"""
@@ -376,13 +384,16 @@ class SkeletonIndex:
         trunk_layers = feat.get("trunk_layers", [])
         trunk_planes = feat.get("trunk_planes", [])
 
-        stage = "leaf"
-        if ks.get("app", 0) > 0:
-            stage = "branch"
-        if trunk_layers:
+        if ks.get("root", 0) > 0:
+            stage = "root"
+        elif ks.get("trunk", 0) > 0 or trunk_layers:
             stage = "trunk"
-        if ks.get("design", 0) > 0:
-            stage = "rooted"
+        elif ks.get("branch", 0) > 0:
+            stage = "branch"
+        elif ks.get("leaf", 0) > 0 or ks.get("new_leaf", 0) > 0:
+            stage = "leaf"
+        else:
+            stage = "unknown"
 
         return {
             "feature_id": feature_id,
@@ -426,6 +437,7 @@ class SkeletonIndex:
         artifact_type: str = "doc",
         module_id: str = "",
         document_category: str = "",
+        tree_level: str = "",
         source_file: str = "",
         qdrant_point_id: str = "",
         graphrag_entity_id: str = "",
@@ -436,10 +448,10 @@ class SkeletonIndex:
             """
             INSERT INTO artifacts(
                 artifact_id, artifact_type, module_id, document_category,
-                source_file, qdrant_point_id, graphrag_entity_id,
+                tree_level, source_file, qdrant_point_id, graphrag_entity_id,
                 title, quality_score, created_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(artifact_id) DO UPDATE SET
                 artifact_type=excluded.artifact_type,
                 module_id=CASE
@@ -447,6 +459,10 @@ class SkeletonIndex:
                     ELSE artifacts.module_id
                 END,
                 document_category=excluded.document_category,
+                tree_level=CASE
+                    WHEN excluded.tree_level != '' THEN excluded.tree_level
+                    ELSE artifacts.tree_level
+                END,
                 source_file=excluded.source_file,
                 qdrant_point_id=CASE
                     WHEN excluded.qdrant_point_id != '' THEN excluded.qdrant_point_id
@@ -464,6 +480,7 @@ class SkeletonIndex:
                 artifact_type,
                 module_id,
                 document_category,
+                tree_level,
                 source_file,
                 qdrant_point_id,
                 graphrag_entity_id,
