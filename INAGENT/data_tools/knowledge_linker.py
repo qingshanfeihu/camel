@@ -418,6 +418,12 @@ def link_blocks(
     stats = {"total": len(blocks), "farmer_matched": 0, "owner_decided": 0, "escalated": 0}
     escalate_list: List[Dict[str, Any]] = []
 
+    # Farmer matches below this confidence are treated as uncertain and forwarded
+    # to the owner (LLM) for semantic validation.  Threshold 0.6 keeps high-
+    # confidence rule-based paths (manifest=0.9, command_prefix=0.95/0.7,
+    # hierarchy=0.8) while escalating pure keyword-coincidence matches (0.5).
+    _FARMER_CONFIDENCE_THRESHOLD = 0.6
+
     for idx, block in enumerate(blocks):
         meta = block.get("metadata", {})
         text = str(block.get("page_content") or block.get("text") or "")
@@ -427,7 +433,7 @@ def link_blocks(
         hint = manifest_hints.get(stem)
 
         pos = farmer_link(text, meta, cli_graph_store, manifest_hint=hint)
-        if pos and pos.is_valid():
+        if pos and pos.is_valid() and pos.confidence >= _FARMER_CONFIDENCE_THRESHOLD:
             meta["tree_position"] = pos.to_dict()
             stats["farmer_matched"] += 1
         else:

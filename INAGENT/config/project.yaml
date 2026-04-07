@@ -156,6 +156,8 @@ auto_convert:
   force_siliconflow: "1"
   assume_yes: ""
   vllm:
+    # 本地 OpenAI 兼容 vLLM（MinerU -b hybrid-http-client）。默认关闭，避免仅用 MinerU 云端 API 时误报 vLLM 不可用。
+    enable: false
     url: ""
     models_timeout_seconds: 8
     infer_timeout_seconds: 30
@@ -170,3 +172,8 @@ auto_convert:
     max_pages_test: ""
   mineru:
     cli: ""
+    # 云端：省略 cloud.enable 时，有 MINERU_API_TOKEN / MINERU_API_KEY 则优先云端，失败再本地 CLI（非 vLLM）
+    cloud:
+      # enable: false   # 强制仅用本地 MinerU CLI
+      api_base: "https://mineru.net/api/v4"
+      poll_timeout_seconds: 3600

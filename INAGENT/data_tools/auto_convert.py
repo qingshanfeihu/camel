@@ -27,6 +27,11 @@ from camel.loaders.local_mineru_reader import LocalMinerUReader
 from camel.logger import set_log_file, set_log_level
 
 from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
+from INAGENT.data_tools.mineru_cloud_client import (
+    DEFAULT_API_BASE as MINERU_CLOUD_DEFAULT_API_BASE,
+    mineru_cloud_parse_one_pdf,
+    validate_content_list,
+)
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
@@ -345,15 +350,79 @@ MINERU_OUTPUT_DIR = DOC_LOCAL_DIR / "mineru_output"
 # 备份目录：大文件移到这里而非删除，MinerU 重新生成代价很高
 MINERU_BACKUP_DIR = DOC_LOCAL_DIR / "mineru_backup"
 
-# vLLM Docker Configuration
-# Set to True if using Docker-hosted MinerU vLLM server (e.g. port 30000)
+# vLLM Docker Configuration (optional MinerU hybrid-http-client backend)
 # Docs: https://opendatalab.github.io/MinerU/zh/quick_start/docker_deployment/
-USE_DOCKER_VLLM = True
+# Default False: MinerU 云端 API 或纯本地引擎不需要本地 vLLM；避免误报「vLLM 不可用」。
+# 需要本地 OpenAI 兼容 vLLM 时：project.yaml 设 auto_convert.vllm.enable: true
+# 或环境变量 AUTO_CONVERT_USE_MINERU_VLLM=1。
+USE_DOCKER_VLLM: bool = False
 DOCKER_VLLM_URL = (
     cfg_str("auto_convert.vllm.url", "", env="MINERU_VLLM_URL")
     or cfg_str("auto_convert.vllm.url", "", env="VLLM_URL")
     or "http://127.0.0.1:8000"
 )
+
+
+def _refresh_mineru_vllm_settings() -> None:
+    """Reload vLLM flags after load_inagent_env() so .env / project.yaml apply."""
+    global USE_DOCKER_VLLM, DOCKER_VLLM_URL
+    USE_DOCKER_VLLM = cfg_bool(
+        "auto_convert.vllm.enable",
+        False,
+        env="AUTO_CONVERT_USE_MINERU_VLLM",
+    )
+    DOCKER_VLLM_URL = (
+        cfg_str("auto_convert.vllm.url", "", env="MINERU_VLLM_URL")
+        or cfg_str("auto_convert.vllm.url", "", env="VLLM_URL")
+        or "http://127.0.0.1:8000"
+    )
+
+
+def _mineru_cloud_token() -> str:
+    return (
+        os.environ.get("MINERU_API_TOKEN", "").strip()
+        or os.environ.get("MINERU_API_KEY", "").strip()
+    )
+
+
+def _use_mineru_cloud() -> bool:
+    """Prefer cloud when credentials exist unless explicitly disabled."""
+    env_raw = os.environ.get("AUTO_CONVERT_MINERU_CLOUD")
+    if env_raw is not None:
+        return str(env_raw).strip().lower() in {"1", "true", "yes", "on"}
+    raw_cfg = _load_project_config()
+    if isinstance(raw_cfg, dict):
+        ac = raw_cfg.get("auto_convert")
+        if isinstance(ac, dict):
+            mineru = ac.get("mineru")
+            if isinstance(mineru, dict):
+                cloud = mineru.get("cloud")
+                if isinstance(cloud, dict) and "enable" in cloud:
+                    v = cloud["enable"]
+                    if isinstance(v, bool):
+                        return v
+                    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(_mineru_cloud_token())
+
+
+def _mineru_cloud_api_base() -> str:
+    u = cfg_str(
+        "auto_convert.mineru.cloud.api_base",
+        MINERU_CLOUD_DEFAULT_API_BASE,
+        env="MINERU_CLOUD_API_BASE",
+    ).strip()
+    return u or MINERU_CLOUD_DEFAULT_API_BASE
+
+
+def _mineru_cloud_poll_timeout() -> float:
+    return float(
+        cfg_int(
+            "auto_convert.mineru.cloud.poll_timeout_seconds",
+            3600,
+            env="MINERU_CLOUD_POLL_TIMEOUT",
+        )
+    )
+
 
 # Cached availability checks
 _VLLM_AVAILABLE: Optional[bool] = None
@@ -2190,8 +2259,8 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     else:
         logger.info("[mineru] processing %s ...", pdf)
     
-    # Configure backend arguments
-    extra_args = []
+    # Local MinerU CLI extras (optional hybrid-http-client + vLLM)
+    local_extra_args: List[str] = []
     use_vllm_backend = USE_DOCKER_VLLM
     if use_vllm_backend:
         global _VLLM_AVAILABLE
@@ -2212,11 +2281,8 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     if use_vllm_backend:
         # hybrid-http-client: Local Layout + Remote VLM
         # Check docs: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#clientopenai-hybrid-http-client
-        extra_args = ["-b", "hybrid-http-client", "-u", DOCKER_VLLM_URL]
+        local_extra_args = ["-b", "hybrid-http-client", "-u", DOCKER_VLLM_URL]
         logger.info("[mineru] Using Docker vLLM backend: %s", DOCKER_VLLM_URL)
-    urls_to_check = []
-    if USE_DOCKER_VLLM:
-        urls_to_check.append(_build_models_url(DOCKER_VLLM_URL))
 
     # Skip network check for MinerU because modelscope handles connectivity internally
     # and we want to avoid blocking on HuggingFace timeouts.
@@ -2241,29 +2307,60 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
         )
     else:
         task_id = ""
-        last_error: Optional[Exception] = None
-        for attempt in range(1, NET_RETRY_ATTEMPTS + 1):
-            try:
-                task_id = await reader.submit_task(
-                    str(pdf),
-                    extra_args=extra_args,
-                    cwd=str(MINERU_OUTPUT_DIR),
+        cloud_attempted = False
+        # 1) MinerU 云端 API（有凭证且未限制 max_pages 时优先）
+        if max_pages is None and _use_mineru_cloud():
+            tok = _mineru_cloud_token()
+            if tok:
+                cloud_attempted = True
+                logger.info("[mineru-cloud] trying cloud API for %s ...", pdf.name)
+                cloud_json = await asyncio.to_thread(
+                    mineru_cloud_parse_one_pdf,
+                    pdf,
+                    output_root=MINERU_OUTPUT_DIR,
+                    token=tok,
+                    api_base=_mineru_cloud_api_base(),
+                    poll_timeout=_mineru_cloud_poll_timeout(),
+                    logger=logger,
                 )
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "[mineru] submit failed (attempt %d/%d): %s",
-                    attempt,
-                    NET_RETRY_ATTEMPTS,
-                    exc,
-                )
-                if attempt < NET_RETRY_ATTEMPTS:
-                    await asyncio.sleep(NET_RETRY_DELAY * attempt)
+                if cloud_json and validate_content_list(cloud_json):
+                    task_id = pdf.stem
+                    logger.info(
+                        "[mineru-cloud] done -> %s",
+                        cloud_json,
+                    )
+                else:
+                    logger.warning(
+                        "[mineru-cloud] unavailable or empty output; "
+                        "falling back to local MinerU CLI (non-vLLM / default backend)."
+                    )
+
+        # 2) 本地 MinerU CLI；若已尝试云端失败，强制不用 vLLM 额外参数
         if not task_id:
-            raise RuntimeError(
-                f"MinerU submit failed after retries: {last_error}"
-            )
+            extra_args = [] if cloud_attempted else local_extra_args
+            last_error: Optional[Exception] = None
+            for attempt in range(1, NET_RETRY_ATTEMPTS + 1):
+                try:
+                    task_id = await reader.submit_task(
+                        str(pdf),
+                        extra_args=extra_args,
+                        cwd=str(MINERU_OUTPUT_DIR),
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "[mineru] submit failed (attempt %d/%d): %s",
+                        attempt,
+                        NET_RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    if attempt < NET_RETRY_ATTEMPTS:
+                        await asyncio.sleep(NET_RETRY_DELAY * attempt)
+            if not task_id:
+                raise RuntimeError(
+                    f"MinerU submit failed after retries: {last_error}"
+                )
     mineru_elapsed_s = time.perf_counter() - start_time
     logger.info(
         "[mineru] finished task_id=%s in %.2fs",
@@ -2755,6 +2852,7 @@ def _cleanup_orphan_files(pdfs: List[Path], office_files: Optional[List[Path]] =
 
 async def main() -> None:
     load_inagent_env()
+    _refresh_mineru_vllm_settings()
     _setup_logging()
     
     # 调试：输出关键环境变量
@@ -2844,6 +2942,11 @@ async def main() -> None:
                 logger.info("用户取消操作。")
                 sys.exit(0)
             USE_DOCKER_VLLM = False
+    else:
+        logger.info(
+            "[mineru] 未启用本地 vLLM（auto_convert.vllm.enable / AUTO_CONVERT_USE_MINERU_VLLM）；"
+            "MinerU 使用 CLI 默认后端（可与 MinerU 云端 API 或本地模型配合，无需探测 127.0.0.1 vLLM）。"
+        )
 
     # LLM Gateway preflight: probe real /chat/completions
     global _LLM_GATEWAY_AVAILABLE
@@ -2895,16 +2998,14 @@ async def main() -> None:
         # ============================================================
         # MinerU 配置说明：
         # ============================================================
-        # 1. Backend: hybrid-auto-engine（默认）
-        #    - 本地处理，无需远程 HTTP 服务器
-        #    - 支持 vLLM 加速（可选）
-        #    - 详见: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#vllm-vlm
+        # 1. 云端优先：配置 MINERU_API_TOKEN 或 MINERU_API_KEY 时，convert_one 先走 MinerU Cloud API；
+        #    失败或结果无效时回退本地 mineru CLI，且回退时固定为默认后端（不带 hybrid-http-client / 本地 vLLM）。
+        #    强制关云端：project.yaml auto_convert.mineru.cloud.enable: false
+        #    或环境变量 AUTO_CONVERT_MINERU_CLOUD=0
         #
-        # 2. vLLM 加速（推荐用于批量处理）:
-        #    - 启动: mineru-vllm-server（或运行 run_vllm_server.ps1）
-        #    - 地址: http://127.0.0.1:30000
-        #    - 自动从 mineru.json 读取 models-dir.vlm 配置
-        #    - GPU 内存利用率自动优化
+        # 2. 本地默认: hybrid-auto-engine（无需本地 vLLM HTTP 服务）
+        #    可选 vLLM：project.yaml auto_convert.vllm.enable: true 或 AUTO_CONVERT_USE_MINERU_VLLM=1
+        #    详见: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#vllm-vlm
         #
         # 3. MinerU 命令查找优先级：
         #    a. MINERU_CLI 环境变量（如果设置）
@@ -2931,7 +3032,8 @@ async def main() -> None:
         logger.info("Found %d pdf(s) under %s", len(pdfs), DOC_LOCAL_DIR)
         logger.info("Using MinerU command: %s", mineru_cmd)
         logger.info(
-            "Backend: hybrid-auto-engine (default, supports vLLM acceleration)"
+            "MinerU CLI default backend (enable auto_convert.vllm.enable or "
+            "AUTO_CONVERT_USE_MINERU_VLLM=1 for local hybrid-http-client + vLLM)"
         )
         overall_start = time.perf_counter()
 
@@ -3056,6 +3158,63 @@ async def main() -> None:
                                     break
 
                     _enhance_metadata_with_function_index(blocks)
+
+                    # Contextual chunking: prepend section_title to page_content so
+                    # that BM25 and vector search can match on section headings
+                    # directly.  Without this, a block whose section title is
+                    # "产品概述" but whose body is a legal disclaimer will never
+                    # surface for the query "产品概述" because the title only exists
+                    # in metadata, not in the indexed text.
+                    # Safe to apply universally: the check `not content.startswith`
+                    # prevents double-prepending on re-runs.
+                    for _blk in blocks:
+                        if not isinstance(_blk, dict):
+                            continue
+                        _meta = _blk.get("metadata") or {}
+                        _title = (_meta.get("section_title") or "").strip()
+                        if not _title or len(_title) < 2:
+                            continue
+                        _content = str(_blk.get("page_content") or "")
+                        if not _content.startswith(_title):
+                            _blk["page_content"] = _title + "\n" + _content
+
+                    # Post-pass: ensure tree_position is present and has passed
+                    # the confidence threshold for all blocks.
+                    # Two conditions trigger re-linking:
+                    #  1. tree_position is absent (file predates knowledge_linker)
+                    #  2. tree_position.knowledge_role == "keyword_match" — these were
+                    #     accepted by farmer under the old threshold (confidence=0.5)
+                    #     but are now escalated to the owner for semantic validation.
+                    def _needs_relink(b: dict) -> bool:
+                        if not isinstance(b, dict):
+                            return False
+                        tp = (b.get("metadata") or {}).get("tree_position")
+                        if not tp:
+                            return True
+                        if isinstance(tp, dict) and tp.get("knowledge_role") == "keyword_match":
+                            return True
+                        return False
+
+                    relink_count = sum(1 for b in blocks if _needs_relink(b))
+                    missing_tp = sum(
+                        1 for b in blocks
+                        if isinstance(b, dict)
+                        and not (b.get("metadata") or {}).get("tree_position")
+                    )
+                    low_conf_count = relink_count - missing_tp
+                    if relink_count:
+                        logger.info(
+                            "[link-gap] %s: %d block(s) need linking "
+                            "(missing=%d, low-confidence=%d), running knowledge linking",
+                            json_file.name, relink_count, missing_tp, low_conf_count,
+                        )
+                        # Clear stale keyword_match tree_position so link_blocks
+                        # treats them as unlinked and escalates to owner.
+                        for b in blocks:
+                            if _needs_relink(b):
+                                (b.get("metadata") or {}).pop("tree_position", None)
+                        blocks, _link_stats = _run_knowledge_linking(blocks, json_file)
+
                     json_file.write_text(
                         json.dumps(blocks, ensure_ascii=False, indent=2),
                         encoding="utf-8",

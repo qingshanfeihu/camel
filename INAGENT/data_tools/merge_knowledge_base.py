@@ -101,6 +101,19 @@ def merge_knowledge_base(
             logger.error("[merge] Failed to process %s: %s", json_file.name, e)
             continue
 
+    # Guard: warn if any source file still has blocks without tree_position.
+    # This indicates knowledge_linker has not been run on that file yet.
+    for chunk in all_chunks:
+        meta = chunk.get("metadata") or {}
+        if not meta.get("tree_position"):
+            src = meta.get("source_file", "unknown")
+            logger.warning(
+                "[merge] chunk in '%s' is missing tree_position — "
+                "run auto_convert (post-pass) to enrich before merging",
+                src,
+            )
+            break  # one warning per merge call is enough
+
     # Ingest validation: quality gate + metadata enrichment
     try:
         from INAGENT.data_tools.ingest_validator import IngestValidator

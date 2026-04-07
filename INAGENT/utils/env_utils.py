@@ -175,6 +175,20 @@ def load_knowledge_base(knowledge_dir: Path) -> List[Document]:
                         
                         docs.append(Document(page_content=content, metadata=metadata))
                     logger.info(f"Loaded {len(docs)} chunks from merged knowledge_base.json")
+                    # Warn if any source JSON is newer than the merged file —
+                    # the merged KB may be stale and should be rebuilt.
+                    merged_mtime = merged_file.stat().st_mtime
+                    stale_sources = [
+                        p.name for p in sorted(knowledge_dir.glob("*.json"))
+                        if p.name != "knowledge_base.json"
+                        and p.stat().st_mtime > merged_mtime
+                    ]
+                    if stale_sources:
+                        logger.warning(
+                            "knowledge_base.json may be stale; newer source files detected: %s "
+                            "— re-run auto_convert to rebuild",
+                            ", ".join(stale_sources),
+                        )
                     return docs
         except Exception as e:
             logger.warning(f"Failed to load merged file {merged_file}: {e}, falling back to individual files")
