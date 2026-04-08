@@ -257,8 +257,6 @@ class SkeletonIndex:
         except Exception:
             return {}
 
-        from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
-
         stats: Dict[str, Dict[str, int]] = {}
         for chunk in chunks:
             meta = chunk.get("metadata") or {}
@@ -273,8 +271,7 @@ class SkeletonIndex:
             tree_pos = meta.get("tree_position") or {}
             cat_key = tree_pos.get("tree_level", "") if isinstance(tree_pos, dict) else ""
             if not cat_key:
-                old_cat = meta.get("document_category", "")
-                cat_key = CATEGORY_TO_TREE_LEVEL.get(old_cat, "unknown")
+                cat_key = meta.get("tree_level", "unknown")
 
             content = str(chunk.get("page_content") or chunk.get("text") or "")
             content_lower = content[:200].lower()

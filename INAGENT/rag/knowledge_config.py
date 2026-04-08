@@ -70,37 +70,14 @@ MODE_BUDGET_WEIGHTS: Dict[str, int] = {
     "explain":     10,
 }
 
-# ── 旧分类 → 树层级映射（向后兼容迁移） ───────────────────────────
-# 用于运行时将旧 document_category 元数据映射到 tree_level。
-# 新文档不再使用 document_category，此映射仅服务于未重新入库的历史数据。
-CATEGORY_TO_TREE_LEVEL: Dict[str, str] = {
-    "cli/reference": "leaf",
-    "cli": "leaf",
-    "app/reference": "branch",
-    "app": "branch",
-    "architecture/design": "root",
-    "architecture": "root",
-    "spec/prd": "trunk",
-    "spec/func_spec": "trunk",
-    "spec/design": "trunk",
-    "spec": "trunk",            # infer_document_category("trunk") → "spec" 的反向映射
-    "test/test_list": "branch",
-    "test/test_strategy": "trunk",
-    "test/test_template": "branch",
-    "test": "branch",           # 裸别名
-    "review/rules": "trunk",
-    "review/bug_fix": "leaf",
-    "review": "branch",         # 裸别名（与 CAT_TO_LEVEL 保持一致）
-    "doc": "branch",            # infer_document_category("new_leaf") 兜底返回 "doc"
-}
-
-# ── 向后兼容别名 ──────────────────────────────────────────────────
-# 旧代码可能引用这些名称；新代码应使用 MODE_TREE_STRATEGY。
-DOCUMENT_CATEGORIES = list(CATEGORY_TO_TREE_LEVEL.keys())
+# ── 文档分类白名单（采购员验证用） ─────────────────────────────────
+DOCUMENT_CATEGORIES = [
+    "cli/reference", "cli",
+    "app/reference", "app",
+    "architecture/design", "architecture",
+    "spec/prd", "spec/func_spec", "spec/design", "spec",
+    "test/test_list", "test/test_strategy", "test/test_template", "test",
+    "review/rules", "review/bug_fix", "review",
+    "doc",
+]
 MODE_CATEGORY_WHITELIST = MODE_TREE_STRATEGY
-LAYER_TO_CATEGORIES: Dict[str, List[str]] = {
-    "cli":    ["cli/reference", "app/reference"],
-    "rules":  ["review/rules", "test/test_template"],
-    "design": ["spec/prd", "spec/func_spec", "spec/design", "architecture/design"],
-    "test":   ["test/test_list", "test/test_strategy", "review/bug_fix"],
-}

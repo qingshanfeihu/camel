@@ -2005,16 +2005,18 @@ class KnowledgeFarmOwnerAgent:
         """从 chunk metadata 结构信号推断 tree_level（不依赖 CLI graph）。
 
         信号优先级：
+          0. LLM 在 auto_convert 阶段直接判定的 tree_level → 直接采用
           1. function_hierarchy 只有一级（纯模块名，无 > 分隔）→ trunk
           2. function_hierarchy 多级 + section_path 浅层且含概述关键词 → trunk
           3. function_hierarchy 多级 → branch
-          4. document_category 在 CATEGORY_TO_TREE_LEVEL 映射中 → 对应层级
-          5. manifest 声明的 tree_level_hint（兜底，仅在上述全部无法判定时使用）
-          6. 无法判定 → "unknown"
+          4. 无法判定 → "unknown"
         """
         if not chunk_meta:
             return "unknown"
-        from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
+
+        llm_level = chunk_meta.get("tree_level", "")
+        if llm_level in ("leaf", "new_leaf", "branch", "trunk", "root"):
+            return llm_level
 
         fh = chunk_meta.get("function_hierarchy", "").strip()
         if fh:
@@ -2028,14 +2030,6 @@ class KnowledgeFarmOwnerAgent:
                 if len(sp_parts) <= 1 and any(kw in sp for kw in _OVERVIEW_KW):
                     return "trunk"
                 return "branch"
-
-        doc_cat = chunk_meta.get("document_category", "")
-        if doc_cat and doc_cat in CATEGORY_TO_TREE_LEVEL:
-            return CATEGORY_TO_TREE_LEVEL[doc_cat]
-
-        manifest_hint = chunk_meta.get("_manifest_tree_level_hint", "")
-        if manifest_hint in ("leaf", "new_leaf", "branch", "trunk", "root"):
-            return manifest_hint
 
         return "unknown"
 

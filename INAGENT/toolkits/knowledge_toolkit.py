@@ -231,11 +231,8 @@ class KnowledgeToolkit(BaseToolkit):
                 ``knowledge_config.TREE_LEVELS`` (e.g. ``"leaf,branch"``).
                 These are passed to ``UnifiedRAGRetriever`` as
                 ``category_whitelist`` and filter on
-                ``metadata.tree_position.tree_level`` (with
-                ``document_category → tree_level`` fallback via
-                ``CATEGORY_TO_TREE_LEVEL``).  Legacy ``cli/reference``-style
-                strings are **not** valid whitelist members unless they equal a
-                tree level name.  When empty, ``MODE_TREE_STRATEGY[mode]`` is
+                ``metadata.tree_position.tree_level``.
+                When empty, ``MODE_TREE_STRATEGY[mode]`` is
                 used.
             max_results: Maximum number of top results to include in the
                 response (default 8).

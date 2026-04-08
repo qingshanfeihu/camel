@@ -322,6 +322,9 @@ class TestWriteToReference:
         agent = _make_agent()
         cache = {"cli_0_aabbccdd": datetime.now().isoformat()}
         (tmp_path / "cli.farmer_cache.json").write_text(json.dumps(cache), "utf-8")
+        (tmp_path / "cli.json").write_text(json.dumps([
+            {"page_content": "x", "metadata": {"source_file": "cli.pdf", "block_id": "cli_0_aabbccdd"}}
+        ]), "utf-8")
 
         result = FarmResult(
             chunk={"page_content": "x", "metadata": {"source_file": "cli.pdf", "block_id": "cli_0_aabbccdd"}},
@@ -330,6 +333,22 @@ class TestWriteToReference:
         )
         counts = agent.write_to_reference([result], ref_dir=tmp_path, log_dir=tmp_path)
         assert counts["cli"] == 0
+
+    def test_stale_cache_cleared_when_ref_missing(self, tmp_path):
+        from datetime import datetime
+
+        agent = _make_agent()
+        cache = {"cli_0_aabbccdd": datetime.now().isoformat()}
+        (tmp_path / "cli.farmer_cache.json").write_text(json.dumps(cache), "utf-8")
+
+        result = FarmResult(
+            chunk={"page_content": "x", "metadata": {"source_file": "cli.pdf", "block_id": "cli_0_aabbccdd"}},
+            source_file="cli.pdf",
+            block_id="cli_0_aabbccdd",
+        )
+        counts = agent.write_to_reference([result], ref_dir=tmp_path, log_dir=tmp_path)
+        assert counts["cli"] == 1
+        assert not (tmp_path / "cli.farmer_cache.json.stale").exists()
 
     def test_write_to_reference_uses_log_dir(self, tmp_path):
         ref_dir = tmp_path / "ref"

@@ -42,6 +42,7 @@ from INAGENT.toolkits.knowledge_toolkit import KnowledgeToolkit
 from INAGENT.config.project_config import cfg_float
 from INAGENT.utils.ssh_client import create_ssh_client_from_env
 from INAGENT.utils.vm_controller import VMController
+from INAGENT.utils.env_utils import get_product_name
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +60,9 @@ _PIPELINE_TASK_TIMEOUT_SECONDS = max(
     600.0,
 )
 
-# ── NSAE CLI 命令删除参考（供 Cleanup Agent System Prompt 使用） ─────────
-_NSAE_DELETE_REFERENCE = """\
-NSAE/InfosecOS 删除命令语法参考:
+# ── CLI 命令删除参考（供 Cleanup Agent System Prompt 使用） ─────────
+_NSAE_DELETE_REFERENCE_TEMPLATE = """\
+{product_name} 删除命令语法参考:
 - 删除 virtual server:       no slb virtual http "<name>"
 - 删除 real server:          no slb real http "<name>"
 - 删除 SLB group:            no slb group method "<name>"
@@ -70,6 +71,10 @@ NSAE/InfosecOS 删除命令语法参考:
 - 删除 IP address:           no ip address <interface>
 - 顺序要求: virtual → group → real → health → route → ip address
 """
+
+
+def _get_delete_reference() -> str:
+    return _NSAE_DELETE_REFERENCE_TEMPLATE.format(product_name=get_product_name())
 
 
 # ── O3: WorkforceCallback 实时日志 ──────────────────────────────────
@@ -242,7 +247,7 @@ async def run_workforce_pipeline_async(
         BaseMessage.make_assistant_message(
             role_name="DeployWorker",
             content=(
-                "你是 NSAE 设备配置下发专家。\n"
+                f"你是 {get_product_name()} 设备配置下发专家。\n"
                 "使用 execute_config_commands 工具将配置命令逐条下发到设备。\n"
                 "命令格式：每行一条命令，用换行符分隔。\n"
                 "如果某条命令返回 error，记录错误并继续后续命令。\n"
@@ -261,7 +266,7 @@ async def run_workforce_pipeline_async(
         BaseMessage.make_assistant_message(
             role_name="VerifyShowWorker",
             content=(
-                "你是 NSAE 设备状态验证专家。\n"
+                f"你是 {get_product_name()} 设备状态验证专家。\n"
                 "使用 execute_show_commands 和 get_module_config 工具查询设备状态。\n"
                 "如果指定的 show 命令输出不足以判断配置是否生效，你必须主动执行补充命令。\n"
                 "例如：如果 show slb health 输出中未见自定义 request/response 字段，"
@@ -338,7 +343,7 @@ async def run_workforce_pipeline_async(
             content=(
                 "你是测试环境清理专家。\n"
                 "根据提供的配置命令列表，生成对应的 no/delete 删除命令并下发到设备。\n"
-                f"{_NSAE_DELETE_REFERENCE}\n"
+                f"{_get_delete_reference()}\n"
                 "你还拥有知识检索工具，当不确定删除命令语法时可以查询 cli/reference。\n"
                 "同时使用 stop_http_server 停止 VM 上的 HTTP 服务。\n"
                 "返回清理结果统计。"
@@ -370,7 +375,7 @@ async def run_workforce_pipeline_async(
     deploy_task_obj = Task(
         content=(
             f"【阶段5: 配置下发】\n"
-            f"请将以下配置命令下发到 NSAE 设备：\n"
+            f"请将以下配置命令下发到 {get_product_name()} 设备：\n"
             f"```\n{config_commands_text}\n```\n"
         ),
         id="stage5_deploy",
@@ -380,7 +385,7 @@ async def run_workforce_pipeline_async(
     verify_show_task_obj = Task(
         content=(
             f"【阶段7: 验证配置】\n"
-            f"请在 NSAE 设备上执行以下验证命令，确认配置是否生效：\n"
+            f"请在 {get_product_name()} 设备上执行以下验证命令，确认配置是否生效：\n"
             f"```\n{verify_commands_text}\n```\n"
             f"测试目标: {job_content[:200]}\n"
             f"如果输出信息不足以判断，请自行补充执行相关 show 命令。"

@@ -158,7 +158,9 @@ def build_cleanup_prompt(
         # port4 IP 是预设的，不要删除
         protected_items.append("设备 port4 IP: 27.16.9.52/24 (预设，不要删除)")
         # port1 管理口
-        device_ip = ev.get("LB_DEVICE_IP", "") or "172.16.6.215"
+        device_ip = ev.get("LB_DEVICE_IP", "")
+        if not device_ip:
+            raise ValueError("LB_DEVICE_IP 未配置，请在 .env 中设置")
         protected_items.append(f"设备 port1 管理IP: {device_ip} (管理口，不要删除)")
 
         env_hint = (

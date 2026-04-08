@@ -829,10 +829,14 @@ class KnowledgeFarmerAgent:
 
             cache: Dict[str, str] = {}
             if cache_path.exists():
-                try:
-                    cache = json.loads(cache_path.read_text(encoding="utf-8"))
-                except Exception:
-                    cache = {}
+                if not out_path.exists():
+                    logger.info("[农民] 清除残留 cache: %s (reference 文件不存在)", cache_path.name)
+                    cache_path.unlink()
+                else:
+                    try:
+                        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        cache = {}
 
             new_chunks: List[Dict] = []
             for r in stem_results:

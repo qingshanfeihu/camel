@@ -4,7 +4,7 @@
   1. 加载 knowledge_base.json（不走 overlay，读原始数据）
   2. 规则层（高置信度直接标）：
      - CLI 文档 + CLI graph 命中 → leaf（复用 farmer_link / _infer_tree_level_from_cli）
-     - CATEGORY_TO_TREE_LEVEL 映射且已有 confidence ≥ 0.9 → 保留
+     - CATEGORY_TO_TREE_LEVEL 映射且已有 confidence ≥ 0.9 → 保留（已废弃）
   3. 结构推断层：_infer_tree_level_from_meta（复用农场主方法）
   4. LLM 层（模糊块）：批量调 _llm_infer_tree_level
   5. 输出 tree_level_overlay.json + 统计报告
@@ -47,7 +47,7 @@ def main():
         chunks = json.load(f)
     logger.info("Loaded %d chunks", len(chunks))
 
-    from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL, TREE_LEVELS
+    from INAGENT.rag.knowledge_config import TREE_LEVELS
     from INAGENT.rag.cli_graph_store import CLIGraphStore
 
     cli = CLIGraphStore()
@@ -114,22 +114,11 @@ def main():
             stats["meta_structure"] += 1
             continue
 
-        doc_cat = meta.get("document_category", "")
-        if doc_cat in CATEGORY_TO_TREE_LEVEL:
-            level = CATEGORY_TO_TREE_LEVEL[doc_cat]
-            overlay[str(cid)] = {
-                "tree_level": level,
-                "confidence": 0.8,
-                "source": "rule_category",
-            }
-            stats["rule_category"] += 1
-            continue
-
         llm_chunks.append((str(cid), chunk))
 
     logger.info(
-        "Rule pass: preserved=%d, cli_leaf=%d, category=%d, meta=%d | LLM needed=%d",
-        stats["preserved"], stats["rule_cli_leaf"], stats["rule_category"],
+        "Rule pass: preserved=%d, cli_leaf=%d, meta=%d | LLM needed=%d",
+        stats["preserved"], stats["rule_cli_leaf"],
         stats["meta_structure"], len(llm_chunks),
     )
 

@@ -259,3 +259,54 @@ def test_farm_owner_never_opens_tree_json_for_write(
         if "knowledge_base.json" in p.replace("\\", "/")
     ]
     assert kb_writes == [], f"农场主不应写 knowledge_base.json，实际写模式打开: {kb_writes}"
+
+
+# ── _infer_tree_level_from_meta 测试 ─────────────────────────────────
+
+
+class TestInferTreeLevelFromMeta:
+    """验证 farm_owner 的 tree_level 推断链（P2 改造后）。"""
+
+    infer = staticmethod(KnowledgeFarmOwnerAgent._infer_tree_level_from_meta)
+
+    def test_none_meta_returns_unknown(self):
+        assert self.infer(None) == "unknown"
+
+    def test_empty_meta_returns_unknown(self):
+        assert self.infer({}) == "unknown"
+
+    @pytest.mark.parametrize("level", ["leaf", "new_leaf", "branch", "trunk", "root"])
+    def test_priority0_llm_assigned_tree_level(self, level):
+        assert self.infer({"tree_level": level}) == level
+
+    def test_priority0_ignores_invalid_tree_level(self):
+        assert self.infer({"tree_level": "invalid"}) == "unknown"
+
+    def test_priority1_single_fh_returns_trunk(self):
+        assert self.infer({"function_hierarchy": "SLB"}) == "trunk"
+
+    def test_priority2_shallow_overview_returns_trunk(self):
+        meta = {
+            "function_hierarchy": "SLB > 概述",
+            "section_path": "概述",
+        }
+        assert self.infer(meta) == "trunk"
+
+    def test_priority3_multi_fh_returns_branch(self):
+        meta = {"function_hierarchy": "SLB > Health Check > HTTP"}
+        assert self.infer(meta) == "branch"
+
+    def test_priority0_overrides_fh(self):
+        meta = {
+            "tree_level": "root",
+            "function_hierarchy": "SLB > Health Check > HTTP",
+        }
+        assert self.infer(meta) == "root"
+
+    def test_old_document_category_no_longer_infers(self):
+        meta = {"document_category": "architecture/design"}
+        assert self.infer(meta) == "unknown"
+
+    def test_old_manifest_hint_no_longer_infers(self):
+        meta = {"_manifest_tree_level_hint": "root"}
+        assert self.infer(meta) == "unknown"

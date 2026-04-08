@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Tuple
 
 from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int
-from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
 
 logger = logging.getLogger(__name__)
 
@@ -773,13 +772,7 @@ class UnifiedRAGRetriever:
                 tree_pos = meta.get("tree_position") or {}
                 doc_level = tree_pos.get("tree_level", "") if isinstance(tree_pos, dict) else ""
                 if not doc_level:
-                    doc_cat = meta.get("document_category", "")
-                    if not doc_cat:
-                        regex_meta = meta.get("regex_metadata") or {}
-                        doc_cat = regex_meta.get("document_category", "")
-                    if not doc_cat:
-                        doc_cat = _parse_metadata_from_text(doc.get("text", "")).get("document_category", "")
-                    doc_level = CATEGORY_TO_TREE_LEVEL.get(doc_cat, "")
+                    doc_level = meta.get("tree_level", "")
                 if doc_level in level_set:
                     filtered.append(doc)
                 elif not doc_level and allow_uncategorized_docs:

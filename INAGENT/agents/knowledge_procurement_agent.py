@@ -576,11 +576,7 @@ class KnowledgeProcurementAgent:
             return self._manifest[source_file]
         stem = Path(source_file).stem
         for key, entry in self._manifest.items():
-            if Path(key).stem == stem or stem.startswith(Path(key).stem.split("_")[0]):
-                return entry
-        for key, entry in self._manifest.items():
-            key_stem = Path(key).stem
-            if key_stem in stem or stem in key_stem:
+            if Path(key).stem == stem:
                 return entry
         return None
 
@@ -589,13 +585,13 @@ class KnowledgeProcurementAgent:
         hint = entry.get("tree_level_hint", "")
         desc = (entry.get("description", "") or "").lower()
         if hint == "leaf" or "cli" in desc or "命令" in desc:
-            return "cli_reference"
+            return "cli/reference"
         if "设计" in desc or "design" in desc or "架构" in desc:
             return "architecture/design"
         if "规格" in desc or "spec" in desc:
-            return "architecture/design"
+            return "spec/func_spec"
         if hint in ("branch", "trunk") or "配置" in desc or "功能" in desc:
-            return "product_feature"
+            return "app/reference"
         if hint == "root":
             return "architecture/design"
         return None

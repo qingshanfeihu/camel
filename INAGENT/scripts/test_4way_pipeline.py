@@ -35,12 +35,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+_log_handler = logging.StreamHandler(sys.stdout)
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)-5s %(name)s: %(message)s", datefmt="%H:%M:%S",
+))
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 logger = logging.getLogger("4way_pipeline")
 
 INAGENT_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +56,25 @@ GAPS_FILE = LOGS_DIR / "sapling_schema_gaps.jsonl"
 GRAPHRAG_OUTPUT = INAGENT_ROOT / "graphrag_index" / "output"
 GRAPHRAG_ENTITIES = GRAPHRAG_OUTPUT / "entities.parquet"
 GRAPHRAG_RELS = GRAPHRAG_OUTPUT / "relationships.parquet"
+
+_report_file = None
+
+
+def _init_report_log():
+    global _report_file
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    _report_file = open(
+        LOGS_DIR / "4way_report.txt", "w", encoding="utf-8",
+    )
+
+
+def tprint(*args, **kwargs):
+    text = " ".join(str(a) for a in args)
+    print(text, **kwargs)
+    if _report_file:
+        _report_file.write(text + "\n")
+        _report_file.flush()
+
 
 TARGET_DOCS = [
     {"pdf": "cli_1-82.pdf", "stem": "cli_1-82", "ref_prefix": "cli", "track": "CLI"},
@@ -85,6 +105,60 @@ def _load_json(p: Path) -> list:
         logger.error("文件不存在: %s", p)
         return []
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+_kb_tree_level_index: Dict[str, str] = {}
+
+
+def _build_kb_tree_level_index():
+    global _kb_tree_level_index
+    if _kb_tree_level_index:
+        return
+    sources = []
+    for ref_file in sorted(REFERENCE_DIR.glob("*.json")):
+        if ref_file.name == "commandtree_base.json":
+            continue
+        if "_bak" in ref_file.stem:
+            continue
+        try:
+            data = json.loads(ref_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            sources.extend(data)
+    for chunk in sources:
+        m = chunk.get("metadata", {})
+        tp = m.get("tree_position", {})
+        tl = tp.get("tree_level", "") if isinstance(tp, dict) else ""
+        if not tl:
+            continue
+        bid = m.get("block_id") or m.get("chunk_id") or m.get("node_id") or ""
+        if bid:
+            _kb_tree_level_index[bid] = tl
+        title = m.get("section_title", "").strip()
+        src = m.get("source_file", "")
+        if title and src:
+            _kb_tree_level_index[f"{src}::{title}"] = tl
+        if title:
+            _kb_tree_level_index.setdefault(f"title::{title}", tl)
+    logger.info("KB tree_level index: %d entries", len(_kb_tree_level_index))
+
+
+def _lookup_tree_level(block_id: str = "", title: str = "",
+                        source_file: str = "") -> str:
+    if not _kb_tree_level_index:
+        _build_kb_tree_level_index()
+    if block_id and block_id in _kb_tree_level_index:
+        return _kb_tree_level_index[block_id]
+    if title and source_file:
+        key = f"{source_file}::{title}"
+        if key in _kb_tree_level_index:
+            return _kb_tree_level_index[key]
+    if title:
+        key = f"title::{title}"
+        if key in _kb_tree_level_index:
+            return _kb_tree_level_index[key]
+    return "?"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -581,14 +655,14 @@ def diagnose_commandtree(ct_data: list) -> Dict[str, Any]:
         "tree_levels": tree_levels,
     }
 
-    print()
-    print("  CommandTree 诊断结果:")
-    print(f"    总节点数: {total}")
-    print(f"    缺少 command_prefix: {no_prefix}")
-    print(f"    缺少 product_module: {no_module}")
-    print(f"    空白内容(< 10字符): {empty_content}")
-    print(f"    模块分布: {dict(sorted(modules.items(), key=lambda x: -x[1])[:10])}")
-    print(f"    树层级分布: {tree_levels}")
+    tprint()
+    tprint("  CommandTree 诊断结果:")
+    tprint(f"    总节点数: {total}")
+    tprint(f"    缺少 command_prefix: {no_prefix}")
+    tprint(f"    缺少 product_module: {no_module}")
+    tprint(f"    空白内容(< 10字符): {empty_content}")
+    tprint(f"    模块分布: {dict(sorted(modules.items(), key=lambda x: -x[1])[:10])}")
+    tprint(f"    树层级分布: {tree_levels}")
 
     issues = []
     if no_prefix > total * 0.1:
@@ -597,9 +671,9 @@ def diagnose_commandtree(ct_data: list) -> Dict[str, Any]:
         issues.append(f"  [!] {no_module}/{total} 节点缺少 product_module")
     if issues:
         for iss in issues:
-            print(iss)
+            tprint(iss)
     else:
-        print("    CommandTree 结构正常")
+        tprint("    CommandTree 结构正常")
 
     return result
 
@@ -701,7 +775,8 @@ _GENERIC_TITLES = frozenset({
 })
 
 
-def _enrich_generic_query(section: str, module: str, path: str) -> tuple:
+def _enrich_generic_query(section: str, module: str, path: str,
+                          content: str = "") -> tuple:
     if section.strip().lower() not in _GENERIC_TITLES:
         return (section + " " + (module or "") + " " + (path or ""),
                 section.split()[:3] + ([module] if module else []))
@@ -713,12 +788,21 @@ def _enrich_generic_query(section: str, module: str, path: str) -> tuple:
             break
     if not parent and module:
         parent = module
+    content_snippet = ""
+    if content:
+        clean = content.strip().replace("\n", " ")[:200]
+        tokens = [w for w in clean.split() if len(w) >= 2][:5]
+        content_snippet = " ".join(tokens)
     if parent:
         query = f"{parent} {section}"
+        if content_snippet:
+            query = f"{parent} {content_snippet}"
         kws = parent.split()[:3] + [section]
     else:
-        query = section + " " + (path or "")
+        query = section + " " + (content_snippet or path or "")
         kws = section.split()[:3]
+    if content_snippet:
+        kws.extend([w for w in content_snippet.split()[:3] if w not in kws])
     if module:
         kws.append(module)
     return query, kws
@@ -745,13 +829,18 @@ def run_app_4way(app_blocks: list, ct_data: list, count: int, seed: int,
         section = m.get("section_title", "")
         module = m.get("product_module", "")
         path = m.get("section_path", "")
-        query, kws = _enrich_generic_query(section, module, path)
+        pc = entry.get("page_content", "")
+        query, kws = _enrich_generic_query(section, module, path, content=pc)
 
-        s1 = {"found": True, "content_len": len(entry.get("page_content", "")),
-              "snippet": entry.get("page_content", "")[:150]}
+        s1 = {"found": True, "content_len": len(pc),
+              "snippet": pc[:150]}
 
-        tp = m.get("tree_position", {})
-        tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
+        bid = m.get("block_id") or m.get("chunk_id") or ""
+        src = m.get("source_file", "")
+        tree_level = _lookup_tree_level(block_id=bid, title=section, source_file=src)
+        if tree_level == "?":
+            tp = m.get("tree_position", {})
+            tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
         doc_cat = m.get("document_category", "?")
 
         s2_tree = {"valid": tree_level != "?", "tree_level": tree_level,
@@ -790,13 +879,18 @@ def run_arch_4way(arch_blocks: list, count: int, seed: int):
         section = m.get("section_title", "")
         module = m.get("product_module", "")
         path = m.get("section_path", "")
-        query, kws = _enrich_generic_query(section, module, path)
+        pc = entry.get("page_content", "")
+        query, kws = _enrich_generic_query(section, module, path, content=pc)
 
-        s1 = {"found": True, "content_len": len(entry.get("page_content", "")),
-              "snippet": entry.get("page_content", "")[:150]}
+        s1 = {"found": True, "content_len": len(pc),
+              "snippet": pc[:150]}
 
-        tp = m.get("tree_position", {})
-        tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
+        bid = m.get("block_id") or m.get("chunk_id") or ""
+        src = m.get("source_file", "")
+        tree_level = _lookup_tree_level(block_id=bid, title=section, source_file=src)
+        if tree_level == "?":
+            tp = m.get("tree_position", {})
+            tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
         s2_tree = {"valid": tree_level in ("trunk", "root"),
                     "tree_level": tree_level,
                     "doc_category": m.get("document_category", "?")}
@@ -815,10 +909,10 @@ def run_arch_4way(arch_blocks: list, count: int, seed: int):
 # ── 报告输出 ──────────────────────────────────────────────────────────────
 
 def print_track_report(track_name: str, results: list, s2_label: str = "参照源"):
-    print()
-    print("=" * 90)
-    print(f"  {track_name} 4-way 一致性报告 ({len(results)} entries)")
-    print("=" * 90)
+    tprint()
+    tprint("=" * 90)
+    tprint(f"  {track_name} 4-way 一致性报告 ({len(results)} entries)")
+    tprint("=" * 90)
 
     totals = {"s1": 0, "s2": 0, "s3": 0, "s3r": 0, "s4": 0}
     for i, r in enumerate(results):
@@ -859,45 +953,45 @@ def print_track_report(track_name: str, results: list, s2_label: str = "参照�
             ents = r["s4_gr"]["entity_matches"][:2]
             gr_note = f" ents={ents} rels={r['s4_gr']['rel_count']}"
 
-        print(f"  {i+1:2d}. [{label:28s}] mod={module:10s} tl={tl:8s}")
-        print(f"      S1:{s1} S2({s2_label}):{s2} S3:{s3}{vec_note} S4:{s4}{gr_note}")
+        tprint(f"  {i+1:2d}. [{label:28s}] mod={module:10s} tl={tl:8s}")
+        tprint(f"      S1:{s1} S2({s2_label}):{s2} S3:{s3}{vec_note} S4:{s4}{gr_note}")
 
         if s3_hit and not s3_rel:
             snippet = r["s3_vec"]["top3_snippets"][0][:60] if r["s3_vec"]["top3_snippets"] else ""
-            print(f"      [△] 向量命中但关键词不在结果中: {snippet!r}")
+            tprint(f"      [△] 向量命中但关键词不在结果中: {snippet!r}")
 
     n = len(results)
-    print()
-    print("  ─── 汇总 ───")
-    print(f"  S1 原文:        {totals['s1']}/{n} ({100*totals['s1']//n if n else 0}%)")
-    print(f"  S2 {s2_label}:  {totals['s2']}/{n} ({100*totals['s2']//n if n else 0}%)")
-    print(f"  S3 向量(命中):  {totals['s3']}/{n} ({100*totals['s3']//n if n else 0}%)")
-    print(f"  S3 向量(相关):  {totals['s3r']}/{n} ({100*totals['s3r']//n if n else 0}%)")
-    print(f"  S4 GraphRAG:    {totals['s4']}/{n} ({100*totals['s4']//n if n else 0}%)")
-    print("=" * 90)
+    tprint()
+    tprint("  ─── 汇总 ───")
+    tprint(f"  S1 原文:        {totals['s1']}/{n} ({100*totals['s1']//n if n else 0}%)")
+    tprint(f"  S2 {s2_label}:  {totals['s2']}/{n} ({100*totals['s2']//n if n else 0}%)")
+    tprint(f"  S3 向量(命中):  {totals['s3']}/{n} ({100*totals['s3']//n if n else 0}%)")
+    tprint(f"  S3 向量(相关):  {totals['s3r']}/{n} ({100*totals['s3r']//n if n else 0}%)")
+    tprint(f"  S4 GraphRAG:    {totals['s4']}/{n} ({100*totals['s4']//n if n else 0}%)")
+    tprint("=" * 90)
     return totals
 
 
 def print_pipeline_summary(farm_stats: Dict, kb_size: int):
-    print()
-    print("=" * 70)
-    print("  Pipeline 处理统计")
-    print("=" * 70)
+    tprint()
+    tprint("=" * 70)
+    tprint("  Pipeline 处理统计")
+    tprint("=" * 70)
     for track, stats in farm_stats.items():
         if isinstance(stats, dict):
-            print(f"  {track}: blocks={stats.get('blocks',0)}, "
-                  f"accepted={stats.get('accepted',0)}, "
-                  f"matched={stats.get('matched',0)}, "
-                  f"gaps={stats.get('gaps',0)}")
-    print(f"  最终 knowledge_base.json: {kb_size} chunks")
-    print("=" * 70)
+            tprint(f"  {track}: blocks={stats.get('blocks',0)}, "
+                   f"accepted={stats.get('accepted',0)}, "
+                   f"matched={stats.get('matched',0)}, "
+                   f"gaps={stats.get('gaps',0)}")
+    tprint(f"  最终 knowledge_base.json: {kb_size} chunks")
+    tprint("=" * 70)
 
 
 def print_final_summary(all_totals: Dict[str, Dict]):
-    print()
-    print("=" * 90)
-    print("  ███ 综合评估 ███")
-    print("=" * 90)
+    tprint()
+    tprint("=" * 90)
+    tprint("  ███ 综合评估 ███")
+    tprint("=" * 90)
 
     all_ok = True
     for track_name, tots in all_totals.items():
@@ -911,13 +1005,13 @@ def print_final_summary(all_totals: Dict[str, Dict]):
             if pct < 80 and is_gate:
                 all_ok = False
             marker = "" if pct >= 80 else (" ← 需关注" if is_gate else " (参考)")
-            print(f"  {status} {track_name:8s} {label:10s}: {cnt}/{n} ({pct}%){marker}")
+            tprint(f"  {status} {track_name:8s} {label:10s}: {cnt}/{n} ({pct}%){marker}")
 
     if all_ok:
-        print("\n  ✓ 全部关键项 ≥80%，流程验证通过")
+        tprint("\n  ✓ 全部关键项 ≥80%，流程验证通过")
     else:
-        print("\n  ✗ 存在 <80% 的检查项，需排查")
-    print("=" * 90)
+        tprint("\n  ✗ 存在 <80% 的检查项，需排查")
+    tprint("=" * 90)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -938,6 +1032,8 @@ def main():
     ap.add_argument("--skip-vectors", action="store_true",
                     help="跳过向量重建")
     args = ap.parse_args()
+
+    _init_report_log()
 
     from INAGENT.utils.env_utils import load_inagent_env
     load_inagent_env()
@@ -1043,6 +1139,10 @@ def main():
 
     elapsed = time.perf_counter() - start_time
     logger.info("总耗时: %.1f 秒 (%.1f 分钟)", elapsed, elapsed / 60)
+
+    if _report_file:
+        _report_file.close()
+        logger.info("报告已写入: %s", LOGS_DIR / "4way_report.txt")
 
 
 if __name__ == "__main__":

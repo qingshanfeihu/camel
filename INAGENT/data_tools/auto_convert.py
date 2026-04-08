@@ -1528,7 +1528,13 @@ def _build_batch_system_prompt(meta_rules: Dict) -> str:
         "- step_type: e.g. basic_config/health_checks/policies_and_algorithms, or ''\n"
         "- function_hierarchy: e.g. 'SLB > Health Check > HTTP' (no numbers)\n"
         "- chunk_type: single_command | command_list | narrative\n"
-        "- override_commands: command names that support override/覆盖, [] otherwise\n\n"
+        "- override_commands: command names that support override/覆盖, [] otherwise\n"
+        "- tree_level: knowledge hierarchy level of this chunk. "
+        "leaf = single CLI command/parameter syntax; "
+        "branch = sub-feature config steps or single-feature intro; "
+        "trunk = major module overview (principles, mechanisms, multi-sub-feature summary); "
+        "root = system architecture / protocol stack top-level design. "
+        "Judge purely from content, not document type.\n\n"
         f"Valid Intents: {valid_intents}\n"
         f"Valid Config Modes: {valid_config_modes}\n"
         f"Valid Modules: {', '.join(pm_descs[:20])}\n"
@@ -1576,6 +1582,10 @@ def _merge_llm_meta(llm_meta: Dict, meta_item: Dict, meta_rules: Dict) -> None:
         meta_item["chunk_type"] = str(llm_meta["chunk_type"])
     if llm_meta.get("override_commands") and isinstance(llm_meta["override_commands"], list):
         meta_item["override_commands"] = llm_meta["override_commands"]
+    if llm_meta.get("tree_level"):
+        tl = str(llm_meta["tree_level"]).strip().lower()
+        if tl in ("leaf", "branch", "trunk", "root"):
+            meta_item["tree_level"] = tl
 
 
 def _apply_llm_metadata_extraction_batch(
@@ -1921,7 +1931,7 @@ def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]
 _PRESERVE_META_FIELDS = (
     "command_prefix", "product_module", "protocol_type", "intent",
     "config_mode", "chunk_type", "function_hierarchy", "document_category",
-    "required_keywords", "description",
+    "required_keywords", "description", "tree_level",
 )
 
 
@@ -2755,17 +2765,13 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     # 3.5 Manifest hint injection: 从 manifest.json 读取 document_category 等提示
     hints = _get_manifest_hints(pdf.name)
     hint_doc_cat = hints.get("document_category", "")
-    hint_tree_level = hints.get("tree_level_hint", "")
-    if hint_doc_cat or hint_tree_level:
+    if hint_doc_cat:
         for blk in knowledge_blocks:
             meta = blk.get("metadata", {})
-            if hint_doc_cat and not meta.get("document_category"):
-                meta["document_category"] = hint_doc_cat
-            if hint_tree_level and not meta.get("_manifest_tree_level_hint"):
-                meta["_manifest_tree_level_hint"] = hint_tree_level
+            meta["document_category"] = hint_doc_cat
         logger.info(
-            "[manifest] injected hints for %s: doc_cat=%s, tree_hint=%s",
-            pdf.name, hint_doc_cat or "-", hint_tree_level or "-",
+            "[manifest] injected document_category for %s: %s",
+            pdf.name, hint_doc_cat,
         )
 
     # 3.6 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
