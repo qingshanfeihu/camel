@@ -105,7 +105,7 @@ def merge_knowledge_base(
     # This indicates knowledge_linker has not been run on that file yet.
     for chunk in all_chunks:
         meta = chunk.get("metadata") or {}
-        if not meta.get("tree_position"):
+        if not meta.get("tree_position") and not meta.get("owner_excluded"):
             src = meta.get("source_file", "unknown")
             logger.warning(
                 "[merge] chunk in '%s' is missing tree_position — "
@@ -124,10 +124,10 @@ def merge_knowledge_base(
         all_chunks = validator.validate_batch(all_chunks)
         rpt = validator.report
         logger.info(
-            "[merge] IngestValidator: %d accepted, %d rejected (short=%d, dup=%d, quarantine=%d), "
+            "[merge] IngestValidator: %d accepted, %d rejected (short=%d, dup=%d, quarantine=%d, excluded=%d), "
             "rescued=%d, hierarchy=%d, module=%d",
-            rpt.accepted, rpt.rejected_short + rpt.duplicates + rpt.quarantined,
-            rpt.rejected_short, rpt.duplicates, rpt.quarantined,
+            rpt.accepted, rpt.rejected_short + rpt.duplicates + rpt.quarantined + rpt.rejected_excluded,
+            rpt.rejected_short, rpt.duplicates, rpt.quarantined, rpt.rejected_excluded,
             rpt.category_rescued, rpt.hierarchy_backfilled, rpt.module_inferred,
         )
         validator.save_report(output_file.parent)

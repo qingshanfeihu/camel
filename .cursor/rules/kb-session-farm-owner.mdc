@@ -1,6 +1,6 @@
 ---
 description: 知识库「农场主」角色 — GraphRAG 结构维护、FillRequest、宪章同步
-globs: INAGENT/agents/knowledge_farm_owner_agent.py,INAGENT/rag/graphrag_adapter.py,INAGENT/rag/graphrag_integration.py,INAGENT/rag/knowledge_schema.py,INAGENT/docs/agents/sessions/04-farm-owner.md
+globs: INAGENT/agents/knowledge_farm_owner_agent.py,INAGENT/rag/graphrag_adapter.py,INAGENT/rag/graphrag_integration.py,INAGENT/rag/knowledge_schema.py,INAGENT/docs/agents/sessions/04-farm-owner.md,INAGENT/scripts/run_scenario_cultivation.py
 alwaysApply: false
 ---
 
@@ -11,16 +11,17 @@ alwaysApply: false
 
 ## 持久职责（简记）
 
-- 消费 **`schema_gaps.jsonl`**（采购/农民产出），对 GraphRAG 做 **结构维护**：新实体、新属性列、冲突与溢出的 **保守裁决**；写入前 **`snapshot_backup`**；完成后 **`reload()`**。混合向量默认不刷；可选 **`process_gap_entries(..., refresh_hybrid_vectors=True)`**（merge + refresh）或编排 **`merge_knowledge_base` + `refresh_hybrid_vector_index()`**。**Qdrant 无按条增量 upsert**，仅全量或指纹模式（见 **`04-farm-owner.md` § 给混合搜索（06）**）。**E2E** 顺序与再 merge 见宪章 §混合向量刷新与农民的调用顺序。
-- 通过 **`FarmOwnerReport.fill_requests`** 输出结构化意图；**不**直接调用农民；**不**做 chunk 内容富化；**不**下发无意义的布尔占位（`new_entity_attribute` 仅在存在 **`default_value`** 时发 `FillRequest`）。
-- 与 **树** 会话：gap 中携带骨架/`node_id` 等；CLI 实体与图不一致时 **先定数据归属** 再改代码。
-- **职责变更时**：同步更新宪章、`kb-session-farm-owner.mdc`、锚点（若一句话职责变）、模块头注释；契约变更同步农民/采购相关单测与 PR 说明。
+- 消费 **`schema_gaps.jsonl`**，gap 类型含 **`ambiguous_match`**；**TreeInformed**：只读 **CLIGraphStore / SkeletonIndex** → **`TreeContext`**（**`command_exists` → `(bool, List[str])`**；mock 须一致），批次内 **`_tree_context_cache`**；**批量 LLM 裁决**（conflict / overflow / ambiguous / new_entity 未定项），**`needs_tree_session` → `FarmOwnerReport.deferred`**；可选 **`classify_uncovered_chunks`**（`chunk_meta_patch`、`target_block_id`）；**`cultivate_scenarios`** 写 **`reference/scenarios_scaffold.json`**（农民写 **`scenarios_synthesized.json`**）。写入前 **`snapshot_backup`**；**`reload()`**。混合向量默认不刷；**`refresh_hybrid_vectors=True`**：`reload` → **`merge_knowledge_base`** → **`refresh_hybrid_vector_index`**（默认 **`hybrid_vectors_force=True`** 全量 Qdrant；指纹模式见宪章）。**Qdrant 无按条增量 upsert**。**E2E** 顺序见宪章 § 混合向量刷新与农民。
+- **`FarmOwnerReport`**：`fill_requests`、`deferred`、`operation_log` / `tree_mutations`、`discarded_*`、`errors`。**`new_entity_attribute`** 仅 **`default_value is not None`** 时发 `FillRequest`。**不**做 chunk 内容富化。编排须调用农民 **`apply_fill_request`** 将 `fill_requests` **批量**落盘到 `reference/*.json`（及可选骨架）；农场主模块**不**内联执行回填。
+- 与 **树** 会话：CLI 与图不一致时 **先定数据归属** 再改代码。
+- **职责变更时**：同步 **`04-farm-owner.md`**、本文件、锚点、**`knowledge_farm_owner_agent.py` 模块头**；契约变更同步农民/采购单测与 PR。
 
 ## 范围（应改）
 
 - `INAGENT/agents/knowledge_farm_owner_agent.py`
 - `INAGENT/rag/graphrag_adapter.py`、`INAGENT/rag/graphrag_integration.py` 中与 farm_owner **结构写入**直接相关、且已确认安全的调用点（小步、可回滚）
-- `INAGENT/rag/knowledge_schema.py` 中 Farm 相关模型
+- `INAGENT/rag/knowledge_schema.py`（FillRequest / SchemaGapEntry / FarmOwnerReport / Tree*）
+- `INAGENT/scripts/run_scenario_cultivation.py`；`farm_owner_overflow_denylist.json`；若动混合向量收尾路径则协调 **`workflow_config_generator.refresh_hybrid_vector_index`**、`merge_knowledge_base` 与 **`04` / `06-hybrid-search`**
 
 ## 非范围（勿改）
 

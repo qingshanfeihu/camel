@@ -12,25 +12,24 @@
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
-农场主 Agent (Knowledge Farm-Owner Agent) — TreeInformed Decision Engine v2
+农场主 Agent (Knowledge Farm-Owner Agent) — TreeInformed 决策（与宪章 04 对齐）
 
-职责：接收 schema_gaps.jsonl（由采购员/农民产出），
-执行 GraphRAG 结构性维护 —— 新实体、属性列、冲突与溢出的保守裁决。
-写入前 snapshot_backup；结束后对 GraphRAG 检索器 reload()（仅刷新当前进程内图视图）。
+职责：接收 schema_gaps.jsonl（由采购员/农民产出），对 GraphRAG 做结构性维护 ——
+新实体、新列、conflict / overflow / ambiguous_match 的保守裁决；可选 classify_uncovered_chunks
+（chunk 元数据补丁 FillRequest）。写入前 snapshot_backup；结束后 ``GraphRAGRetriever.reload()``。
 
-**枝干场景培育（农场主专属）**：农民只能种植叶节点（单条 CLI 命令）。
-当知识库积累足够的叶节点后，农场主负责从 _tree_feature_id 分组合成枝干级"场景/功能"文档——
-即 cultivate_scenarios()，供 "如何完整配置 X 功能" 类查询使用。
-合成结果写入 reference/scenarios_synthesized.json（document_category = "scenario/guide"）。
-入口脚本：INAGENT/scripts/run_scenario_cultivation.py
+**枝干场景培育**：cultivate_scenarios() 从 reference/knowledge_base.json 按 _tree_feature_id /
+function_hierarchy 识别 branch/trunk/root 缺口，写 **reference/scenarios_scaffold.json**（骨架）；
+HyDE 字段可选由 ``_model`` 生成。正文合成进 **scenarios_synthesized.json** 由农民完成（进向量索引）。
+入口：INAGENT/scripts/run_scenario_cultivation.py
 
-决策流程：每个 gap 先查 CLIGraphStore 获取 TreeContext（层级路径、父节点候选、
-Skeleton artifact 状态、enrich 快照）；规则可确定时走规则，模糊时交 LLM；
-禁止硬编码相似度阈值。needs_tree_session 条目放 FarmOwnerReport.deferred。
+**决策**：_query_tree_context 懒加载 CLIGraphStore + SkeletonIndex（command_exists 签名为 Tuple[bool, List[str]]）；new_entity 规则优先，
+未定条目批量 LLM（BATCH_SIZE=20）；overflow 在 TREE_ENRICH_KEYS 命中时可规则直连 merge_into；
+overflow 无树上下文时 _fallback_overflow_decision 仍可用 nearest_matches 的 similarity>=0.9 作 merge 提示。
+needs_tree_session → FillRequest + FarmOwnerReport.deferred。单测可注入 cli_graph、skeleton_index。
 
-不写 knowledge_base.json。混合向量（Qdrant/BM25）默认不刷新；可传
-``refresh_hybrid_vectors=True``：在本方法末尾对**当时磁盘上**的 ``reference/*.json``
-先 ``merge_knowledge_base`` 再 ``refresh_hybrid_vector_index``。
+不写 knowledge_base.json。混合向量默认不刷新；``refresh_hybrid_vectors=True`` 时顺序为
+reload → merge_knowledge_base → refresh_hybrid_vector_index（默认 hybrid_vectors_force=True 全量 Qdrant）。
 
 **编排顺序（E2E）**：农民 ``write_to_reference`` 只写入 ``reference/{stem}.json``，
 **不会**合并 ``knowledge_base.json``、也不会触发向量刷新。若管线在农场主
@@ -62,7 +61,11 @@ from INAGENT.rag.knowledge_schema import (
     FillRequest,
     SchemaGapEntry,
     TreeContext,
+    TreeMutation,
     TREE_ENRICH_KEYS,
+    build_tree_position,
+    infer_document_category,
+    infer_knowledge_role,
 )
 from INAGENT.utils.env_utils import get_product_name, load_inagent_env
 
@@ -103,6 +106,7 @@ class KnowledgeFarmOwnerAgent:
         self._cli_graph_override = cli_graph
         self._skeleton_index_override = skeleton_index
         self._tree_context_cache: Dict[str, TreeContext] = {}
+        self._decision_cache: Dict[str, Dict[str, Any]] = {}
         if self._chat_agent is None and model is not None:
             load_inagent_env()
             owner_product_name = product_name or get_product_name()
@@ -134,6 +138,7 @@ class KnowledgeFarmOwnerAgent:
                     "new_entity_attribute",
                     "conflict",
                     "overflow",
+                    "ambiguous_match",
                 ):
                     continue
                 entries.append(self._entry_from_raw(raw))
@@ -162,6 +167,7 @@ class KnowledgeFarmOwnerAgent:
         """
         report = FarmOwnerReport()
         self._tree_context_cache.clear()
+        self._decision_cache.clear()
 
         try:
             report.snapshot_dir = self.graphrag.snapshot_backup(label="farm_owner")
@@ -177,11 +183,15 @@ class KnowledgeFarmOwnerAgent:
         attribute_entries = [
             entry for entry in entries if entry.gap_type == "new_entity_attribute"
         ]
+        ambiguous_entries = [
+            entry for entry in entries if entry.gap_type == "ambiguous_match"
+        ]
 
         self._process_conflicts(conflict_entries, report)
         self._process_overflows(overflow_entries, report)
         self._process_new_entities(new_entity_entries, report)
         self._process_attribute_gaps(attribute_entries, report)
+        self._process_ambiguous_matches(ambiguous_entries, report)
 
         try:
             self.graphrag.reload()
@@ -205,15 +215,23 @@ class KnowledgeFarmOwnerAgent:
             except Exception as exc:
                 report.errors.append(f"混合向量索引刷新失败: {exc}")
 
+        op_summary = report.operation_summary()
         logger.info(
-            "FarmOwner 完成: +%d entities, +%s columns, %d embedded, %d conflicts, %d overflows, %d errors",
+            "FarmOwner 完成: +%d entities, +%s columns, %d embedded, "
+            "%d conflicts, %d overflows, %d errors | ops=%d (errors=%d, incomplete=%d)",
             report.entities_added,
             report.columns_added,
             report.entities_reembedded,
             report.conflicts_resolved,
             report.overflows_handled,
             len(report.errors),
+            op_summary["total_ops"],
+            op_summary["errors"],
+            op_summary["incomplete"],
         )
+        if op_summary["by_phase"]:
+            for phase, actions in op_summary["by_phase"].items():
+                logger.info("  [农场主] %s: %s", phase, actions)
         return report
 
     # ── 枝干场景骨架培育（农场主职责：识别树型缺口 + 写规格，不加肉） ───
@@ -720,75 +738,67 @@ class KnowledgeFarmOwnerAgent:
         if not entries:
             return
 
+        entries = self._sanitize_abbreviation_titles(entries)
+
+        # Pass 1: 规则决策 + 收集需要 LLM 的条目
+        decided: List[tuple] = []  # (entry, ctx, action, enrich_fields, reason, source)
+        pending_llm: List[tuple] = []  # (idx_in_decided, entry, ctx)
+
         for entry in entries:
             ctx = self._query_tree_context(entry.entity_title)
-            action, enrich_fields, reason = self._decide_new_entity_action(entry, ctx, report)
+            action, enrich_fields, reason = self._decide_new_entity_action_rules_only(entry, ctx)
+            if action is not None:
+                decided.append((entry, ctx, action, enrich_fields, reason, "rule"))
+            else:
+                placeholder_idx = len(decided)
+                decided.append((entry, ctx, None, {}, "", "rule"))
+                pending_llm.append((placeholder_idx, entry, ctx))
 
-            if action == "discard":
-                logger.debug("new_entity discard: %s (%s)", entry.entity_title, reason)
-                continue
+        # Pass 2: batch LLM 裁决
+        if pending_llm:
+            items = []
+            fallbacks = []
+            for _, entry, ctx in pending_llm:
+                has_info = bool(entry.entity_title or entry.entity_description)
+                default_action = "tree_create_branch" if has_info else "discard"
+                items.append({
+                    "entity_title": entry.entity_title,
+                    "entity_description": entry.entity_description[:300] if entry.entity_description else "",
+                    "entity_type": entry.entity_type,
+                    "evidence": entry.evidence,
+                    "exists_in_tree": ctx.exists_in_tree,
+                    "similar_commands": ctx.similar_commands,
+                    "hierarchy_prefix": ctx.hierarchy_prefix,
+                    "parent_candidate": ctx.parent_candidate_id,
+                    "skeleton_module": ctx.skeleton_module_id,
+                })
+                fallbacks.append({"action": default_action, "enrich_fields": {}, "reason": "fallback"})
 
-            if action == "needs_tree_session":
-                report.deferred.append(FillRequest(
-                    entity_title=entry.entity_title,
-                    source_evidence=entry.evidence,
-                    action="needs_tree_session",
-                    target_node_id=entry.entity_title,
-                    tree_level=ctx.tree_level,
-                    enrich_fields=enrich_fields,
-                ))
-                continue
+            batch_results = self._batch_run_decisions(items, fallbacks, "new_entity")
+            for (placeholder_idx, entry, ctx), result in zip(pending_llm, batch_results):
+                action = result.get("action", "discard")
+                valid_actions = {
+                    "tree_create_leaf", "tree_create_branch",
+                    "tree_create_trunk", "tree_create_root",
+                    "merge_into_existing", "needs_tree_session", "discard",
+                }
+                if action not in valid_actions:
+                    action = "discard"
+                enrich_fields = result.get("enrich_fields") or {}
+                if not isinstance(enrich_fields, dict):
+                    enrich_fields = {}
+                reason = result.get("reason", "")
+                decided[placeholder_idx] = (entry, ctx, action, enrich_fields, reason, "llm")
 
-            # merge_into_existing / tree_create_leaf / tree_create_branch
-            try:
-                added = self.graphrag.upsert_entities([{
-                    "title": entry.entity_title,
-                    "description": entry.entity_description,
-                    "entity_type": entry.entity_type or "CONFIGURATION",
-                    "source_id": entry.source_file,
-                }])
-                report.entities_added += added
-            except Exception as exc:
-                report.errors.append(f"upsert_entities 失败: {exc}")
-                continue
+        # Pass 3: 执行副作用
+        for entry, ctx, action, enrich_fields, reason, *rest in decided:
+            src = rest[0] if rest else "rule"
+            self._apply_new_entity_action(entry, ctx, action, enrich_fields, reason, report, source=src)
 
-            if report.entities_added > 0 or action == "merge_into_existing":
-                try:
-                    report.entities_reembedded += self.graphrag.reembed_entities(
-                        [entry.entity_title]
-                    )
-                except Exception as exc:
-                    report.errors.append(f"reembed_entities 失败: {exc}")
-
-            # add_relationships if merging into existing parent
-            if action in ("merge_into_existing",) and ctx.parent_candidate_id:
-                try:
-                    self.graphrag.add_relationships([{
-                        "source": entry.entity_title,
-                        "target": ctx.parent_candidate_id,
-                        "type": "BELONGS_TO",
-                        "description": entry.evidence,
-                        "source_id": entry.source_file,
-                    }])
-                except Exception as exc:
-                    logger.debug("add_relationships 失败(非致命): %s", exc)
-
-            # skeleton_register
-            if action in ("merge_into_existing", "tree_create_leaf", "tree_create_branch"):
-                si = self._get_skeleton_index()
-                if si is not None and ctx.skeleton_module_id:
-                    try:
-                        si.register_artifact(
-                            artifact_id=entry.entity_title,
-                            artifact_type="graphrag_entity",
-                            module_id=ctx.skeleton_module_id,
-                            document_category=entry.entity_type or "CONFIGURATION",
-                            source_file=entry.source_file,
-                            graphrag_entity_id=entry.entity_title,
-                            title=entry.entity_title,
-                        )
-                    except Exception as exc:
-                        logger.debug("skeleton register 失败(非致命): %s", exc)
+        logger.info(
+            "[农场主] new_entity: %d 条处理 (rule=%d, llm=%d)",
+            len(decided), len(decided) - len(pending_llm), len(pending_llm),
+        )
 
     def _decide_new_entity_action(
         self,
@@ -797,22 +807,189 @@ class KnowledgeFarmOwnerAgent:
         report: FarmOwnerReport,
     ):
         """规则先行，规则无法判断交 LLM。返回 (action, enrich_fields, reason)。"""
-        # 规则 1: exists_in_tree + artifact 已有 → merge_into_existing
+        result = self._decide_new_entity_action_rules_only(entry, ctx)
+        if result[0] is not None:
+            return result
+        return self._llm_decide_new_entity(entry, ctx, report)
+
+    def _decide_new_entity_action_rules_only(
+        self,
+        entry: SchemaGapEntry,
+        ctx: TreeContext,
+    ):
+        """纯规则决策。返回 (action, enrich_fields, reason)；action=None 表示需要 LLM。"""
         if ctx.exists_in_tree and ctx.skeleton_artifact_exists:
             return "merge_into_existing", {}, "树上已有且 artifact 已注册"
 
-        # 规则 2: exists_in_tree + 无 artifact → merge + skeleton_register
         if ctx.exists_in_tree and not ctx.skeleton_artifact_exists:
             return "merge_into_existing", {}, "树上已有但缺 artifact 注册"
 
-        # 规则 3: 不在树上 + 有父节点候选 → 按类型决定 leaf/branch
         if not ctx.exists_in_tree and ctx.parent_candidate_id:
             entity_type = (entry.entity_type or "").upper()
             action = "tree_create_leaf" if "COMMAND" in entity_type else "tree_create_branch"
             return action, {}, f"父节点候选 {ctx.parent_candidate_id}"
 
-        # 规则无法判断 → LLM
-        return self._llm_decide_new_entity(entry, ctx, report)
+        return None, {}, ""
+
+    _ABBREV_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,10})\b')
+
+    def _sanitize_abbreviation_titles(
+        self, entries: List[SchemaGapEntry]
+    ) -> List[SchemaGapEntry]:
+        """M6: 检测误翻的缩写标题。
+
+        如果 entity_title 全中文，但 evidence/description 含英文缩写，
+        且中文标题与网络/负载均衡无关，用原始缩写替换标题，
+        中文保留到 entity_description 的 codename 段。
+        """
+        _CJK_ONLY = re.compile(r'^[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\s]+$')
+        sanitized = []
+        for entry in entries:
+            title = (entry.entity_title or "").strip()
+            if not title or not _CJK_ONLY.match(title):
+                sanitized.append(entry)
+                continue
+            evidence = entry.evidence or ""
+            desc = entry.entity_description or ""
+            combined = evidence + " " + desc
+            abbrevs = self._ABBREV_RE.findall(combined)
+            abbrevs = [a for a in abbrevs if len(a) >= 2 and a not in ("CLI", "LLM", "JSON", "PDF", "API")]
+            if not abbrevs:
+                sanitized.append(entry)
+                continue
+            best_abbrev = abbrevs[0]
+            logger.info(
+                "[sanitize-abbrev] 替换误翻标题: '%s' → '%s' (原中文保留为 codename)",
+                title, best_abbrev,
+            )
+            entry = SchemaGapEntry(
+                gap_type=entry.gap_type,
+                entity_title=best_abbrev,
+                entity_description=f"{desc} [codename: {title}]" if desc else f"[codename: {title}]",
+                entity_type=entry.entity_type,
+                evidence=entry.evidence,
+                source_file=entry.source_file,
+            )
+            sanitized.append(entry)
+        return sanitized
+
+    def _apply_new_entity_action(
+        self,
+        entry: SchemaGapEntry,
+        ctx: TreeContext,
+        action: str,
+        enrich_fields: dict,
+        reason: str,
+        report: FarmOwnerReport,
+        *,
+        source: str = "rule",
+    ) -> None:
+        if action == "discard":
+            report.log_op("new_entity", entry.entity_title, "discard", reason, source=source)
+            report.discarded_count += 1
+            report.discarded_entities.append(entry.entity_title)
+            report.fill_requests.append(FillRequest(
+                entity_title=entry.entity_title,
+                source_evidence=entry.evidence,
+                action="discard",
+                target_node_id=entry.entity_title,
+                chunk_meta_patch=self._build_chunk_meta_patch(ctx, gap_type="new_entity", action="discard"),
+            ))
+            return
+
+        if action == "needs_tree_session":
+            report.deferred.append(FillRequest(
+                entity_title=entry.entity_title,
+                source_evidence=entry.evidence,
+                action="needs_tree_session",
+                target_node_id=entry.entity_title,
+                tree_level=ctx.tree_level,
+                enrich_fields=enrich_fields,
+            ))
+            report.log_op("new_entity", entry.entity_title, "needs_tree_session", reason,
+                          status="INCOMPLETE", source=source)
+            return
+
+        try:
+            added = self.graphrag.upsert_entities([{
+                "title": entry.entity_title,
+                "description": entry.entity_description,
+                "entity_type": entry.entity_type or "CONFIGURATION",
+                "source_id": entry.source_file,
+            }])
+            report.entities_added += added
+        except Exception as exc:
+            report.errors.append(f"upsert_entities 失败: {exc}")
+            report.log_op("new_entity", entry.entity_title, action, f"upsert失败: {exc}",
+                          status="ERROR", source=source)
+            return
+
+        report.log_op("new_entity", entry.entity_title, action, reason, source=source,
+                      partial_data={"added": added, "enrich_fields": list(enrich_fields.keys())} if enrich_fields else None)
+
+        if report.entities_added > 0 or action == "merge_into_existing":
+            try:
+                report.entities_reembedded += self.graphrag.reembed_entities(
+                    [entry.entity_title]
+                )
+            except Exception as exc:
+                report.errors.append(f"reembed_entities 失败: {exc}")
+
+        if action in ("merge_into_existing",) and ctx.parent_candidate_id:
+            try:
+                self.graphrag.add_relationships([{
+                    "source": entry.entity_title,
+                    "target": ctx.parent_candidate_id,
+                    "type": "BELONGS_TO",
+                    "description": entry.evidence,
+                    "source_id": entry.source_file,
+                }])
+            except Exception as exc:
+                logger.debug("add_relationships 失败(非致命): %s", exc)
+
+        if action in ("merge_into_existing", "tree_create_leaf", "tree_create_branch",
+                      "tree_create_trunk", "tree_create_root"):
+            _ACTION_TO_MUTATION = {
+                "tree_create_leaf": "create_leaf",
+                "tree_create_branch": "create_branch",
+                "tree_create_trunk": "create_trunk",
+                "tree_create_root": "create_root",
+                "merge_into_existing": "update_fields",
+            }
+            mutation_type = _ACTION_TO_MUTATION.get(action, "update_fields")
+            report.tree_mutations.append(TreeMutation(
+                mutation_type=mutation_type,
+                node_id=entry.entity_title,
+                parent_node_id=ctx.parent_candidate_id,
+                tree_level=ctx.tree_level,
+                fields=enrich_fields,
+                source_gap_type="new_entity",
+            ))
+            si = self._get_skeleton_index()
+            if si is not None and ctx.skeleton_module_id:
+                try:
+                    si.register_artifact(
+                        artifact_id=entry.entity_title,
+                        artifact_type="graphrag_entity",
+                        module_id=ctx.skeleton_module_id,
+                        document_category=entry.entity_type or "CONFIGURATION",
+                        source_file=entry.source_file,
+                        graphrag_entity_id=entry.entity_title,
+                        title=entry.entity_title,
+                    )
+                except Exception as exc:
+                    logger.debug("skeleton register 失败(非致命): %s", exc)
+
+        report.fill_requests.append(FillRequest(
+            entity_title=entry.entity_title,
+            fill_fields=enrich_fields,
+            source_evidence=entry.evidence,
+            action=action,
+            target_node_id=ctx.matched_node_id or entry.entity_title,
+            tree_level=ctx.tree_level,
+            enrich_fields=enrich_fields,
+            chunk_meta_patch=self._build_chunk_meta_patch(ctx, gap_type="new_entity", action=action),
+        ))
 
     def _llm_decide_new_entity(
         self,
@@ -824,7 +1001,7 @@ class KnowledgeFarmOwnerAgent:
         default_action = "tree_create_branch" if has_info else "discard"
         prompt = (
             "你是知识图谱维护裁决者，只返回 JSON。\n"
-            "输出格式: {\"action\": \"tree_create_leaf|tree_create_branch|merge_into_existing|needs_tree_session|discard\", "
+            "输出格式: {\"action\": \"tree_create_leaf|tree_create_branch|tree_create_trunk|tree_create_root|merge_into_existing|needs_tree_session|discard\", "
             "\"enrich_fields\": {}, \"reason\": \"...\"}\n\n"
             f"实体标题: {entry.entity_title}\n"
             f"实体描述: {entry.entity_description}\n"
@@ -836,6 +1013,7 @@ class KnowledgeFarmOwnerAgent:
             f"父节点候选: {ctx.parent_candidate_id}\n"
             f"Skeleton 模块: {ctx.skeleton_module_id}\n"
             "请裁决此实体应当：新建叶(tree_create_leaf)、新建枝(tree_create_branch)、"
+            "新建躯干(tree_create_trunk)、新建根(tree_create_root)、"
             "挂入已有节点(merge_into_existing)、等待树会话(needs_tree_session)、还是丢弃(discard)。"
         )
         result = self._run_decision(
@@ -844,6 +1022,7 @@ class KnowledgeFarmOwnerAgent:
         action = result.get("action", default_action)
         valid_actions = {
             "tree_create_leaf", "tree_create_branch",
+            "tree_create_trunk", "tree_create_root",
             "merge_into_existing", "needs_tree_session", "discard",
         }
         if action not in valid_actions:
@@ -886,6 +1065,7 @@ class KnowledgeFarmOwnerAgent:
                 continue
             if entry.default_value is None:
                 continue
+            attr_ctx = self._query_tree_context(entry.entity_title)
             report.fill_requests.append(FillRequest(
                 entity_title=entry.entity_title,
                 fill_fields={entry.column_name: entry.default_value},
@@ -893,7 +1073,12 @@ class KnowledgeFarmOwnerAgent:
                 action="update",
                 resolved_value={entry.column_name: entry.default_value},
                 target_node_id=entry.entity_title,
+                chunk_meta_patch=self._build_chunk_meta_patch(attr_ctx, gap_type="new_entity_attribute", action="update"),
             ))
+            report.log_op("attribute", entry.entity_title, "add_column",
+                          f"column={entry.column_name}", source="rule")
+
+        logger.info("[农场主] attribute: %d 条处理, columns=%s", len(entries), report.columns_added)
 
         # skeleton_register: 为已添加列的实体注册 artifact
         si = self._get_skeleton_index()
@@ -917,49 +1102,133 @@ class KnowledgeFarmOwnerAgent:
                 except Exception as exc:
                     logger.debug("attribute_gaps skeleton register 失败(非致命): %s", exc)
 
+    def _process_ambiguous_matches(
+        self,
+        entries: List[SchemaGapEntry],
+        report: FarmOwnerReport,
+    ) -> None:
+        if not entries:
+            return
+
+        items = []
+        fallbacks = []
+        for entry in entries:
+            candidates = entry.ambiguous_candidates or []
+            ctx = self._query_tree_context(entry.entity_title or "")
+
+            if len(candidates) == 1:
+                report.fill_requests.append(FillRequest(
+                    entity_title=entry.entity_title,
+                    fill_fields={"tree_node_id": candidates[0].get("node_id", "")},
+                    source_evidence=entry.evidence,
+                    action="update",
+                    target_node_id=candidates[0].get("node_id", ""),
+                    chunk_meta_patch=self._build_chunk_meta_patch(ctx, gap_type="ambiguous_match", action="update"),
+                ))
+                report.log_op("ambiguous", entry.entity_title, "auto_resolve",
+                              "single candidate", source="rule")
+                continue
+
+            if not candidates:
+                report.log_op("ambiguous", entry.entity_title, "discard",
+                              "no candidates", source="rule")
+                continue
+
+            items.append({
+                "entity_title": entry.entity_title,
+                "entity_description": entry.entity_description[:300] if entry.entity_description else "",
+                "candidates": [
+                    {"node_id": c.get("node_id", ""), "score": c.get("score", 0),
+                     "command_prefix": c.get("command_prefix", "")}
+                    for c in candidates[:5]
+                ],
+                "tree_level": ctx.tree_level,
+                "content": (entry.chunk_content or entry.evidence)[:300],
+            })
+            fallbacks.append({
+                "decision": "pick",
+                "target_node_id": candidates[0].get("node_id", ""),
+                "rationale": "fallback: pick highest score",
+            })
+
+        if items:
+            decisions = self._batch_run_decisions(items, fallbacks, "ambiguous")
+            item_idx = 0
+            for entry in entries:
+                if not entry.ambiguous_candidates or len(entry.ambiguous_candidates) <= 1:
+                    continue
+                decision = decisions[item_idx]
+                item_idx += 1
+                target = decision.get("target_node_id", "")
+                if not target:
+                    report.log_op("ambiguous", entry.entity_title, "discard",
+                                  "LLM returned no target", source="llm")
+                    continue
+                amb_ctx = self._query_tree_context(entry.entity_title or "")
+                report.fill_requests.append(FillRequest(
+                    entity_title=entry.entity_title,
+                    fill_fields={"tree_node_id": target},
+                    source_evidence=entry.evidence,
+                    action="update",
+                    target_node_id=target,
+                    chunk_meta_patch=self._build_chunk_meta_patch(amb_ctx, gap_type="ambiguous_match", action="update"),
+                ))
+                report.log_op("ambiguous", entry.entity_title, "pick",
+                              decision.get("rationale", ""), source="llm",
+                              partial_data={"target": target})
+
+        logger.info("[农场主] ambiguous: %d 条处理", len(entries))
+
     def _process_conflicts(
         self,
         entries: List[SchemaGapEntry],
         report: FarmOwnerReport,
     ) -> None:
+        if not entries:
+            return
+
+        items = []
+        fallbacks = []
         for entry in entries:
-            fill_request = self._resolve_conflict(entry, report)
+            ctx = self._query_tree_context(entry.entity_title or "")
+            neighbors = self._get_neighbors(entry.entity_title)
+            items.append({
+                "entity": entry.entity_title,
+                "conflict_field": entry.field_name,
+                "skeleton_value": entry.skeleton_value,
+                "new_value": entry.new_value,
+                "evidence": entry.evidence,
+                "tree_level": ctx.tree_level,
+                "hierarchy_prefix": ctx.hierarchy_prefix,
+                "enrich_snapshot": ctx.enrich_snapshot,
+                "parent_candidate": ctx.parent_candidate_id,
+                "graph_context": neighbors,
+            })
+            fallbacks.append(self._fallback_conflict_decision(entry))
+
+        decisions = self._batch_run_decisions(items, fallbacks, "conflict")
+
+        for entry, decision in zip(entries, decisions):
+            fill_request = self._apply_conflict_decision(entry, decision, report)
             if fill_request is None:
                 continue
             report.fill_requests.append(fill_request)
             report.conflicts_resolved += 1
 
-    def _process_overflows(
-        self,
-        entries: List[SchemaGapEntry],
-        report: FarmOwnerReport,
-    ) -> None:
-        for entry in entries:
-            if entry.field_name in self._overflow_field_denylist:
-                report.fill_requests.append(FillRequest(
-                    entity_title=entry.entity_title or "",
-                    source_evidence=entry.evidence,
-                    action="discard",
-                    target_node_id=entry.entity_title or "",
-                ))
-                report.overflows_handled += 1
-                continue
-            fill_request = self._resolve_overflow(entry, report)
-            if fill_request is None:
-                continue
-            report.fill_requests.append(fill_request)
-            report.overflows_handled += 1
+        logger.info("[农场主] conflict: %d 条处理, %d 已解决", len(entries), report.conflicts_resolved)
 
-    def _resolve_conflict(
+    def _apply_conflict_decision(
         self,
         entry: SchemaGapEntry,
+        decision: Dict[str, Any],
         report: FarmOwnerReport,
     ) -> Optional[FillRequest]:
         if not entry.entity_title or not entry.field_name:
             report.errors.append("conflict 条目缺少 entity_title 或 field_name")
+            report.log_op("conflict", entry.entity_title or "?", "skip",
+                          "missing entity_title or field_name", status="ERROR")
             return None
 
-        decision = self._decide_conflict(entry)
         decision_name = decision.get("decision", "keep_skeleton")
         final_value = self._resolve_conflict_value(
             entry,
@@ -983,8 +1252,19 @@ class KnowledgeFarmOwnerAgent:
                     ])
             except Exception as exc:
                 report.errors.append(f"conflict 更新失败: {exc}")
+                report.log_op("conflict", entry.entity_title, decision_name,
+                              f"graphrag update failed: {exc}", status="ERROR", source="llm")
+            else:
+                report.log_op("conflict", entry.entity_title, decision_name,
+                              decision.get("rationale", ""), source="llm",
+                              partial_data={"field": entry.field_name})
+        else:
+            report.log_op("conflict", entry.entity_title, decision_name,
+                          decision.get("rationale", ""), source="llm",
+                          partial_data={"field": entry.field_name})
 
         fill_fields = {entry.field_name: final_value}
+        ctx = self._query_tree_context(entry.entity_title)
         return FillRequest(
             entity_title=entry.entity_title,
             fill_fields=fill_fields,
@@ -992,21 +1272,106 @@ class KnowledgeFarmOwnerAgent:
             action="update",
             resolved_value=fill_fields,
             target_node_id=entry.entity_title,
+            chunk_meta_patch=self._build_chunk_meta_patch(ctx, gap_type="conflict", action="update"),
         )
 
-    def _resolve_overflow(
+    def _process_overflows(
+        self,
+        entries: List[SchemaGapEntry],
+        report: FarmOwnerReport,
+    ) -> None:
+        if not entries:
+            return
+
+        # Pass 1: 规则筛选 + 收集需要 LLM 的条目
+        rule_decided: List[tuple] = []  # (entry, decision_or_None)
+        pending_llm: List[tuple] = []   # (idx, entry, ctx)
+
+        for entry in entries:
+            if entry.field_name in self._overflow_field_denylist:
+                rule_decided.append((entry, {"decision": "discard_denylist"}))
+                continue
+
+            ctx = self._query_tree_context(entry.entity_title or "")
+            valid_enrich = TREE_ENRICH_KEYS.get(ctx.tree_level, [])
+            if entry.field_name and entry.field_name in valid_enrich:
+                rule_decided.append((entry, {
+                    "decision": "merge_into",
+                    "target_node_id": ctx.matched_node_id or self._default_overflow_target(entry),
+                }))
+                continue
+
+            placeholder_idx = len(rule_decided)
+            rule_decided.append((entry, None))
+            pending_llm.append((placeholder_idx, entry, ctx))
+
+        # Pass 2: batch LLM
+        if pending_llm:
+            items = []
+            fallbacks = []
+            for _, entry, ctx in pending_llm:
+                items.append({
+                    "entity_title": entry.entity_title,
+                    "entity_description": entry.entity_description[:300] if entry.entity_description else "",
+                    "nearest_matches": entry.nearest_matches,
+                    "tree_level": ctx.tree_level,
+                    "hierarchy_prefix": ctx.hierarchy_prefix,
+                    "exists_in_tree": ctx.exists_in_tree,
+                    "similar_commands": ctx.similar_commands,
+                    "content": (entry.chunk_content or entry.evidence)[:300],
+                })
+                fallbacks.append(self._fallback_overflow_decision(entry))
+
+            batch_results = self._batch_run_decisions(items, fallbacks, "overflow")
+            for (placeholder_idx, entry, ctx), decision in zip(pending_llm, batch_results):
+                rule_decided[placeholder_idx] = (entry, decision)
+
+        # Pass 3: 执行副作用
+        for entry, decision in rule_decided:
+            if decision is None:
+                continue
+            if decision.get("decision") == "discard_denylist":
+                denylist_ctx = self._query_tree_context(entry.entity_title or "")
+                report.fill_requests.append(FillRequest(
+                    entity_title=entry.entity_title or "",
+                    source_evidence=entry.evidence,
+                    action="discard",
+                    target_node_id=entry.entity_title or "",
+                    chunk_meta_patch=self._build_chunk_meta_patch(denylist_ctx, gap_type="overflow", action="discard"),
+                ))
+                report.discarded_count += 1
+                report.discarded_entities.append(entry.entity_title or "")
+                report.log_op("overflow", entry.entity_title or "", "discard_denylist",
+                              f"field={entry.field_name}", source="rule")
+                report.overflows_handled += 1
+                continue
+            fill_request = self._apply_overflow_decision(entry, decision, report)
+            if fill_request is not None:
+                report.fill_requests.append(fill_request)
+            report.overflows_handled += 1
+
+        logger.info(
+            "[农场主] overflow: %d 条处理 (rule=%d, llm=%d)",
+            len(rule_decided), len(rule_decided) - len(pending_llm), len(pending_llm),
+        )
+
+    def _apply_overflow_decision(
         self,
         entry: SchemaGapEntry,
+        decision: Dict[str, Any],
         report: FarmOwnerReport,
     ) -> Optional[FillRequest]:
-        decision = self._decide_overflow(entry)
         decision_name = decision.get("decision", "discard")
 
         if decision_name == "merge_into":
             target_node_id = decision.get("target_node_id") or self._default_overflow_target(entry)
+            merge_ctx = self._query_tree_context(target_node_id or entry.entity_title or "")
             resolved_value = {
                 "overflow_content": entry.chunk_content or entry.evidence,
             }
+            report.log_op("overflow", entry.entity_title or "", "merge_into",
+                          decision.get("rationale", ""), source="llm",
+                          partial_data={"target": target_node_id})
             return FillRequest(
                 entity_title=target_node_id,
                 fill_fields=resolved_value,
@@ -1014,9 +1379,11 @@ class KnowledgeFarmOwnerAgent:
                 action="update",
                 resolved_value=resolved_value,
                 target_node_id=target_node_id,
+                chunk_meta_patch=self._build_chunk_meta_patch(merge_ctx, gap_type="overflow", action="merge_into"),
             )
 
         if decision_name == "create_new":
+            entry_ctx = self._query_tree_context(entry.entity_title or "")
             new_entity = decision.get("new_entity", {})
             if not isinstance(new_entity, dict):
                 new_entity = {}
@@ -1053,6 +1420,19 @@ class KnowledgeFarmOwnerAgent:
                     report.entities_reembedded += self.graphrag.reembed_entities([title])
             except Exception as exc:
                 report.errors.append(f"overflow create_new 失败: {exc}")
+                report.log_op("overflow", title, "create_new",
+                              f"upsert failed: {exc}", status="ERROR", source="llm")
+            else:
+                report.log_op("overflow", title, "create_new",
+                              decision.get("rationale", ""), source="llm")
+
+            report.tree_mutations.append(TreeMutation(
+                mutation_type="create_leaf",
+                node_id=title,
+                parent_node_id=self._default_overflow_target(entry) or "",
+                fields={"entity_type": entity_type},
+                source_gap_type="overflow",
+            ))
 
             return FillRequest(
                 entity_title=title,
@@ -1064,59 +1444,21 @@ class KnowledgeFarmOwnerAgent:
                     node_id=title,
                     entity_type=entity_type,
                 ),
+                chunk_meta_patch=self._build_chunk_meta_patch(entry_ctx, gap_type="overflow", action="create_slot"),
             )
 
+        discard_ctx = self._query_tree_context(entry.entity_title or "")
+        report.log_op("overflow", entry.entity_title or "", "discard",
+                      decision.get("rationale", ""), source="llm")
+        report.discarded_count += 1
+        report.discarded_entities.append(entry.entity_title or "")
         return FillRequest(
             entity_title=entry.entity_title or "",
             source_evidence=entry.evidence,
             action="discard",
             target_node_id=entry.entity_title or "",
+            chunk_meta_patch=self._build_chunk_meta_patch(discard_ctx, gap_type="overflow", action="discard"),
         )
-
-    def _decide_conflict(self, entry: SchemaGapEntry) -> Dict[str, Any]:
-        fallback = self._fallback_conflict_decision(entry)
-        neighbors = self._get_neighbors(entry.entity_title)
-        ctx = self._query_tree_context(entry.entity_title or "")
-        prompt = (
-            "你是知识图谱维护裁决者，只返回 JSON。\n"
-            "输出格式: {\"decision\": \"accept_new|keep_skeleton|merge\", \"resolved_value\": ..., "
-            "\"tree_level\": \"...\", \"enrich_fields\": {}, \"rationale\": \"...\"}\n"
-            f"实体: {entry.entity_title}\n"
-            f"冲突字段: {entry.field_name}\n"
-            f"骨架值: {json.dumps(entry.skeleton_value, ensure_ascii=False)}\n"
-            f"新值: {json.dumps(entry.new_value, ensure_ascii=False)}\n"
-            f"证据: {entry.evidence}\n"
-            f"树层级: {ctx.tree_level}\n"
-            f"层级路径: {ctx.hierarchy_prefix}\n"
-            f"已有 enrich 字段快照: {json.dumps(ctx.enrich_snapshot, ensure_ascii=False)}\n"
-            f"父节点候选: {ctx.parent_candidate_id}\n"
-            f"图上下文: {json.dumps(neighbors, ensure_ascii=False)}"
-        )
-        return self._run_decision(prompt, fallback)
-
-    def _decide_overflow(self, entry: SchemaGapEntry) -> Dict[str, Any]:
-        fallback = self._fallback_overflow_decision(entry)
-        ctx = self._query_tree_context(entry.entity_title or "")
-        valid_enrich = TREE_ENRICH_KEYS.get(ctx.tree_level, [])
-        # 规则: 若字段名在该层级合法 enrich 键内，直接归为 attr_tag_update
-        if entry.field_name and entry.field_name in valid_enrich:
-            return {
-                "decision": "merge_into",
-                "target_node_id": ctx.matched_node_id or self._default_overflow_target(entry),
-            }
-        prompt = (
-            "你是知识图谱维护裁决者，只返回 JSON。\n"
-            "输出格式: {\"decision\": \"create_new|merge_into|discard\", \"target_node_id\": \"...\", \"new_entity\": {\"title\": \"...\", \"description\": \"...\", \"entity_type\": \"...\"}, \"rationale\": \"...\"}\n"
-            f"候选标题: {entry.entity_title}\n"
-            f"候选描述: {entry.entity_description}\n"
-            f"最近节点: {json.dumps(entry.nearest_matches, ensure_ascii=False)}\n"
-            f"树层级: {ctx.tree_level}\n"
-            f"层级路径: {ctx.hierarchy_prefix}\n"
-            f"树上已有: {ctx.exists_in_tree}\n"
-            f"相似命令: {json.dumps(ctx.similar_commands, ensure_ascii=False)}\n"
-            f"原始内容: {entry.chunk_content or entry.evidence}"
-        )
-        return self._run_decision(prompt, fallback)
 
     def _run_decision(self, prompt: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
         if self._chat_agent is None:
@@ -1127,12 +1469,192 @@ class KnowledgeFarmOwnerAgent:
             response = self._chat_agent.step(msg)
             raw = response.msgs[0].content if response.msgs else ""
             parsed = self._parse_json_object(raw)
-            if isinstance(parsed, dict) and "decision" in parsed:
+            if isinstance(parsed, dict) and ("decision" in parsed or "action" in parsed):
                 return parsed
         except Exception as exc:
             logger.warning("FarmOwner 裁决回退到规则模式: %s", exc)
 
         return fallback
+
+    BATCH_SIZE = 20
+
+    def _batch_run_decisions(
+        self,
+        items: List[Dict[str, Any]],
+        fallbacks: List[Dict[str, Any]],
+        decision_type: str,
+    ) -> List[Dict[str, Any]]:
+        """批量 LLM 裁决：将多条 gap 打包成一次 LLM 调用。
+        同一 entity_title + decision_type 命中缓存时跳过 LLM。
+
+        Args:
+            items: 每条的上下文信息（会序列化进 prompt）
+            fallbacks: 与 items 等长的 fallback 列表
+            decision_type: "new_entity" | "conflict" | "overflow"
+
+        Returns:
+            与 items 等长的决策列表
+        """
+        if not items:
+            return []
+        if self._chat_agent is None:
+            return list(fallbacks)
+
+        results: List[Dict[str, Any]] = [None] * len(items)  # type: ignore[list-item]
+        uncached_indices: List[int] = []
+        uncached_items: List[Dict[str, Any]] = []
+        uncached_fallbacks: List[Dict[str, Any]] = []
+        cache_hits = 0
+
+        for i, (item, fb) in enumerate(zip(items, fallbacks)):
+            entity_key = item.get("entity_title") or item.get("entity", "") or ""
+            field_key = item.get("conflict_field") or item.get("field_name") or ""
+            cache_key = f"{decision_type}:{entity_key}:{field_key}"
+            cached = self._decision_cache.get(cache_key)
+            if cached is not None:
+                results[i] = cached
+                cache_hits += 1
+            else:
+                uncached_indices.append(i)
+                uncached_items.append(item)
+                uncached_fallbacks.append(fb)
+
+        if cache_hits:
+            logger.info("[农场主] decision_cache hit: %d/%d (%s)", cache_hits, len(items), decision_type)
+
+        if uncached_items:
+            llm_results: List[Dict[str, Any]] = []
+            for batch_start in range(0, len(uncached_items), self.BATCH_SIZE):
+                batch_items = uncached_items[batch_start:batch_start + self.BATCH_SIZE]
+                batch_fallbacks = uncached_fallbacks[batch_start:batch_start + self.BATCH_SIZE]
+                batch_results = self._batch_run_decisions_single(
+                    batch_items, batch_fallbacks, decision_type
+                )
+                llm_results.extend(batch_results)
+            for idx, llm_result in zip(uncached_indices, llm_results):
+                results[idx] = llm_result
+                entity_key = items[idx].get("entity_title") or items[idx].get("entity", "") or ""
+                field_key = items[idx].get("conflict_field") or items[idx].get("field_name") or ""
+                cache_key = f"{decision_type}:{entity_key}:{field_key}"
+                if entity_key:
+                    self._decision_cache[cache_key] = llm_result
+
+        return results
+
+    def _batch_run_decisions_single(
+        self,
+        items: List[Dict[str, Any]],
+        fallbacks: List[Dict[str, Any]],
+        decision_type: str,
+    ) -> List[Dict[str, Any]]:
+        if len(items) == 1:
+            return [self._run_decision(
+                self._format_single_decision_prompt(items[0], decision_type),
+                fallbacks[0],
+            )]
+
+        output_schemas = {
+            "new_entity": (
+                '{\"action\": \"tree_create_leaf|tree_create_branch|tree_create_trunk|tree_create_root|'
+                'merge_into_existing|needs_tree_session|discard\", '
+                '\"enrich_fields\": {}, \"reason\": \"...\"}'
+            ),
+            "conflict": (
+                '{\"decision\": \"accept_new|keep_skeleton|merge\", '
+                '\"resolved_value\": ..., \"rationale\": \"...\"}'
+            ),
+            "overflow": (
+                '{\"decision\": \"create_new|merge_into|discard\", '
+                '\"target_node_id\": \"...\", \"new_entity\": '
+                '{\"title\": \"...\", \"description\": \"...\", '
+                '\"entity_type\": \"...\"}, \"rationale\": \"...\"}'
+            ),
+            "ambiguous": (
+                '{\"decision\": \"pick|discard\", '
+                '\"target_node_id\": \"...\", \"rationale\": \"...\"}'
+            ),
+        }
+        schema = output_schemas.get(decision_type, output_schemas["new_entity"])
+
+        entries_text = []
+        for i, item in enumerate(items):
+            fields = "\n".join(f"  {k}: {json.dumps(v, ensure_ascii=False)}" for k, v in item.items())
+            entries_text.append(f"[{i}]\n{fields}")
+
+        prompt = (
+            "你是知识图谱维护裁决者。下面有多条待裁决条目，请对每条返回决策。\n"
+            f"每条输出格式: {schema}\n"
+            "请返回一个 JSON 数组，数组长度必须等于条目数，按序号对应。\n"
+            "只返回 JSON 数组，不要返回其他内容。\n\n"
+            + "\n\n".join(entries_text)
+        )
+
+        try:
+            msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
+            response = self._chat_agent.step(msg)
+            raw = response.msgs[0].content if response.msgs else ""
+            parsed = self._parse_json_array(raw)
+            if isinstance(parsed, list) and len(parsed) == len(items):
+                result = []
+                decision_key = "action" if decision_type == "new_entity" else "decision"
+                for i, (p, fb) in enumerate(zip(parsed, fallbacks)):
+                    if isinstance(p, dict) and decision_key in p:
+                        result.append(p)
+                    else:
+                        result.append(fb)
+                return result
+            logger.warning(
+                "batch LLM 返回长度不匹配 (got %d, want %d)，逐条 fallback",
+                len(parsed) if isinstance(parsed, list) else -1,
+                len(items),
+            )
+        except Exception as exc:
+            logger.warning("batch LLM 裁决失败，逐条 fallback: %s", exc)
+
+        return list(fallbacks)
+
+    def _format_single_decision_prompt(
+        self, item: Dict[str, Any], decision_type: str
+    ) -> str:
+        fields = "\n".join(f"{k}: {json.dumps(v, ensure_ascii=False)}" for k, v in item.items())
+        output_schemas = {
+            "new_entity": (
+                '输出格式: {\"action\": \"tree_create_leaf|tree_create_branch|'
+                'merge_into_existing|needs_tree_session|discard\", '
+                '\"enrich_fields\": {}, \"reason\": \"...\"}'
+            ),
+            "conflict": (
+                '输出格式: {\"decision\": \"accept_new|keep_skeleton|merge\", '
+                '\"resolved_value\": ..., \"rationale\": \"...\"}'
+            ),
+            "overflow": (
+                '输出格式: {\"decision\": \"create_new|merge_into|discard\", '
+                '\"target_node_id\": \"...\", \"rationale\": \"...\"}'
+            ),
+            "ambiguous": (
+                '输出格式: {\"decision\": \"pick|discard\", '
+                '\"target_node_id\": \"...\", \"rationale\": \"...\"}'
+            ),
+        }
+        schema = output_schemas.get(decision_type, output_schemas["new_entity"])
+        return f"你是知识图谱维护裁决者，只返回 JSON。\n{schema}\n\n{fields}"
+
+    def _parse_json_array(self, raw: str) -> list:
+        if not raw:
+            return []
+        raw = raw.strip()
+        fence = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
+        if fence:
+            raw = fence.group(1).strip()
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start == -1 or end == -1:
+            return []
+        try:
+            parsed = json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
 
     def _parse_json_object(self, raw: str) -> Dict[str, Any]:
         if not raw:
@@ -1255,6 +1777,130 @@ class KnowledgeFarmOwnerAgent:
             logger.warning("SkeletonIndex 不可用: %s", exc)
             return None
 
+    _GAP_TYPE_CONFIDENCE: Dict[str, float] = {
+        "new_entity": 0.7,
+        "conflict": 0.85,
+        "overflow": 0.6,
+        "ambiguous_match": 0.7,
+        "new_entity_attribute": 0.8,
+    }
+
+    def _build_chunk_meta_patch(
+        self,
+        ctx: TreeContext,
+        gap_type: str = "",
+        action: str = "",
+        chunk_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        tree_level = ctx.tree_level
+        if tree_level == "unknown":
+            tree_level = self._infer_tree_level_from_meta(chunk_meta) if chunk_meta else "unknown"
+        if tree_level == "unknown":
+            tree_level = self._llm_infer_tree_level(ctx, chunk_meta)
+        knowledge_role = infer_knowledge_role(tree_level)
+        confidence = self._GAP_TYPE_CONFIDENCE.get(gap_type, 0.5)
+        if ctx.exists_in_tree:
+            confidence = max(confidence, 0.9)
+
+        linked_nodes = []
+        if ctx.matched_node_id:
+            linked_nodes.append(ctx.matched_node_id)
+
+        patch: Dict[str, Any] = {
+            "document_category": infer_document_category(tree_level),
+            "tree_position": build_tree_position(
+                tree_level=tree_level,
+                linked_nodes=linked_nodes,
+                confidence=confidence,
+                knowledge_role=knowledge_role,
+            ),
+        }
+        if action == "discard":
+            patch["owner_excluded"] = True
+        return patch
+
+    _GARBAGE_PATTERNS_RE = None
+
+    @classmethod
+    def _get_garbage_patterns(cls):
+        import re
+        if cls._GARBAGE_PATTERNS_RE is None:
+            cls._GARBAGE_PATTERNS_RE = [
+                re.compile(r"^[\s\d.。、\-—─=_*#|+/\\,，\u3000]+$"),
+                re.compile(
+                    r"(?i)^(table\s+of\s+contents|目录|contents|copyright|版权"
+                    r"|all\s+rights?\s+reserved|confidential|机密|保密"
+                    r"|page\s*\d|第\s*\d+\s*页|图\s*\d|表\s*\d|figure\s*\d|table\s*\d)$"
+                ),
+                re.compile(r"(?i)^\s*(\.{3,}|…{2,}|\d+\s*\.{3,}\s*\d+)\s*$"),
+            ]
+        return cls._GARBAGE_PATTERNS_RE
+
+    @staticmethod
+    def _is_garbage_block(page_content: str) -> bool:
+        text = page_content.strip()
+        if not text or len(text) < 10:
+            return True
+        if all(not c.isalnum() for c in text):
+            return True
+        for pat in KnowledgeFarmOwnerAgent._get_garbage_patterns():
+            if pat.search(text):
+                return True
+        return False
+
+    def classify_uncovered_chunks(
+        self,
+        chunks: List[Dict[str, Any]],
+        report: FarmOwnerReport,
+    ) -> List[FillRequest]:
+        requests: List[FillRequest] = []
+        garbage_count = 0
+        for chunk in chunks:
+            meta = chunk.get("metadata") or {}
+            tp = meta.get("tree_position")
+            if isinstance(tp, dict) and tp.get("tree_level"):
+                continue
+            block_id = meta.get("chunk_id") or meta.get("block_id") or meta.get("node_id") or ""
+            if not block_id:
+                continue
+
+            pc = chunk.get("page_content", "")
+            if self._is_garbage_block(pc):
+                garbage_count += 1
+                patch = self._build_chunk_meta_patch(
+                    TreeContext(entity_title=""), gap_type="uncovered", action="discard",
+                )
+                req = FillRequest(
+                    entity_title=block_id,
+                    source_evidence="garbage_block_detected",
+                    action="discard",
+                    target_block_id=block_id,
+                    chunk_meta_patch=patch,
+                )
+                requests.append(req)
+                continue
+
+            entity_title = meta.get("tree_node_id") or meta.get("node_id") or ""
+            ctx = self._query_tree_context(entity_title) if entity_title else TreeContext(entity_title="")
+
+            chunk_meta_for_patch = dict(meta)
+            chunk_meta_for_patch["_content_preview"] = pc[:300]
+            patch = self._build_chunk_meta_patch(ctx, gap_type="uncovered", action="update", chunk_meta=chunk_meta_for_patch)
+            req = FillRequest(
+                entity_title=entity_title or block_id,
+                source_evidence="uncovered_chunk_classification",
+                action="update",
+                target_block_id=block_id,
+                chunk_meta_patch=patch,
+            )
+            requests.append(req)
+
+        if requests:
+            report.fill_requests.extend(requests)
+            logger.info("[农场主] classify_uncovered: %d 块补充分类, %d 垃圾块排除",
+                        len(requests) - garbage_count, garbage_count)
+        return requests
+
     def _query_tree_context(self, entity_title: str) -> TreeContext:
         """纯读树查询，无副作用。同一 process_gap_entries 批次内按 entity_title 缓存结果。"""
         if entity_title and entity_title in self._tree_context_cache:
@@ -1353,6 +1999,83 @@ class KnowledgeFarmOwnerAgent:
             return "branch"
         except Exception:
             return "unknown"
+
+    @staticmethod
+    def _infer_tree_level_from_meta(chunk_meta: Optional[Dict[str, Any]]) -> str:
+        """从 chunk metadata 结构信号推断 tree_level（不依赖 CLI graph）。
+
+        信号优先级：
+          1. function_hierarchy 只有一级（纯模块名，无 > 分隔）→ trunk
+          2. function_hierarchy 多级 + section_path 浅层且含概述关键词 → trunk
+          3. function_hierarchy 多级 → branch
+          4. document_category 在 CATEGORY_TO_TREE_LEVEL 映射中 → 对应层级
+          5. manifest 声明的 tree_level_hint（兜底，仅在上述全部无法判定时使用）
+          6. 无法判定 → "unknown"
+        """
+        if not chunk_meta:
+            return "unknown"
+        from INAGENT.rag.knowledge_config import CATEGORY_TO_TREE_LEVEL
+
+        fh = chunk_meta.get("function_hierarchy", "").strip()
+        if fh:
+            parts = [p.strip() for p in fh.replace(">", "/").split("/") if p.strip()]
+            if len(parts) == 1:
+                return "trunk"
+            if len(parts) > 1:
+                sp = chunk_meta.get("section_path", "").strip()
+                sp_parts = [p.strip() for p in sp.split(">") if p.strip()] if sp else []
+                _OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构")
+                if len(sp_parts) <= 1 and any(kw in sp for kw in _OVERVIEW_KW):
+                    return "trunk"
+                return "branch"
+
+        doc_cat = chunk_meta.get("document_category", "")
+        if doc_cat and doc_cat in CATEGORY_TO_TREE_LEVEL:
+            return CATEGORY_TO_TREE_LEVEL[doc_cat]
+
+        manifest_hint = chunk_meta.get("_manifest_tree_level_hint", "")
+        if manifest_hint in ("leaf", "new_leaf", "branch", "trunk", "root"):
+            return manifest_hint
+
+        return "unknown"
+
+    def _llm_infer_tree_level(
+        self, ctx: TreeContext, chunk_meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """LLM 判定 tree_level。失败时兜底 branch + 低置信度标记。"""
+        if self._chat_agent is None:
+            return "branch"
+
+        section_title = (chunk_meta or {}).get("section_title", ctx.entity_title or "")
+        section_path = (chunk_meta or {}).get("section_path", "")
+        product_module = (chunk_meta or {}).get("product_module", "")
+        content_preview = (chunk_meta or {}).get("_content_preview", "")
+
+        prompt = (
+            "你是知识树分类专家，只返回 JSON。\n"
+            "输出格式: {\"tree_level\": \"leaf|branch|trunk|root\", \"reason\": \"...\"}\n\n"
+            "树层级定义:\n"
+            "  leaf — CLI 命令/操作级知识（单条命令语法、参数）\n"
+            "  branch — 子功能/配置场景（具体配置步骤、单一功能介绍）\n"
+            "  trunk — 大功能模块概述（功能原理、工作机制、多子功能的综合描述）\n"
+            "  root — 系统架构/协议栈顶层设计\n\n"
+            f"标题: {section_title}\n"
+            f"层级路径: {section_path}\n"
+            f"所属模块: {product_module}\n"
+            f"内容摘要: {content_preview[:300]}\n"
+            f"树上是否存在: {ctx.exists_in_tree}\n"
+            f"相似命令: {json.dumps(ctx.similar_commands[:3], ensure_ascii=False) if ctx.similar_commands else '[]'}\n"
+            "请判断此知识块应归入哪个树层级。"
+        )
+        result = self._run_decision(
+            prompt, {"tree_level": "branch", "reason": "llm_fallback"}
+        )
+        level = result.get("tree_level", "branch")
+        valid = {"leaf", "branch", "trunk", "root"}
+        if level not in valid:
+            logger.warning("LLM 返回无效 tree_level '%s'，兜底 branch", level)
+            return "branch"
+        return level
 
     def _read_enrich_snapshot(self, cli, entity_title: str) -> Dict[str, Any]:
         """从 CLI graph 节点读取所有 enrich 字段的当前值。"""

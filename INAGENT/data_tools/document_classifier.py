@@ -4,7 +4,7 @@
 
 此文件仅保留 classify_document / infer_product_module_from_path 签名
 作为过渡期兼容垫片，供尚未迁移的调用方使用。
-新代码请直接使用 knowledge_linker.farmer_link / owner_decide。
+新代码请使用 knowledge_linker.farmer_link（结构匹配）+ knowledge_schema.SchemaGapEntry（gap 产出）。
 """
 import logging
 from pathlib import Path

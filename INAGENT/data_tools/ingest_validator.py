@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from INAGENT.rag.knowledge_schema import CAT_TO_LEVEL
+
 logger = logging.getLogger(__name__)
 
 _MIN_CONTENT_LENGTH = 20
@@ -46,12 +48,14 @@ class IngestReport:
     accepted: int = 0
     rejected_short: int = 0
     rejected_category: int = 0
+    rejected_excluded: int = 0
     quarantined: int = 0
     duplicates: int = 0
     tree_linked: int = 0
     hierarchy_backfilled: int = 0
     module_inferred: int = 0
     tree_attached: int = 0
+    category_rescued: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -59,12 +63,14 @@ class IngestReport:
             "accepted": self.accepted,
             "rejected_short": self.rejected_short,
             "rejected_category": self.rejected_category,
+            "rejected_excluded": self.rejected_excluded,
             "quarantined": self.quarantined,
             "duplicates": self.duplicates,
             "tree_linked": self.tree_linked,
             "hierarchy_backfilled": self.hierarchy_backfilled,
             "module_inferred": self.module_inferred,
             "tree_attached": self.tree_attached,
+            "category_rescued": self.category_rescued,
         }
 
 
@@ -114,6 +120,11 @@ class IngestValidator:
 
         content = str(chunk.get("page_content") or chunk.get("text") or "")
 
+        # Rule 0: OwnerExcluded — 农场主明确排除的块
+        if meta.get("owner_excluded"):
+            self._report.rejected_excluded += 1
+            return "reject", "owner_excluded"
+
         # Rule 1: MinLength
         if len(content.strip()) < _MIN_CONTENT_LENGTH:
             self._report.rejected_short += 1
@@ -127,12 +138,8 @@ class IngestValidator:
             # 无 tree_position — 尝试用旧字段兼容（document_category → tree_level 映射）
             old_cat = meta.get("document_category", "")
             if old_cat and old_cat != "unknown":
-                _CAT_TO_LEVEL = {
-                    "cli": "leaf", "app": "branch", "spec": "trunk",
-                    "architecture": "root", "review": "branch", "test": "branch",
-                }
                 prefix = old_cat.split("/")[0] if "/" in old_cat else old_cat
-                level = _CAT_TO_LEVEL.get(prefix, "branch")
+                level = CAT_TO_LEVEL.get(prefix, "branch")
                 meta["tree_position"] = {
                     "tree_level": level,
                     "linked_nodes": [],

@@ -12,8 +12,8 @@
 核心职责：
 - 对采购员放行（`accept`）的裸 chunk 做结构化元数据补全
 - 将 chunk 匹配到知识骨架（`knowledge_base.json`）叶节点
-- 逐字段 diff，直接写入可对齐部分，将冲突 / 溢出 / 无匹配上报为 `SchemaGapEntry`
-- 收到农场主下发的 `FillRequest` 后执行骨架回填
+- 逐字段 diff，将可对齐部分记入待写路径；冲突 / 溢出 / 无匹配上报为 `SchemaGapEntry`；可选 **`update_skeleton`** 写回骨架正文小节（`[说明]`、`参数:`、`语法:`、`相关操作:`）
+- 按编排调用执行农场主已产出的 **`FillRequest`**：**`apply_fill_request`** 以 **reference 内 chunk `metadata` 为主**批量合并，骨架仅在 `kb_path` 存在且 `node_id` 命中时同步
 
 **不属于农民的工作**：
 - 创建骨架新节点（农场主负责）
@@ -57,20 +57,20 @@ class FarmResult:
 |------------|---------|---------|
 | `conflict` | 字段在骨架和 chunk 中均有值但不同 | 农场主裁决保留哪个 |
 | `overflow` | 字段骨架无此列，或 chunk 无法匹配任何节点 | 农场主决定是否扩展骨架 |
-| `new_entity_attribute` | 文本中检测到 `supports_override` 等新语义 | 农场主决定是否新增字段 |
+| `ambiguous_match` | 首行 slug 与 `command_prefix` 索引指向不同叶节点 | 农场主 `pick` 或规则落位 |
+| `new_entity_attribute` | 文本中检测到 `supports_override` 等；`override_commands` 可多条 | 农场主决定是否新增字段 |
 
 ### 2.4 农场主响应：`FillRequest`
 
-```python
-@dataclass
-class FillRequest:
-    entity_title: str          # 目标实体名称（用于索引回查）
-    fill_fields: Dict[str, Any]# 要写入的字段与值
-    action: str                # "update" / "discard"
-    target_node_id: str        # 明确指定骨架 node_id（优先于 entity_title 匹配）
-    source_evidence: str       # 支持依据（可选）
-    new_node_template: Optional[Dict]  # 新节点模板（仅农场主填充，农民不处理）
-```
+权威定义见 **`INAGENT/rag/knowledge_schema.py`** 中 `@dataclass FillRequest` 与 **`OwnerAction`**。农民侧常用字段：
+
+| 字段 | 作用 |
+|------|------|
+| `target_block_id` | 按 `metadata.block_id` 精确命中 reference 内 chunk |
+| `target_node_id` / `entity_title` | 按 `metadata.tree_node_id` 或 `metadata.node_id` 匹配（`target_node_id` 优先） |
+| `fill_fields` / `enrich_fields` | 合并进命中项的 metadata |
+| `chunk_meta_patch` | 额外 metadata 补丁（可与 `discard` 同用以修正元数据） |
+| `action` | `needs_tree_session`：**跳过**；`create_slot` + `new_node_template`：追加 reference 条目；其余见 `OwnerAction` |
 
 ---
 
@@ -123,35 +123,37 @@ class FillRequest:
         ├─→  write_to_reference()     写入 reference/{stem}.json（block_id 去重）
         │                             写入 logs/{stem}.farmer_cache.json
         │
+        ├─→  update_skeleton()（可选） 已匹配节点：补骨架 metadata / page_content 小节
+        │
         └─→  emit_schema_gaps()       追加写入 gaps JSONL 文件 → 农场主收件箱
 
-────── 农场主审批 ──────────────────────────────────────────────────────────
+────── 农场主裁决（GraphRAG / 结构）+ 编排下发 FillRequest ─────────────────
 
-农民接收 FillRequest 列表（结构化 JSON）：
+编排将 `FarmOwnerReport.fill_requests` 交给农民：
         │
         ▼
-apply_fill_request()
-        · 按 target_node_id（优先）或 entity_title → kb_index → slug 定位骨架节点
-        · 将 fill_fields 写入匹配节点的 metadata
-        · 仅更新已有节点；不创建新节点（节点创建由农场主负责）
-        · 同时扫描 reference/*.json，对匹配 entity_title 的 chunk 写入字段
-        · 返回更新节点数
+apply_fill_request(requests)
+        · 批量：每个 reference/*.json 读一次、写一次（按 block_id / node_id 聚合 patch）
+        · 主写 reference 内 chunk metadata；kb_path 存在时同步骨架 node_id 命中项
+        · 合并 fill_fields + enrich_fields + chunk_meta_patch
+        · needs_tree_session → 跳过；create_slot → 可追加条目；discard + patch → 仍可写
+        · 返回**更新的记录条数**（非「仅骨架节点数」）；不 merge、不刷向量
 ```
 
 ---
 
 ## 4. 树节点匹配策略（`_match_tree_node`）
 
-按优先级依次尝试：
+按优先级依次尝试（与 `knowledge_farmer_agent.py` 内 docstring 一致）：
 
 | 优先级 | 方法 | 说明 |
 |--------|------|------|
-| 1 | `metadata.tree_node_id` | chunk 已由上游明确标注，直接采用 |
-| 2 | `metadata.node_id` | 原始元数据已包含 node_id |
-| 3 | `farmer_tree_alias.json` | 树会话维护的 slug→node_id 映射（只读） |
-| 4 | `section_title` slug 化 → skeleton 精确匹配 | `_normalize_heading_to_node_slug` 转换 |
-| 5 | `kb_index` 最长前缀匹配 | 按 `command_prefix` 在命令前缀索引中查找 |
-| 6 | CLI 行提取后最长前缀匹配 | `_extract_cli_prefix_strings` 提炼 CLI 写法 |
+| 1 | `tree_node_id` / `node_id` | `meta` 与 `ac_meta` 中任一带且在骨架中存在则直接采用 |
+| 2 | `section_title` → slug | slug 命中骨架或 `farmer_tree_alias.json` |
+| 2b | `section_title` 去参数字尾 → `kb_index` | 去掉 `{…}` / `<…>` / `[…]` 等后的基名，精确或最短键族 |
+| 3 | `command_prefix` → `kb_index` 精确 | 正文前 **300** 字符内须出现该前缀（正文为空则跳过校验） |
+| 4 | 首行 slug | 与骨架/别名一致；若与 `command_prefix` 的最长前缀命中 **冲突** → `ambiguous_match` 候选，返回 `None` |
+| 5 | CLI 行最长前缀 | **仅当** `ac_meta.chunk_type == "single_command"` 时，`_extract_cli_prefix_strings` + `_longest_prefix_match_node_id` |
 
 匹配结果写入 `metadata.tree_node_id`，并计入 `FarmResult.matched_node_id`。
 
@@ -186,12 +188,12 @@ apply_fill_request()
 }
 ```
 
-### 5.3 `knowledge_base.json`（骨架 / 只读索引）
+### 5.3 `knowledge_base.json`（骨架）
 
 - 路径：`INAGENT/knowledge_base/reference/knowledge_base.json`
-- 农民以 `node_id` 为键构建内存索引（`_skeleton`）
-- 农民可对已有节点 **原地更新 metadata**（通过 `apply_fill_request`）
-- **不创建新节点**，不修改 `page_content` 结构
+- 农民以 `metadata.node_id` 为键构建内存索引（`_skeleton`）与 `_kb_index`（command_prefix 等）
+- **`cultivate_batch` + `update_skeleton`**：可对**已匹配**节点补 metadata / `page_content` 小节（见 §3）
+- **`apply_fill_request`**：若默认 `kb_path` 存在，对 **node_id 命中**的条目批量合并字段；**不**在农民侧创建图谱级新 CLI 节点（`create_slot` 作用于 reference 列表形态，契约见代码）
 
 ### 5.4 `function_structure_index.json`
 
@@ -219,7 +221,7 @@ apply_fill_request()
 | `{stem}.json` | `knowledge_base/reference/` | 富化后的 chunk 列表（block_id 去重追加） | `write_to_reference()` |
 | `{stem}.farmer_cache.json` | `knowledge_base/logs/` | 已处理 block_id → 时间戳映射 | `write_to_reference()` |
 | gaps JSONL | 调用方指定路径 | 所有 `SchemaGapEntry` 序列化 | `emit_schema_gaps()` |
-| `knowledge_base.json` | `knowledge_base/reference/` | 骨架叶节点 metadata 原地更新 | `apply_fill_request()` |
+| `knowledge_base.json` | `knowledge_base/reference/` | 骨架 metadata / 正文小节 | `update_skeleton()`、`apply_fill_request()`（后者在 kb 存在时） |
 
 ---
 
@@ -231,7 +233,7 @@ apply_fill_request()
 
 ```json
 {
-  "gap_type": "overflow | conflict | new_entity_attribute",
+  "gap_type": "overflow | conflict | ambiguous_match | new_entity_attribute",
   "entity_title": "命令名或节点 ID",
   "entity_description": "描述（可选）",
   "field_name": "发生问题的字段",
@@ -247,32 +249,19 @@ apply_fill_request()
 }
 ```
 
-### 7.2 农场主回复（`FillRequest` 列表）
+### 7.2 农场主产出（`FillRequest` 列表）
 
-农场主裁决后以相同结构化格式下发，必含 `target_node_id` 明确指定要更新的叶节点。  
-示例（附录 C trunk 审批通过）：
+由 **`KnowledgeFarmOwnerAgent`** 填入 `FarmOwnerReport.fill_requests`；**编排**再调用农民 **`apply_fill_request`**。**推荐**对叶级回填给出 `target_node_id` 或 `target_block_id`，以减少歧义；`classify_uncovered_chunks` 等路径会显式带 `chunk_meta_patch` / `target_block_id`。
 
-```json
-{
-  "status": "APPROVED",
-  "target_node_id": "slb_override",
-  "fill_fields": {
-    "supports_override": true,
-    "override_scope": "virtual/group/policy"
-  },
-  "action": "update"
-}
-```
+### 7.3 农民执行回填（`apply_fill_request`）
 
-### 7.3 农民执行回填
+1. **`target_block_id` 非空**：只合并 `metadata.block_id` 等于该值的 chunk。
+2. 否则：用 **`target_node_id`（非空优先）或 `entity_title`** 匹配 chunk 的 `metadata.tree_node_id` 或 `metadata.node_id`。
+3. 合并 **`fill_fields` + `enrich_fields` + `chunk_meta_patch`** 到命中 metadata。
+4. 默认骨架文件存在时，对 **`metadata.node_id` 与目标一致**的骨架条目做同样字段合并。
+5. **`action=needs_tree_session`**：跳过；**`create_slot`**：见 `_apply_create_slot`；**`discard`**：无 patch 时通常不写，有 `chunk_meta_patch` 等仍可更新 reference。
 
-`apply_fill_request()` 定位规则（按优先级）：
-
-1. `FillRequest.target_node_id` 直接匹配骨架 `node_id`
-2. `entity_title` → `kb_index`（command_prefix → node_id）查找
-3. `entity_title` → slug 化后查找
-
-找到节点后将 `fill_fields` 合并写入 `metadata`，并同步更新 `reference/*.json` 中匹配的 chunk。
+**不**调用 `merge_knowledge_base`、**不**刷新混合向量（与 §9 一致）。
 
 ---
 
@@ -283,15 +272,16 @@ apply_fill_request()
 | `cultivate_batch(decisions)` | `List[ChunkDecision]` | `List[FarmResult]` | 主流程：结构化 → 匹配 → diff |
 | `write_to_reference(results)` | `List[FarmResult]` | `Dict[str, int]` | 写 reference JSON，返回各 stem 新增数量 |
 | `emit_schema_gaps(results, path)` | `List[FarmResult], Path` | `int` | 写 gap JSONL，返回 gap 总数 |
-| `apply_fill_request(requests)` | `List[FillRequest]` | `int` | 执行农场主回填，返回更新节点数 |
+| `apply_fill_request(requests)` | `List[FillRequest]` | `int` | 批量回填 reference（+ 可选骨架），返回**更新的 chunk/骨架记录条数** |
+| `update_skeleton(results)` | `List[FarmResult]` | `int` | 对已匹配节点补骨架小节，返回更新节点数 |
 
 ---
 
 ## 9. 关键约束
 
 - **幂等性**：`write_to_reference` 以 `block_id` 去重，重跑不产生重复
-- **不合并、不刷向量**：`write_to_reference` 只更新 `reference/{stem}.json`，**不**调用 `merge_knowledge_base`，**不**更新 `knowledge_base.json` 或 Qdrant/BM25。E2E 须在农民写分片之后、依赖混合检索之前，由编排显式合并并刷新向量；若使用 `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)`，该合并发生在**该次农场主调用末尾**且仅包含**当时已落盘**的分片（详见 `sessions/04-farm-owner.md`、`DATA_FLOW.md` §3.7）。
-- **只读骨架拓扑**：农民不新增 `node_id`、不修改树结构
+- **不合并、不刷向量**：`write_to_reference` 只更新 `reference/{stem}.json`，**不**调用 `merge_knowledge_base`，**不**刷 Qdrant/BM25。`update_skeleton` / `apply_fill_request` 可写 `knowledge_base.json` 的**已有节点** metadata 或小节正文，但**仍不**触发合并与向量刷新。E2E 须在农民写分片之后、依赖混合检索之前，由编排显式合并并刷新向量；若使用 `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)`，该合并发生在**该次农场主调用末尾**且仅包含**当时已落盘**的分片（详见 `sessions/04-farm-owner.md`、`DATA_FLOW.md` §3.7）。
+- **只读骨架拓扑**：农民不擅自新增 CLI 图谱 `node_id`、不改树拓扑；`create_slot` 等契约内追加见实现
 - **无状态骨架缓存**：`_skeleton` / `_kb_index` 在实例生命周期内缓存，跨批次重用同一 `KnowledgeFarmerAgent` 实例前请确认骨架未变
 - **LLM 可选**：所有核心路径均可在无 LLM 状态下运行（降级为规则提取）
 - **产品名动态**：始终通过 `product_name` 参数传入，不在代码中硬编码
@@ -310,7 +300,7 @@ apply_fill_request()
 | Stage 2 | `cultivate_batch` 结构化 + 匹配 + gap 产出 |
 | Stage 3 | `write_to_reference` 写入临时隔离目录 |
 | Stage 4 | `emit_schema_gaps` 写入 gap JSONL |
-| Stage 5 | 模拟农场主审批（JSON 结构化决策），`apply_fill_request` 回填骨架叶节点 |
+| Stage 5 | 构造示例 `FillRequest` 列表，`apply_fill_request` 批量写 reference（及可选骨架） |
 
 运行（隔离临时目录，不污染线上骨架）：
 

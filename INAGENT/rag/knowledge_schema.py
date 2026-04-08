@@ -12,6 +12,8 @@ OwnerAction = Literal[
     "discard",              # 丢弃，无任何写入
     "tree_create_leaf",     # 新建叶节点（command/artifact）
     "tree_create_branch",   # 新建枝节点（feature/sub-module）
+    "tree_create_trunk",    # 新建躯干节点（多功能组合场景）
+    "tree_create_root",     # 新建根节点（系统架构/顶层设计）
     "merge_into_existing",  # 挂载/合并到已有节点（GraphRAG+Skeleton）
     "attr_tag_update",      # 更新已有节点的 enrich 字段/标签
     "graphrag_col_update",  # 更新 GraphRAG 实体自定义列值
@@ -58,6 +60,29 @@ class FillRequest:
     enrich_fields: Dict[str, Any] = field(default_factory=dict)  # 各层 enrich key
     artifact_id: str = ""                           # skeleton_register 时用
     artifact_link: Optional[Dict[str, Any]] = None  # add_link 参数包
+    chunk_meta_patch: Dict[str, Any] = field(default_factory=dict)  # 写入源块 metadata 的字段补丁
+    target_block_id: str = ""                       # 按 block_id 匹配源块（与 target_node_id 互补）
+
+
+@dataclass
+class TreeMutation:
+    """农场主对树结构的一项变更，供农民后续操作使用（不重复查询 LLM）。"""
+    mutation_type: str          # "create_leaf" | "create_branch" | "create_trunk" | "create_root" | "update_fields" | "add_relationship"
+    node_id: str
+    parent_node_id: str = ""
+    tree_level: str = ""
+    fields: Dict[str, Any] = field(default_factory=dict)
+    source_gap_type: str = ""   # 来源 gap 类型
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "mutation_type": self.mutation_type,
+            "node_id": self.node_id,
+            "parent_node_id": self.parent_node_id,
+            "tree_level": self.tree_level,
+            "fields": self.fields,
+            "source_gap_type": self.source_gap_type,
+        }
 
 
 # ── TreeContext ───────────────────────────────────────────────────────────────
@@ -189,6 +214,30 @@ class ColumnSpec:
 
 
 @dataclass
+class OwnerOpLog:
+    phase: str              # "new_entity" | "conflict" | "overflow" | "attribute"
+    entity_title: str
+    action: str             # 具体决策: "tree_create_leaf" | "merge_into_existing" | "discard" ...
+    reason: str
+    status: str = "OK"      # "OK" | "INCOMPLETE" | "ERROR"
+    source: str = "rule"    # "rule" | "llm" | "fallback"
+    partial_data: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "phase": self.phase,
+            "entity": self.entity_title,
+            "action": self.action,
+            "reason": self.reason,
+            "status": self.status,
+            "source": self.source,
+        }
+        if self.partial_data:
+            d["partial_data"] = self.partial_data
+        return d
+
+
+@dataclass
 class FarmOwnerReport:
     snapshot_dir: Optional[Path] = None
     entities_added: int = 0
@@ -199,3 +248,74 @@ class FarmOwnerReport:
     fill_requests: List[FillRequest] = field(default_factory=list)
     deferred: List[FillRequest] = field(default_factory=list)  # needs_tree_session 条目
     errors: List[str] = field(default_factory=list)
+    operation_log: List[OwnerOpLog] = field(default_factory=list)
+    tree_mutations: List[TreeMutation] = field(default_factory=list)
+    discarded_count: int = 0
+    discarded_entities: List[str] = field(default_factory=list)
+
+    def log_op(self, phase: str, entity_title: str, action: str,
+               reason: str, *, status: str = "OK", source: str = "rule",
+               partial_data: Optional[Dict[str, Any]] = None) -> None:
+        self.operation_log.append(OwnerOpLog(
+            phase=phase, entity_title=entity_title, action=action,
+            reason=reason, status=status, source=source,
+            partial_data=partial_data,
+        ))
+
+    def dump_operation_log(self) -> List[Dict[str, Any]]:
+        return [op.to_dict() for op in self.operation_log]
+
+    def operation_summary(self) -> Dict[str, Any]:
+        by_phase: Dict[str, Dict[str, int]] = {}
+        for op in self.operation_log:
+            phase_stats = by_phase.setdefault(op.phase, {})
+            phase_stats[op.action] = phase_stats.get(op.action, 0) + 1
+        return {
+            "total_ops": len(self.operation_log),
+            "by_phase": by_phase,
+            "errors": sum(1 for op in self.operation_log if op.status == "ERROR"),
+            "incomplete": sum(1 for op in self.operation_log if op.status == "INCOMPLETE"),
+        }
+
+
+# ── Pure helper functions ─────────────────────────────────────────────────────
+
+def build_tree_position(
+    tree_level: str,
+    linked_nodes: Optional[List[str]] = None,
+    confidence: float = 0.5,
+    knowledge_role: str = "",
+) -> Dict[str, Any]:
+    return {
+        "tree_level": tree_level,
+        "linked_nodes": linked_nodes or [],
+        "confidence": confidence,
+        "knowledge_role": knowledge_role,
+    }
+
+
+_LEVEL_TO_ROLE: Dict[str, str] = {
+    "leaf": "command_attribute",
+    "branch": "feature_doc",
+    "trunk": "scenario_doc",
+    "root": "architecture_doc",
+}
+
+
+def infer_knowledge_role(tree_level: str) -> str:
+    return _LEVEL_TO_ROLE.get(tree_level, "general_doc")
+
+
+LEVEL_TO_CAT: Dict[str, str] = {
+    "leaf": "cli",
+    "branch": "app",
+    "trunk": "spec",
+    "root": "architecture",
+}
+
+CAT_TO_LEVEL: Dict[str, str] = {v: k for k, v in LEVEL_TO_CAT.items()}
+CAT_TO_LEVEL.update({"review": "branch", "test": "branch"})
+
+
+def infer_document_category(tree_level: str) -> str:
+    return LEVEL_TO_CAT.get(tree_level, "doc")

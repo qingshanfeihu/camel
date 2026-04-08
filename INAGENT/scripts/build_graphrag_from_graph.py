@@ -148,6 +148,33 @@ def build():
 
     print(f"  Entities: {len(entity_rows)}")
 
+    # Enrich module entities with overview snippets from KB
+    entity_title_to_idx = {r["title"].lower(): i for i, r in enumerate(entity_rows)}
+    overview_count = 0
+    enriched_entities = set()
+    for entry in kb:
+        em = entry.get("metadata", {})
+        etitle = em.get("enhanced_title", "")
+        if not etitle:
+            continue
+        mod = em.get("product_module", "")
+        nid = em.get("node_id", "")
+        candidates = [nid, mod] if nid else [mod]
+        for cand in candidates:
+            if not cand:
+                continue
+            idx = entity_title_to_idx.get(cand.lower())
+            if idx is not None and idx not in enriched_entities:
+                snippet = entry.get("page_content", "")[:300].strip()
+                if snippet:
+                    cur = entity_rows[idx]["description"]
+                    entity_rows[idx]["description"] = f"{cur}. 概述: {snippet}"
+                    overview_count += 1
+                    enriched_entities.add(idx)
+                break
+    if overview_count:
+        print(f"  Overview-enriched entities: {overview_count}")
+
     # --- Relationships ---
     degree_counter = defaultdict(int)
     rel_rows = []

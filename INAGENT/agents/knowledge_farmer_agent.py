@@ -15,16 +15,19 @@
 农民 Agent (Knowledge Farmer Agent)
 
 职责：
-  1. 调 auto_convert 对采购员 accept 的裸 chunk 做结构化（规则+LLM 元数据提取）
-  2. 匹配骨架（knowledge_base.json）节点，逐字段 diff
-  3. 对齐的部分直接更新骨架；冲突/溢出/无匹配 → SchemaGapEntry → 农场主裁决
-  4. 收到 FillRequest 后回填
+  1. cultivate_batch：对采购员 accept 的裸 chunk 做结构化；元数据经 `_extract_chunk_metadata(..., skip_llm=True)`（批处理不调 LLM）；MinerU table_body 经 auto_convert 进正文
+  2. _match_tree_node 匹配骨架（knowledge_base.json）叶节点；歧义多候选 → ambiguous_match gap；_diff_with_skeleton 逐字段 diff
+  3. 冲突/溢出/无匹配 → SchemaGapEntry → 农场主裁决；可选 update_skeleton 写回骨架 page_content/metadata（说明/参数/语法/相关操作）
+  4. 执行农场主已产出的 FillRequest：apply_fill_request 批量合并到 reference/*.json（及 kb_path 存在时的骨架 node_id 命中项），不自动 merge、不刷向量
+  5. enrich_scenario_nodes：读农场主产出的 scenarios_scaffold，LLM 写 scenarios_synthesized（与 cultivate_batch 批处理路径分离）
 
 auto_convert 是农民的通用工具（PDF/DOCX/XLSX/TXT → 统一 metadata），农民不关心原始格式。
 
 持久化：
-  reference/{stem}.json         —— 新 chunk 按 block_id 去重追加
-  knowledge_base.json           —— 骨架节点原地更新
+  reference/{stem}.json         —— 新 chunk 按 block_id 去重追加；FillRequest 主要落点
+  reference/scenarios_scaffold.json   —— 农场主 cultivate_scenarios（农民只读输入）
+  reference/scenarios_synthesized.json —— enrich_scenario_nodes 输出
+  knowledge_base.json           —— 骨架；update_skeleton / apply_fill_request（可选）原地更新
   farmer_tree_alias.json       —— 可选：树会话提供的 heading_slug → node_id 映射
   logs/{stem}.farmer_cache.json —— 已处理 block_id 记录
 """
@@ -90,6 +93,12 @@ _SKELETON_SECTION_RE = re.compile(
     r"^(\[命令\]|\[说明\]|语法:|参数:|适用范围:|相关操作:|内部函数:)",
     re.MULTILINE,
 )
+
+_GENERIC_SECTION_TITLES = frozenset({
+    "概述", "简介", "说明", "注意事项", "配置说明", "功能介绍", "使用说明",
+    "overview", "introduction", "description", "summary", "about",
+    "getting started", "prerequisites", "notes",
+})
 
 
 def _extract_labeled_section(text: str, label: str) -> str:
@@ -398,6 +407,24 @@ class KnowledgeFarmerAgent:
             for k in step3:
                 if k not in enriched:
                     enriched.append(k)
+
+            section_title = meta.get("section_title", "").strip()
+            if section_title.lower() in _GENERIC_SECTION_TITLES:
+                spath = meta.get("section_path", "")
+                parts = [p.strip() for p in spath.split(">") if p.strip()] if spath else []
+                parent = ""
+                for p in reversed(parts):
+                    if p.lower() not in _GENERIC_SECTION_TITLES:
+                        parent = p
+                        break
+                if not parent:
+                    parent = meta.get("product_module", "")
+                if parent:
+                    meta["enhanced_title"] = f"{parent} - {section_title}"
+                    content = f"[{parent}] {section_title}\n{content}"
+                    chunk["page_content"] = content
+                    if "enhanced_title" not in enriched:
+                        enriched.append("enhanced_title")
 
             chunk["metadata"] = meta
             results.append(FarmResult(
@@ -870,18 +897,8 @@ class KnowledgeFarmerAgent:
     ) -> int:
         """Apply farm-owner ``FillRequest`` rows to reference chunks (and optionally skeleton).
 
-        Farm owner has already decided; each non-discard request carries
-        ``target_node_id`` (preferred) or ``entity_title`` as the stable node key, plus
-        ``fill_fields`` to merge into chunk metadata.
-
-        Matching rule for ``reference/*.json`` array items::
-
-            metadata.tree_node_id == target  or  metadata.node_id == target
-
-        If ``kb_path`` exists, skeleton items with ``metadata.node_id == target`` receive
-        the same field merge (optional parity with CLI leaves).
-
-        Returns the number of **records** updated (reference items + skeleton items).
+        Batched I/O: reads each JSON file once, applies all matching patches in memory,
+        writes once. O(files × items + requests) instead of O(requests × files × items).
         """
         ref_dir = ref_dir or _REFERENCE_DIR
         kb_path = kb_path or _KB_PATH
@@ -890,105 +907,206 @@ class KnowledgeFarmerAgent:
 
         filled = 0
 
+        by_block_id: Dict[str, Dict[str, Any]] = {}
+        by_node_id: Dict[str, Dict[str, Any]] = {}
+        kb_by_node_id: Dict[str, Dict[str, Any]] = {}
+        create_slots: List[FillRequest] = []
+
         for req in fill_requests:
+            if req.action == "needs_tree_session":
+                continue
+
+            has_patch = bool(getattr(req, "chunk_meta_patch", None))
+            block_id_target = getattr(req, "target_block_id", "").strip()
+
             if req.action == "discard":
+                if not has_patch:
+                    continue
+                node_target = (req.target_node_id or req.entity_title or "").strip()
+                if block_id_target:
+                    by_block_id.setdefault(block_id_target, {}).update(req.chunk_meta_patch)
+                elif node_target:
+                    by_node_id.setdefault(node_target, {}).update(req.chunk_meta_patch)
                 continue
+
             target = (req.target_node_id or req.entity_title or "").strip()
-            if not target:
-                logger.warning(
-                    "[农民] apply_fill_request: skip request with empty target_node_id "
-                    "and entity_title (action=%s)",
-                    req.action,
-                )
+            if not target and not block_id_target:
                 continue
+
+            if req.action == "create_slot" and req.new_node_template:
+                create_slots.append(req)
+                continue
+
             merge: Dict = {}
             if req.fill_fields:
                 merge.update(req.fill_fields)
             if getattr(req, "enrich_fields", None):
                 merge.update(req.enrich_fields)
-            if not merge:
+            if has_patch:
+                merge.update(req.chunk_meta_patch)
+            if not merge and not block_id_target:
                 continue
 
-            if ref_dir.exists():
-                for json_file in sorted(ref_dir.glob("*.json")):
-                    if "_bak" in json_file.stem or "_bak_" in json_file.stem:
-                        continue
-                    try:
-                        data = json.loads(json_file.read_text(encoding="utf-8"))
-                    except Exception as exc:
-                        logger.warning(
-                            "[农民] apply_fill_request: skip %s (%s)",
-                            json_file.name,
-                            exc,
-                        )
-                        continue
-                    if not isinstance(data, list):
-                        continue
-                    file_changed = False
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-                        meta = item.get("metadata")
-                        if not isinstance(meta, dict):
-                            continue
-                        tid = str(meta.get("tree_node_id") or meta.get("node_id") or "").strip()
-                        if tid != target:
-                            continue
-                        for k, v in merge.items():
-                            meta[k] = v
-                        item["metadata"] = meta
-                        file_changed = True
-                        filled += 1
-                    if file_changed:
-                        json_file.write_text(
-                            json.dumps(data, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
-                        logger.info(
-                            "[农民] apply_fill_request: 已更新 reference/%s (target=%s)",
-                            json_file.name,
-                            target,
-                        )
+            if block_id_target:
+                by_block_id.setdefault(block_id_target, {}).update(merge)
+            if target:
+                by_node_id.setdefault(target, {}).update(merge)
+                kb_by_node_id.setdefault(target, {}).update(merge)
 
-            kb_file = Path(kb_path) if kb_path else None
-            if kb_file and kb_file.exists():
-                try:
-                    kb_data = json.loads(kb_file.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    logger.warning(
-                        "[农民] apply_fill_request: 无法读取骨架 %s (%s)",
-                        kb_file,
-                        exc,
-                    )
-                    kb_data = None
-                if isinstance(kb_data, list):
-                    kb_modified = False
-                    for item in kb_data:
-                        if not isinstance(item, dict):
-                            continue
-                        m = item.get("metadata")
-                        if not isinstance(m, dict):
-                            continue
-                        if str(m.get("node_id") or "").strip() != target:
-                            continue
-                        for k, v in merge.items():
-                            m[k] = v
-                        item["metadata"] = m
-                        kb_modified = True
-                        filled += 1
-                    if kb_modified:
-                        kb_file.write_text(
-                            json.dumps(kb_data, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
-                        logger.info(
-                            "[农民] apply_fill_request: 已更新骨架节点 target=%s",
-                            target,
-                        )
+        for req in create_slots:
+            filled += self._apply_create_slot(req, ref_dir)
 
-        if filled:
-            logger.info("[农民] apply_fill_request: 共更新 %d 条记录", filled)
+        if (by_block_id or by_node_id) and ref_dir.exists():
+            filled += self._apply_patches_batch(ref_dir, by_block_id, by_node_id)
+
+        kb_file = Path(kb_path) if kb_path else None
+        if kb_by_node_id and kb_file and kb_file.exists():
+            filled += self._apply_kb_patches_batch(kb_file, kb_by_node_id)
+
+        logger.info(
+            "[农民] apply_fill_request: 共更新 %d 条 (block_id_keys=%d, node_id_keys=%d, create_slots=%d)",
+            filled, len(by_block_id), len(by_node_id), len(create_slots),
+        )
         return filled
+
+    def _apply_patches_batch(
+        self,
+        ref_dir: Path,
+        by_block_id: Dict[str, Dict[str, Any]],
+        by_node_id: Dict[str, Dict[str, Any]],
+    ) -> int:
+        count = 0
+        updated_nodes: set = set()
+        for json_file in sorted(ref_dir.glob("*.json")):
+            if "_bak" in json_file.stem:
+                continue
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, list):
+                continue
+            file_changed = False
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                meta = item.get("metadata")
+                if not isinstance(meta, dict):
+                    continue
+                merged: Dict[str, Any] = {}
+                bid = str(meta.get("block_id", "")).strip()
+                if bid and bid in by_block_id:
+                    merged.update(by_block_id[bid])
+                tid = str(meta.get("tree_node_id") or meta.get("node_id") or "").strip()
+                if tid and tid in by_node_id:
+                    merged.update(by_node_id[tid])
+                    if tid not in updated_nodes:
+                        updated_nodes.add(tid)
+                if not merged:
+                    continue
+                for k, v in merged.items():
+                    meta[k] = v
+                item["metadata"] = meta
+                file_changed = True
+                count += 1
+            if file_changed:
+                json_file.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8",
+                )
+        if updated_nodes:
+            logger.info("[农民] apply_fill_request: 批量更新 %d 节点", len(updated_nodes))
+        logger.info("[农民] apply_fill_request: 批量 patch %d 条记录", count)
+        return count
+
+    def _apply_kb_patches_batch(
+        self,
+        kb_file: Path,
+        kb_by_node_id: Dict[str, Dict[str, Any]],
+    ) -> int:
+        try:
+            kb_data = json.loads(kb_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[农民] apply_fill_request: 无法读取骨架 %s (%s)", kb_file, exc)
+            return 0
+        if not isinstance(kb_data, list):
+            return 0
+        count = 0
+        modified = False
+        for item in kb_data:
+            if not isinstance(item, dict):
+                continue
+            m = item.get("metadata")
+            if not isinstance(m, dict):
+                continue
+            nid = str(m.get("node_id") or "").strip()
+            if nid not in kb_by_node_id:
+                continue
+            patch = kb_by_node_id[nid]
+            for k, v in patch.items():
+                m[k] = v
+            item["metadata"] = m
+            modified = True
+            count += 1
+        if modified:
+            kb_file.write_text(
+                json.dumps(kb_data, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+            logger.info("[农民] apply_fill_request: 骨架批量更新 %d 节点", count)
+        return count
+
+    def _apply_create_slot(self, req: FillRequest, ref_dir: Path) -> int:
+        template = req.new_node_template
+        if not isinstance(template, dict):
+            return 0
+        target = (req.target_node_id or req.entity_title or "").strip()
+        if not target:
+            return 0
+
+        source_file = template.get("source_file", "overflow_created")
+        stem = Path(source_file).stem if source_file else "overflow_created"
+        ref_file = ref_dir / f"{stem}.json"
+
+        data: list = []
+        if ref_file.exists():
+            try:
+                data = json.loads(ref_file.read_text(encoding="utf-8"))
+                if not isinstance(data, list):
+                    data = []
+            except Exception:
+                data = []
+
+        for item in data:
+            m = item.get("metadata", {})
+            if str(m.get("tree_node_id", "")) == target or str(m.get("node_id", "")) == target:
+                logger.info("[农民] create_slot: 节点已存在 %s, skip", target)
+                return 0
+
+        content = template.get("page_content", "")
+        prefix_bytes = content[:50].encode("utf-8", errors="replace")
+        short_hash = hashlib.md5(prefix_bytes).hexdigest()[:8]
+        block_id = f"{stem}_slot_{short_hash}"
+
+        meta = {
+                "tree_node_id": target,
+                "node_id": target,
+                "block_id": block_id,
+                "source_file": source_file,
+                **{k: v for k, v in template.items()
+                   if k not in ("page_content", "source_file")},
+            }
+        if req.chunk_meta_patch:
+            meta.update(req.chunk_meta_patch)
+
+        new_chunk = {
+            "page_content": content,
+            "metadata": meta,
+        }
+        data.append(new_chunk)
+        ref_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        logger.info("[农民] create_slot: 新节点 %s 写入 %s", target, ref_file.name)
+        return 1
 
     # ── Step 1: rules ─────────────────────────────────────────────────────────
 
@@ -1289,39 +1407,20 @@ class KnowledgeFarmerAgent:
     def _structure_via_auto_convert(self, chunks: List[Dict]) -> List[Dict]:
         """Call auto_convert to structure raw chunk metadata.
 
-        Phase 1: rule-based extraction via _extract_chunk_metadata
-        Phase 2: batch LLM for chunks needing more metadata (if configured)
-
-        After this, :meth:`_refine_ac_meta_command_prefix` maps coarse prefixes to skeleton labels.
+        Phase 1 only: rule-based extraction via _extract_chunk_metadata.
+        Farmer never calls LLM — missing fields become overflow gaps
+        for the farm owner to decide.
         """
         from INAGENT.data_tools.auto_convert import (
-            _apply_llm_metadata_extraction_batch,
             _extract_chunk_metadata,
-            _load_project_config,
-        )
-
-        config = _load_project_config()
-        llm_config = config.get("llm-aided-config", {}).get(
-            "metadata_extraction", {}
         )
 
         results: List[Dict] = []
         for chunk in chunks:
             text = (chunk.get("page_content") or chunk.get("text") or "")
             base_meta = chunk.get("metadata", {})
-            meta = _extract_chunk_metadata(text, base_meta)
+            meta = _extract_chunk_metadata(text, base_meta, skip_llm=True)
             results.append(meta)
-
-        if llm_config.get("enable", False):
-            _KEY_FIELDS = {"product_module", "protocol_type", "intent", "config_mode"}
-            needs_llm: list = []
-            for i, meta in enumerate(results):
-                filled = sum(1 for f in _KEY_FIELDS if meta.get(f))
-                if filled < 3 or not meta.get("chunk_type"):
-                    text = (chunks[i].get("page_content") or "")
-                    needs_llm.append((text, meta))
-            if needs_llm:
-                _apply_llm_metadata_extraction_batch(needs_llm, llm_config)
 
         return results
 

@@ -43,6 +43,7 @@ BASE_DIR = Path(__file__).parent
 # DOC_LOCAL_DIR 指向 INAGENT/knowledge_base（与 manage_database.py 一致）
 DOC_LOCAL_DIR = BASE_DIR.parent / "knowledge_base"
 REFERENCE_DIR = DOC_LOCAL_DIR / "reference"
+DOC_LOCAL_REF_DIR = DOC_LOCAL_DIR / "doc_local_reference"
 
 LOG_DIR = DOC_LOCAL_DIR / "logs"
 LOG_FILE = LOG_DIR / "auto_convert.log"
@@ -98,6 +99,38 @@ def _remove_section_number(title: str) -> str:
     return title.strip()
 
 
+def _is_plausible_heading(text: str) -> bool:
+    """Check if text looks like a section heading rather than body text.
+
+    Rejects numbered list items and long sentences that happen to start
+    with a digit pattern matching ``_infer_section_level_from_heading``.
+    """
+    if not text:
+        return False
+    if len(text) > 80:
+        return False
+    stripped = text.rstrip()
+    if stripped.endswith(('\u3002', '\uff01', '\uff1f', '\uff1b', '\uff1a',
+                          '.', '!', '?', ';', ':')):
+        return False
+    digits = sum(1 for c in text if c.isdigit())
+    if len(text) > 10 and digits / len(text) > 0.3:
+        return False
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in text)
+    if not has_cjk and len(text) > 20:
+        return False
+    return True
+
+
+def _sanitize_section_path(path: str) -> str:
+    """Clean section_path by dropping segments that are clearly not headings."""
+    if not path:
+        return path
+    segments = path.split(' > ')
+    valid = [s for s in segments if _is_plausible_heading(s)]
+    return ' > '.join(valid)
+
+
 def _infer_section_level_from_heading(title: str) -> Optional[int]:
     """Infer section level from numbered headings.
 
@@ -146,7 +179,13 @@ def _normalize_openai_base_url(url: str) -> str:
     return url.rstrip("/")
 
 
+_project_config_cache: Optional[Dict] = None
+
+
 def _load_project_config() -> Dict:
+    global _project_config_cache
+    if _project_config_cache is not None:
+        return _project_config_cache
     load_inagent_env()
     config_path = cfg_str(
         "auto_convert.mineru_tools_config_json",
@@ -176,10 +215,14 @@ def _load_project_config() -> Dict:
                     return data
 
                 resolved = recursive_resolve(config_data)
-                return resolved if isinstance(resolved, dict) else {}
+                result = resolved if isinstance(resolved, dict) else {}
+                _project_config_cache = result
+                return result
             except json.JSONDecodeError as exc:
                 logger.warning("Failed to parse config %s: %s", path, exc)
+                _project_config_cache = {}
                 return {}
+    _project_config_cache = {}
     return {}
 
 
@@ -349,6 +392,67 @@ def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
 MINERU_OUTPUT_DIR = DOC_LOCAL_DIR / "mineru_output"
 # 备份目录：大文件移到这里而非删除，MinerU 重新生成代价很高
 MINERU_BACKUP_DIR = DOC_LOCAL_DIR / "mineru_backup"
+
+_MANIFEST_PATH = DOC_LOCAL_DIR / "input" / "manifest.json"
+_manifest_cache: Optional[Dict[str, Any]] = None
+
+
+def _load_manifest() -> Dict[str, Any]:
+    global _manifest_cache
+    if _manifest_cache is not None:
+        return _manifest_cache
+    if _MANIFEST_PATH.exists():
+        try:
+            raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+            _manifest_cache = {k: v for k, v in raw.items() if not k.startswith("_")}
+        except Exception as exc:
+            logger.warning("[manifest] load failed: %s", exc)
+            _manifest_cache = {}
+    else:
+        _manifest_cache = {}
+    return _manifest_cache
+
+
+def _get_manifest_hints(filename: str) -> Dict[str, Any]:
+    manifest = _load_manifest()
+    return manifest.get(filename, {})
+
+
+def _update_manifest_observed(filename: str, blocks: List[Dict[str, Any]],
+                              link_stats: Dict[str, Any]) -> None:
+    """农场主写回：将观测到的 tree_level 分布和链接统计写入 manifest._observed。"""
+    if not _MANIFEST_PATH.exists():
+        return
+    try:
+        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    tree_dist: Dict[str, int] = {}
+    for blk in blocks:
+        tl = blk.get("metadata", {}).get("tree_position", {}).get("tree_level", "unknown")
+        tree_dist[tl] = tree_dist.get(tl, 0) + 1
+
+    total = len(blocks)
+    linked = link_stats.get("linked", 0)
+    link_rate = round(linked / total, 4) if total else 0.0
+
+    observed = {
+        "block_count": total,
+        "link_rate": link_rate,
+        "tree_level_distribution": tree_dist,
+    }
+
+    if filename not in raw:
+        raw[filename] = {}
+    raw[filename]["_observed"] = observed
+
+    _MANIFEST_PATH.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info("[manifest] wrote _observed for %s: link_rate=%.2f, dist=%s",
+                filename, link_rate, tree_dist)
 
 # vLLM Docker Configuration (optional MinerU hybrid-http-client backend)
 # Docs: https://opendatalab.github.io/MinerU/zh/quick_start/docker_deployment/
@@ -1534,7 +1638,7 @@ def _apply_llm_metadata_extraction_batch(
         for idx, (text, meta_item) in enumerate(sub_items):
             sec = str(meta_item.get("section_title") or "").strip()
             par = str(meta_item.get("parent_section") or "").strip()
-            spath = str(meta_item.get("section_path") or "").strip()
+            spath = _sanitize_section_path(str(meta_item.get("section_path") or "")).strip()
             src = str(meta_item.get("source_file") or "")
             snippet = text[:_BATCH_TEXT_LIMIT]
             header = f"[CHUNK {idx}]"
@@ -1611,9 +1715,11 @@ def _run_knowledge_linking(
     knowledge_blocks: List[Dict[str, Any]],
     source_file: Path,
 ) -> Tuple[List[Dict[str, Any]], dict]:
-    """农民匹配 + 农场主决策：将知识块挂载到命令树。
+    """农民结构匹配：将知识块挂载到命令树。
 
-    如果 CLI graph 不可用，跳过链接（所有块在 merge 时由 validator 处理）。
+    仅做结构验证（command_exists, hierarchy, section_title 命令匹配）。
+    无法匹配的块产出 SchemaGapEntry 写入 schema_gaps.jsonl，
+    由农场主 (process_gap_entries) 后续消费。
     """
     try:
         from INAGENT.data_tools.knowledge_linker import link_blocks
@@ -1622,30 +1728,15 @@ def _run_knowledge_linking(
         cli_graph = CLIGraphStore()
         cli_graph._ensure_loaded()
 
-        manifest_hints: Dict[str, str] = {}
-        try:
-            manifest_path = Path(__file__).resolve().parent.parent / "knowledge_base" / "input" / "manifest.json"
-            if manifest_path.exists():
-                import json as _json
-                _m = _json.loads(manifest_path.read_text(encoding="utf-8"))
-                for fname, entry in _m.items():
-                    if isinstance(entry, dict) and entry.get("tree_level_hint"):
-                        stem = Path(fname).stem.lower()
-                        manifest_hints[stem] = entry["tree_level_hint"]
-        except Exception:
-            pass
+        blocks, gap_entries, stats = link_blocks(knowledge_blocks, cli_graph)
 
-        blocks, stats = link_blocks(
-            knowledge_blocks,
-            cli_graph,
-            manifest_hints=manifest_hints,
-            enable_owner=True,
-        )
+        if gap_entries:
+            _write_gap_entries(gap_entries, source_file)
+
         logger.info(
-            "[link] %s: farmer=%d, owner=%d, escalated=%d / total=%d",
+            "[link] %s: farmer=%d, escalated=%d / total=%d",
             source_file.name,
             stats.get("farmer_matched", 0),
-            stats.get("owner_decided", 0),
             stats.get("escalated", 0),
             stats.get("total", 0),
         )
@@ -1653,6 +1744,79 @@ def _run_knowledge_linking(
     except Exception as e:
         logger.warning("[link] 知识链接跳过 (%s): %s", source_file.name, e)
         return knowledge_blocks, {"total": len(knowledge_blocks), "skipped": True, "error": str(e)}
+
+
+def _write_gap_entries(gap_entries, source_file: Path) -> None:
+    """将农民产出的 SchemaGapEntry 追加写入 schema_gaps.jsonl。"""
+    from dataclasses import asdict
+    gaps_dir = Path(__file__).resolve().parent.parent / "knowledge_base" / "reference"
+    gaps_file = gaps_dir / "schema_gaps.jsonl"
+    try:
+        with open(gaps_file, "a", encoding="utf-8") as f:
+            for gap in gap_entries:
+                line = json.dumps(asdict(gap), ensure_ascii=False)
+                f.write(line + "\n")
+        logger.info(
+            "[link] wrote %d gap entries for %s → %s",
+            len(gap_entries), source_file.name, gaps_file.name,
+        )
+    except Exception as e:
+        logger.warning("[link] failed to write gap entries: %s", e)
+
+
+_AUTO_PROMOTE_THRESHOLD = 5
+
+
+def _auto_promote_branches(knowledge_blocks: List[Dict[str, Any]]) -> int:
+    """自然树生长：当某个 product_module 下 branch 子节点过多时，自动将其晋升为 trunk。
+
+    规则：同一 product_module 下 distinct section_title 数量 >= _AUTO_PROMOTE_THRESHOLD
+    且当前块 tree_level 为 branch → 将概述/总体介绍类块晋升为 trunk。
+    返回晋升的块数。
+    """
+    from collections import defaultdict
+    module_sections: Dict[str, set] = defaultdict(set)
+    for blk in knowledge_blocks:
+        meta = blk.get("metadata", {})
+        tp = meta.get("tree_position", {})
+        if tp.get("tree_level") == "branch":
+            mod = meta.get("product_module", "").strip()
+            title = meta.get("section_title", "").strip()
+            if mod and title:
+                module_sections[mod].add(title)
+
+    dense_modules = {m for m, titles in module_sections.items() if len(titles) >= _AUTO_PROMOTE_THRESHOLD}
+    if not dense_modules:
+        return 0
+
+    _OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构", "工作模式", "功能介绍")
+    promoted = 0
+    for blk in knowledge_blocks:
+        meta = blk.get("metadata", {})
+        tp = meta.get("tree_position", {})
+        if tp.get("tree_level") != "branch":
+            continue
+        mod = meta.get("product_module", "").strip()
+        if mod not in dense_modules:
+            continue
+        fh = meta.get("function_hierarchy", "").strip()
+        sp = meta.get("section_path", "").strip()
+        title = meta.get("section_title", "").strip()
+        fh_parts = [p.strip() for p in fh.replace(">", "/").split("/") if p.strip()] if fh else []
+        is_overview = (
+            len(fh_parts) <= 1
+            or any(kw in sp for kw in _OVERVIEW_KW)
+            or any(kw in title for kw in _OVERVIEW_KW)
+        )
+        if is_overview:
+            tp["tree_level"] = "trunk"
+            tp["_auto_promoted"] = True
+            tp["knowledge_role"] = "structural"
+            promoted += 1
+    if promoted:
+        logger.info("[auto-promote] %d blocks promoted branch→trunk in modules: %s",
+                    promoted, sorted(dense_modules))
+    return promoted
 
 
 def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]) -> None:
@@ -1754,8 +1918,18 @@ def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]
             metadata["step_type"] = step_type
 
 
+_PRESERVE_META_FIELDS = (
+    "command_prefix", "product_module", "protocol_type", "intent",
+    "config_mode", "chunk_type", "function_hierarchy", "document_category",
+    "required_keywords", "description",
+)
+
+
 def _extract_chunk_metadata(
-    text: str, base_meta: Optional[Dict[str, Any]] = None
+    text: str,
+    base_meta: Optional[Dict[str, Any]] = None,
+    *,
+    skip_llm: bool = False,
 ) -> Dict[str, object]:
     config = _load_project_config()
     llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
@@ -1771,10 +1945,13 @@ def _extract_chunk_metadata(
             meta["parent_section"] = parent_section
         section_path = base_meta.get("section_path")
         if section_path:
-            meta["section_path"] = section_path
+            meta["section_path"] = _sanitize_section_path(str(section_path))
+        for field in _PRESERVE_META_FIELDS:
+            val = base_meta.get(field)
+            if val and val != "unknown":
+                meta[field] = val
 
-    # LLM Enhancement (Optional, disabled by default)
-    if llm_config.get("enable", False):
+    if not skip_llm and llm_config.get("enable", False):
         _apply_llm_metadata_extraction(clean_text, meta, llm_config)
 
     return meta
@@ -2046,7 +2223,7 @@ def _build_section_context_map(blocks: List[Dict]) -> Dict[int, Dict[str, str]]:
 
         if heading_level and heading_title:
             normalized_title = _remove_section_number(heading_title)
-            if normalized_title:
+            if normalized_title and _is_plausible_heading(normalized_title):
                 while section_stack and section_stack[-1][0] >= heading_level:
                     section_stack.pop()
                 section_stack.append((heading_level, normalized_title))
@@ -2575,6 +2752,31 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                     }
                 )
     
+    # 3.5 Manifest hint injection: 从 manifest.json 读取 document_category 等提示
+    hints = _get_manifest_hints(pdf.name)
+    hint_doc_cat = hints.get("document_category", "")
+    hint_tree_level = hints.get("tree_level_hint", "")
+    if hint_doc_cat or hint_tree_level:
+        for blk in knowledge_blocks:
+            meta = blk.get("metadata", {})
+            if hint_doc_cat and not meta.get("document_category"):
+                meta["document_category"] = hint_doc_cat
+            if hint_tree_level and not meta.get("_manifest_tree_level_hint"):
+                meta["_manifest_tree_level_hint"] = hint_tree_level
+        logger.info(
+            "[manifest] injected hints for %s: doc_cat=%s, tree_hint=%s",
+            pdf.name, hint_doc_cat or "-", hint_tree_level or "-",
+        )
+
+    # 3.6 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
+    DOC_LOCAL_REF_DIR.mkdir(parents=True, exist_ok=True)
+    doc_ref_path = DOC_LOCAL_REF_DIR / f"{_output_stem_for_file(pdf)}.json"
+    doc_ref_path.write_text(
+        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info("[doc_ref] passthrough -> %s (%d blocks)", doc_ref_path.name, len(knowledge_blocks))
+
     # 4. 增强 metadata：基于功能结构索引添加 scenario_id 和 step_type
     logger.info("[metadata] 开始增强 metadata...")
     _enhance_metadata_with_function_index(knowledge_blocks)
@@ -2611,6 +2813,12 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
 
     # 农民匹配 + 农场主决策：将知识块挂载到命令树
     knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
+
+    # 自然树生长：branch 过密时自动晋升为 trunk
+    _auto_promote_branches(knowledge_blocks)
+
+    # 农场主写回：将观测结果记录到 manifest
+    _update_manifest_observed(pdf.name, knowledge_blocks, link_stats)
 
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
@@ -3180,18 +3388,23 @@ async def main() -> None:
 
                     # Post-pass: ensure tree_position is present and has passed
                     # the confidence threshold for all blocks.
-                    # Two conditions trigger re-linking:
-                    #  1. tree_position is absent (file predates knowledge_linker)
-                    #  2. tree_position.knowledge_role == "keyword_match" — these were
-                    #     accepted by farmer under the old threshold (confidence=0.5)
-                    #     but are now escalated to the owner for semantic validation.
+                    # Re-link blocks that lack tree_position or have legacy
+                    # non-structural roles (from before the charter-aligned linker).
+                    _LEGACY_ROLES = frozenset((
+                        "keyword_match",
+                        "manifest_declared_unverified",
+                        "manifest_declared_kw",
+                        "manifest_declared",
+                    ))
+
                     def _needs_relink(b: dict) -> bool:
                         if not isinstance(b, dict):
                             return False
                         tp = (b.get("metadata") or {}).get("tree_position")
-                        if not tp:
+                        if not tp or not isinstance(tp, dict):
                             return True
-                        if isinstance(tp, dict) and tp.get("knowledge_role") == "keyword_match":
+                        role = tp.get("knowledge_role", "")
+                        if role in _LEGACY_ROLES:
                             return True
                         return False
 
@@ -3238,6 +3451,53 @@ async def main() -> None:
     except Exception as exc:
         logger.warning("Failed to merge knowledge_base.json: %s", exc)
         output_file = None
+
+    # Farm owner: 增量更新 GraphRAG（处理 auto_convert 产出的 schema_gaps）
+    logger.info("=" * 80)
+    logger.info("[farm-owner] 检查是否有待处理的 schema gaps...")
+    gaps_file = REFERENCE_DIR / "schema_gaps.jsonl"
+    try:
+        if gaps_file.exists() and gaps_file.stat().st_size > 0:
+            from INAGENT.rag.knowledge_schema import SchemaGapEntry
+            from INAGENT.rag.graphrag_integration import GraphRAGRetriever
+            from INAGENT.agents.knowledge_farm_owner_agent import KnowledgeFarmOwnerAgent
+            from dataclasses import fields as dc_fields
+
+            gap_entries = []
+            field_names = {f.name for f in dc_fields(SchemaGapEntry)}
+            for line in gaps_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                    filtered = {k: v for k, v in raw.items() if k in field_names}
+                    gap_entries.append(SchemaGapEntry(**filtered))
+                except Exception:
+                    continue
+
+            if gap_entries:
+                workspace = BASE_DIR.parent / "graphrag_index"
+                graphrag = GraphRAGRetriever(workspace_dir=workspace)
+                if graphrag.is_available():
+                    owner = KnowledgeFarmOwnerAgent(graphrag)
+                    logger.info("[farm-owner] 处理 %d 条 gap entries...", len(gap_entries))
+                    report = owner.process_gap_entries(gap_entries)
+                    logger.info(
+                        "[farm-owner] 完成: entities_added=%d, discarded=%d, errors=%d",
+                        report.entities_added,
+                        report.discarded_count,
+                        len(report.errors),
+                    )
+                    gaps_file.rename(gaps_file.with_suffix(".jsonl.processed"))
+                else:
+                    logger.warning("[farm-owner] GraphRAG 不可用，跳过")
+            else:
+                logger.info("[farm-owner] schema_gaps.jsonl 中无有效条目")
+        else:
+            logger.info("[farm-owner] 无 schema gaps 文件，跳过")
+    except Exception as exc:
+        logger.warning("[farm-owner] Gap 处理失败: %s", exc)
 
     # 增量更新功能结构索引（新增）
     logger.info("=" * 80)

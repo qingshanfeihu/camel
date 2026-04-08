@@ -29,6 +29,10 @@ class CLIGraphStore:
         self._edges_by_target: Dict[str, List[dict]] = defaultdict(list)
         self._keywords_index: Dict[str, List[str]] = {}
         self._module_ids: Set[str] = set()
+        # 预构建命令索引（加载后不变），供 command_exists O(1) 查询
+        self._cmd_nid_to_label: Dict[str, str] = {}       # nid → label（仅 command/operation_command）
+        self._cmd_label_exact: Dict[str, str] = {}        # label → nid
+        self._cmd_token_index: Dict[str, List[str]] = {}  # token → [nid]
         self._hierarchy_cache: Dict[str, str] = {}
         self._kb_chunks_cache: Optional[list] = None
         self._l2_index_built = False
@@ -64,11 +68,21 @@ class CLIGraphStore:
                     self._edges_by_source[src].append(edge)
                     self._edges_by_target[tgt].append(edge)
             self._keywords_index = data.get("keywords_index", {})
+            # 预构建命令查询索引
+            for nid, node in self._nodes_by_id.items():
+                if node.get("type") in ("command", "operation_command"):
+                    label = node.get("label", nid).lower()
+                    self._cmd_nid_to_label[nid] = label
+                    self._cmd_label_exact[label] = nid
+                    self._cmd_label_exact[label.replace(" ", "_")] = nid
+                    for token in label.split():
+                        self._cmd_token_index.setdefault(token, []).append(nid)
             logger.info(
-                "CLI graph loaded: %d nodes, %d modules, %d keywords",
+                "CLI graph loaded: %d nodes, %d modules, %d keywords, %d cmd labels",
                 len(self._nodes_by_id),
                 len(self._module_ids),
                 len(self._keywords_index),
+                len(self._cmd_nid_to_label),
             )
         except Exception as e:
             logger.error("Failed to load CLI graph: %s", e)
@@ -248,7 +262,7 @@ class CLIGraphStore:
             similar_commands 为按 token 匹配到的相近命令 label 列表。
         """
         self._ensure_loaded()
-        if not cmd_text or not self._nodes_by_id:
+        if not cmd_text or not self._cmd_nid_to_label:
             return False, []
 
         cleaned = cmd_text.strip().lower()
@@ -257,40 +271,31 @@ class CLIGraphStore:
                 cleaned = cleaned[len(prefix):]
                 break
 
-        cmd_node_labels: Dict[str, str] = {}
-        for nid, node in self._nodes_by_id.items():
-            ntype = node.get("type", "")
-            if ntype in ("command", "operation_command"):
-                label = node.get("label", nid).lower()
-                cmd_node_labels[nid] = label
-
-        for nid, label in cmd_node_labels.items():
-            if cleaned == label or cleaned.replace(" ", "_") == nid:
-                return True, [self._nodes_by_id[nid].get("label", nid)]
+        # O(1) 精确匹配
+        exact_nid = self._cmd_label_exact.get(cleaned) or self._cmd_label_exact.get(cleaned.replace(" ", "_"))
+        if exact_nid:
+            return True, [self._nodes_by_id[exact_nid].get("label", exact_nid)]
 
         tokens = cleaned.split()
         if not tokens:
             return False, []
 
+        # O(T * avg_hits) token 倒排打分
         scored: Dict[str, int] = {}
-        for nid, label in cmd_node_labels.items():
-            label_tokens = set(label.split())
-            overlap = sum(1 for t in tokens if t in label_tokens)
-            if overlap > 0:
-                scored[nid] = overlap
+        for t in tokens:
+            for nid in self._cmd_token_index.get(t, []):
+                scored[nid] = scored.get(nid, 0) + 1
 
         if not scored:
             for t in tokens:
-                kw_nodes = self._keywords_index.get(t, [])
-                for nid in kw_nodes:
-                    if nid in cmd_node_labels:
+                for nid in self._keywords_index.get(t, []):
+                    if nid in self._cmd_nid_to_label:
                         scored[nid] = scored.get(nid, 0) + 1
 
         if not scored:
             return False, []
 
         max_score = max(scored.values())
-        threshold = max(1, len(tokens) * 0.6)
         if max_score >= len(tokens):
             best_nid = max(scored, key=scored.get)
             return True, [self._nodes_by_id[best_nid].get("label", best_nid)]

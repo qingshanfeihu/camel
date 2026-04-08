@@ -381,6 +381,7 @@ RRF 融合后每条结果:
 | 步骤 | 谁 | 行为 |
 |------|-----|------|
 | 写入分片 | 农民 `write_to_reference` | 只写 `reference/{stem}.json`，**不**合并、**不**刷向量 |
+| 农场主回填 | 农民 `apply_fill_request(FillRequest[])` | 按 `target_block_id` 或 `target_node_id`/`entity_title` **批量**合并 chunk `metadata`（及可选骨架 `node_id`）；**不**合并、**不**刷向量 |
 | 合并小文件 | `merge_knowledge_base(reference_dir, knowledge_base.json)` | 将 `reference/*.json` 聚合成检索用的 `knowledge_base.json` |
 | 可选一键 | `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` | 在 GraphRAG `reload()` **之后**，对**当时磁盘上**的 `reference/*.json` 执行上表合并，再 `refresh_hybrid_vector_index` |
 

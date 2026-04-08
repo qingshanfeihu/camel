@@ -135,6 +135,61 @@ def get_product_name() -> str:
     return "NSAE (InfosecOS) 负载均衡器"
 
 
+def _apply_tree_level_overlay(docs: List[Document], knowledge_dir: Path) -> None:
+    """Merge tree_level_overlay.json into loaded documents (in-place).
+
+    The overlay file maps chunk_id → {tree_level, confidence, ...}.
+    Only ``tree_position`` and ``document_category`` are patched; the
+    original ``page_content`` is never touched so that vector hashes stay
+    stable.
+    """
+    overlay_path = knowledge_dir / "tree_level_overlay.json"
+    if not overlay_path.exists():
+        return
+    try:
+        with open(overlay_path, "r", encoding="utf-8") as f:
+            overlay: dict = json.load(f)
+        if not isinstance(overlay, dict) or not overlay:
+            return
+    except Exception as exc:
+        logger.warning("tree_level_overlay.json load failed: %s", exc)
+        return
+
+    from INAGENT.rag.knowledge_schema import (
+        build_tree_position,
+        infer_document_category,
+        infer_knowledge_role,
+    )
+
+    applied = 0
+    for doc in docs:
+        meta = doc.metadata
+        cid = meta.get("chunk_id") or meta.get("block_id") or meta.get("node_id") or ""
+        entry = overlay.get(str(cid))
+        if not entry or not isinstance(entry, dict):
+            continue
+        level = entry.get("tree_level", "")
+        if not level:
+            continue
+        conf = float(entry.get("confidence", 0.7))
+        role = infer_knowledge_role(level)
+        linked = []
+        tp = meta.get("tree_position")
+        if isinstance(tp, dict) and tp.get("linked_nodes"):
+            linked = tp["linked_nodes"]
+        meta["tree_position"] = build_tree_position(
+            tree_level=level,
+            linked_nodes=linked,
+            confidence=conf,
+            knowledge_role=role,
+        )
+        meta["document_category"] = infer_document_category(level)
+        applied += 1
+
+    if applied:
+        logger.info("tree_level_overlay applied to %d/%d chunks", applied, len(docs))
+
+
 def load_knowledge_base(knowledge_dir: Path) -> List[Document]:
     r"""Load precomputed knowledge blocks from JSON files.
 
@@ -189,6 +244,7 @@ def load_knowledge_base(knowledge_dir: Path) -> List[Document]:
                             "— re-run auto_convert to rebuild",
                             ", ".join(stale_sources),
                         )
+                    _apply_tree_level_overlay(docs, knowledge_dir)
                     return docs
         except Exception as e:
             logger.warning(f"Failed to load merged file {merged_file}: {e}, falling back to individual files")
@@ -223,6 +279,7 @@ def load_knowledge_base(knowledge_dir: Path) -> List[Document]:
             logger.error(f"Failed to load {json_path}: {e}")
 
     logger.info(f"Loaded {len(docs)} chunks from {len(list(knowledge_dir.glob('*.json')))} individual files")
+    _apply_tree_level_overlay(docs, knowledge_dir)
     return docs
 
 

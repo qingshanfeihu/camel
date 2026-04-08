@@ -100,7 +100,7 @@ class SiliconFlowRerankRetriever(BaseRetriever):
         
         # 调用网关重排序 API
         try:
-            url = f"{self.base_url}/reranks"
+            url = f"{self.base_url}/rerank"
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",

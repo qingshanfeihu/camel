@@ -9,7 +9,7 @@
 1. **UnifiedRAG 内部并行**：`UnifiedRAGRetriever.retrieve()` 内 GraphRAG 与向量检索并行、合并去重、Rerank、协议加权（见 `unified_rag.py` 模块说明）。
 2. **HybridKnowledgeFusion 跨存储**：在 UnifiedRAG 主召回之上，写入/利用 `EntityLinkStore`，并可选拼接 Neo4j 关系上下文（见 `hybrid_knowledge_fusion.py`）。
 3. **KnowledgeRouter 选型链**：`_retrieve_unified()` 中按配置优先 `HybridKnowledgeFusion`，失败则 `UnifiedRAG`，再失败则 legacy hybrid_retriever + rerank 兜底（见 `knowledge_router.py`）。
-4. **依赖注入**：`web/deps.py` 中 `get_hybrid_fusion()` 组装 `HybridKnowledgeFusion(unified_rag=..., neo4j_store=..., entity_link_store=...)`。
+4. **依赖注入**：`web/deps.py` 中 `get_hybrid_fusion()` 组装 `HybridKnowledgeFusion(unified_rag=..., neo4j_store=..., entity_link_store=get_entity_link_store())`（主召回块写入 EntityLink 对齐表；Neo4j 为可选关系补充）。
 
 ## 与农场主（04）：Qdrant / BM25 刷新契约（正式）
 

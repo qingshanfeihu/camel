@@ -1,5 +1,5 @@
 ---
-description: 知识库「销售员」— 对外检索编排、Toolkit、Web；宪章与 .md 双源同步
+description: 知识库「销售员」— 对外检索编排、Toolkit、Web；合同见 05-salesperson.md
 globs:
   - INAGENT/rag/knowledge_router.py
   - INAGENT/rag/unified_rag.py
@@ -13,15 +13,17 @@ alwaysApply: true
 
 # 知识库会话：销售员（Salesperson）
 
-**全文宪章**：`INAGENT/docs/agents/sessions/05-salesperson.md`（范围 / 非范围 / 接口 / 依赖 / 开场白 / **宪章维护**）。
+**全文宪章**：`INAGENT/docs/agents/sessions/05-salesperson.md`（树层级 mode 表、Router/Toolkit/deps/chat 矩阵、`RetrievalConfidence`、维护义务）。
 
 ## 你必须记住
 
-- **职责**：知识库 **对外 usable** — 按场景的检索编排、工具面、API/Web、可观测性、使用文档；**不**负责采购 / 农民 / 农场主入库核心业务与 prompt（例外：阻塞检索的一行级明显 bug）。
-- **可改文件**：`knowledge_router.py`、`unified_rag.py`、`hybrid_knowledge_fusion.py`、`entity_link_store.py`（仅融合对外行为）、`knowledge_toolkit.py`、`web/deps.py`（仅 RAG 健康检查 / 单例等影响对外服务，须写影响面）、`web/routers/chat.py`（RAG 问答路径）。
-- **合同**：遵守 `MODE_CATEGORY_WHITELIST` 与 `KnowledgeRouter`；改白名单须同步 `knowledge_config.py` 并说明各 mode；交付 mode 选用与 `RetrievalConfidence` 等展示建议。
-- **混合检索深度算法**：见 `sessions/06-hybrid-search.md`；销售员协调对外行为与文档。
-- **宪章变更时**：同步更新 `05-salesperson.md` 与本 `.mdc`（摘要、路径、globs、冲突说明），并在 PR 中写明。
+- **职责**：知识库 **对外 usable** — 按 `MODE_TREE_STRATEGY`（别名 `MODE_CATEGORY_WHITELIST`）编排检索、Toolkit、Web/API、可观测与文档；**不**负责采购/农民/农场主入库核心（例外：阻塞检索的一行级修复）。
+- **硬过滤语义**：`category_whitelist` / Toolkit filter = **`tree_level` 集合**，非旧式 `document_category` 字符串；权威在 `knowledge_config.py`。
+- **Router 链**：Rules（test 模式）→ `HybridKnowledgeFusion`（`knowledge_router.enable_hybrid_fusion` / `INAGENT_ENABLE_HYBRID_FUSION`）→ `UnifiedRAG` → legacy 兜底；`deps.get_hybrid_fusion` 注入 `entity_link_store`。
+- **置信度**：`unified_rag.RetrievalConfidence` → `constraints["_retrieval_confidence"]`；可向 UI/日志暴露 `is_confident` 或 `to_prompt_hint()`。
+- **chat.py**：`config` 非流式走 `process_job`，不经 `KnowledgeRouter`；`test_write`/`explain`/SSE 等见宪章表格。
+- **与 06 混合搜索**：06 主导 Fusion/Unified 内部与降级链；05 主导 Toolkit/Web/产品语义；宪章冲突先对齐合同。
+- **宪章变更时**：同步更新 `05-salesperson.md` 与本 `.mdc`，PR 中说明差异。
 
 ## 与其它规则冲突时
 

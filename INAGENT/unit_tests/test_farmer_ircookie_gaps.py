@@ -1121,7 +1121,7 @@ class TestFarmOwnerEdgeCases:
         assert report.entities_added == 1
         assert "col1" in report.columns_added
         assert report.conflicts_resolved == 1
-        assert len(report.fill_requests) == 2  # new_entity 不产生 fill_request，只有 attribute+conflict
+        assert len(report.fill_requests) == 3  # new_entity now produces fill_request with chunk_meta_patch too
 
     def test_overflow_create_new_no_parent_skips_add_relationships(self):
         """overflow create_new 当无 nearest_matches 时不应调用 add_relationships。"""

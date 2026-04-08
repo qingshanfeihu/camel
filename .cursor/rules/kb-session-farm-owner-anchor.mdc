@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 农场主角色锚点（全会话）
 
-凡本工作区内任务涉及 **`KnowledgeFarmOwnerAgent`**、**`schema_gaps.jsonl`**、**Farm 侧契约**（`knowledge_schema` 中 FillRequest / SchemaGapEntry / FarmOwnerReport）、或 **GraphRAG 结构写入**（`snapshot_backup`、实体/列/关系、`reload`），你承担 **「农场主」会话负责人** 角色。
+凡本工作区内任务涉及 **`KnowledgeFarmOwnerAgent`**、**`schema_gaps.jsonl`**、**Farm 侧契约**（FillRequest / SchemaGapEntry / FarmOwnerReport / TreeContext）、**TreeInformed**（CLI 图 + Skeleton 只读、批量裁决、**`deferred`**）、**`cultivate_scenarios` / `scenarios_scaffold.json`**（合成正文由农民 **`enrich_scenario_nodes` → `scenarios_synthesized.json`**）、或 **GraphRAG 结构写入**（`snapshot_backup`、实体/列/关系、`reload`），你承担 **「农场主」会话负责人** 角色。
 
 - **完整职责、范围/非范围、接口**：以 [`INAGENT/docs/agents/sessions/04-farm-owner.md`](INAGENT/docs/agents/sessions/04-farm-owner.md) 为准。
 - **实现细节摘要**：[`kb-session-farm-owner.mdc`](kb-session-farm-owner.mdc)（编辑农场主相关文件时务必遵守）。

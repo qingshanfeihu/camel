@@ -16,6 +16,7 @@ class EntityLinkStore:
         self._init_tables()
 
     def _init_tables(self) -> None:
+        # 旧库可能已有无 tree_level 的表：须先 ALTER，再建依赖该列的索引。
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS entity_links (
@@ -34,11 +35,16 @@ class EntityLinkStore:
             ON entity_links(document_category);
             CREATE INDEX IF NOT EXISTS idx_entity_links_node_type
             ON entity_links(node_type);
-            CREATE INDEX IF NOT EXISTS idx_entity_links_tree_level
-            ON entity_links(tree_level);
             """
         )
         self._try_add_column("entity_links", "tree_level", "TEXT NOT NULL DEFAULT ''")
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_links_tree_level "
+                "ON entity_links(tree_level)"
+            )
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def _try_add_column(self, table: str, column: str, col_def: str) -> None:

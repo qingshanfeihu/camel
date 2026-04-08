@@ -2,15 +2,25 @@
 
 ## 角色定位
 
-你是 **「农场主」会话** 负责人。消费 `schema_gaps.jsonl`（由采购/农民路径产出），对 GraphRAG 做 **结构性维护**：新实体、新属性、冲突与溢出的保守裁决；写入前 **snapshot_backup**；处理结束后对 **GraphRAG 检索器** 调用 **`reload()`**。
+你是 **「农场主」会话** 负责人。消费 `schema_gaps.jsonl`（由采购/农民路径产出），对 GraphRAG 做 **结构性维护**，并在 **树知情（TreeInformed）** 前提下与 CLI 图、SkeletonIndex 只读协作；写入前 **snapshot_backup**；处理结束后 **`GraphRAGRetriever.reload()`**。
 
-**TreeInformed Decision Engine v2**：每个裁决先查 `CLIGraphStore`（树）获取 `TreeContext`：层级路径、父节点候选、Skeleton artifact 状态、enrich 快照。规则能确定的直接走规则；模糊情况交 LLM 兆底。禁止硬编码阈値。同一 `process_gap_entries` 批次内，相同 `entity_title` 的 TreeContext 结果自动缓存（`_tree_context_cache`），避免对同一实体重复执行 7 步树查询。
+**TreeInformed 决策（与实现对齐）**：
+
+- **`_query_tree_context(entity_title)`**：懒加载 **`CLIGraphStore`**（`get_cli_graph_store()`）与 **`SkeletonIndex`**（`get_skeleton_index()`），填充只读 **`TreeContext`**（`knowledge_schema.TreeContext`）：`exists_in_tree`、`tree_level`、`hierarchy_prefix`、`parent_candidate_id`、`skeleton_module_id`、`skeleton_artifact_exists`、`enrich_snapshot` 等。树侧命中优先走 **`cli.command_exists(entity_title)`**，签名为 **`Tuple[bool, List[str]]`**（存在标志 + 相似命令 id 列表；单测 mock 须与此一致）。同一 **`process_gap_entries`** 批次内结果写入 **`_tree_context_cache`**。
+- **`new_entity`**：规则优先（`_decide_new_entity_action_rules_only`）；未定条目再 **批量 LLM**（`_batch_run_decisions`，每批最多 `BATCH_SIZE=20`），合法 `action` 含 `tree_create_leaf|branch|trunk|root`、`merge_into_existing`、`needs_tree_session`、`discard`。`needs_tree_session` → **`FarmOwnerReport.deferred`**（`FillRequest.action="needs_tree_session"`），不写图。
+- **`conflict` / `overflow` / `ambiguous_match`**：构造上下文后走同一套 **批量裁决**；`overflow` 在 **`TREE_ENRICH_KEYS`** 命中当前树层级时 **规则直连 merge_into**（不经 LLM）；denylist 命中则 **discard**。
+- **相似度**：**overflow** 的 **纯规则兜底**（`_fallback_overflow_decision`）在无充分树上下文时仍可用 `nearest_matches[0].similarity >= 0.9` 作为 merge 提示。
+- **决策缓存**：`_decision_cache` 按 `decision_type:entity:field` 去重，避免同实体同类型重复打 LLM。
+- **`classify_uncovered_chunks`**：对缺 `tree_position` 的块生成 **`FillRequest`**（含 `chunk_meta_patch`、`target_block_id`）；垃圾块规则排除后 `action=discard`（`owner_excluded`）。
+- **`cultivate_scenarios`**：读 **`knowledge_base/reference/knowledge_base.json`**，按 `_tree_feature_id` 与 `function_hierarchy` 识别 **branch/trunk/root** 缺口，写 **`reference/scenarios_scaffold.json`**（`_scaffold` 骨架）；可选 **`_model`** 生成 HyDE 字段（`_hyde_query` 等）。**不**写 `knowledge_base.json` 本体；合成正文由农民进 **`scenarios_synthesized.json`**（见模块头）。入口脚本：`INAGENT/scripts/run_scenario_cultivation.py`。
+
+**构造参数**：`KnowledgeFarmOwnerAgent(graphrag, model=..., _chat_agent=..., cli_graph=..., skeleton_index=...)` — 后两者供单测注入 mock，默认从全局 getter 加载。
 
 ## 检索与数据边界（农场主能承诺的范围）
 
 - **能承诺**：在同一运行进程内，图结构变更后执行 `GraphRAGRetriever.reload()`，经 **GraphRAG 路径** 的查询可读到新实体、新列与关系（仍受适配器与 parquet 等持久化一致性约束）。
 - **不承诺（默认）**：Qdrant / BM25 / 混合向量不会自动更新；编排应在合并或回填后调用 `refresh_hybrid_vector_index()` 或 `initialize_rag_system(force_rebuild_vectors=True)`。
-- **可选**：`KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` 在 `reload()` 之后刷新混合向量（需 LLM 网关）；`hybrid_vectors_force=False` 时按 `knowledge_base.json` 指纹决定是否重建。
+- **可选**：`process_gap_entries(..., refresh_hybrid_vectors=True)` 时，顺序为：`reload()` → **`merge_knowledge_base(reference_dir → knowledge_base.json)`** → **`refresh_hybrid_vector_index(force=hybrid_vectors_force)`**（需 LLM 网关）。`hybrid_vectors_force=False` 时按指纹决定是否清空 Qdrant（见下表）。
 
 ### 给混合搜索（06）的正式指示：向量通道无「按条 diff」增量 upsert
 
@@ -33,17 +43,23 @@
 - `refresh_hybrid_vectors=True` 时，农场主在**本次** `process_gap_entries` 收尾处对**当前已落盘**的 `reference/*.json` 执行 `merge_knowledge_base` → `refresh_hybrid_vector_index`；**不会**自动等待或重跑之后农民再写入的文件。
 - **E2E 约束**：若在「农场主且 `refresh_hybrid_vectors=True`」这一步**之后**还有 `write_to_reference`，编排层必须再显式合并并刷新混合向量，否则检索仍基于旧的 `knowledge_base.json` 与向量索引。**推荐**：所有需要的 `write_to_reference` **先于** `process_gap_entries(..., refresh_hybrid_vectors=True)`（与 `scripts/test_ircookie_e2e.py` 注释中的顺序一致：先农民写 reference → merge → 农场主挖槽 → 再按需回填与向量重建）。
 
-## `FillRequest` 与 `new_node_template`（农场主产出契约）
+## `schema_gaps.jsonl` 支持的 `gap_type`（与 `SchemaGapKind` 一致）
 
-- 农场主保证 `action`、`entity_title`、`target_node_id`、`fill_fields` / `resolved_value` 在文档语义下可解释；**不**下发无业务含义的布尔占位（例如用 `True` 表示「列已挖槽」）。
-- **扩展字段**（TreeInformed v2 新增）：
-  - `tree_level`：实体在 CLI 树中的层级（`root / trunk / branch / leaf / unknown`）
-  - `enrich_fields`：待富化的 enrich 字段键对（参照 `TREE_ENRICH_KEYS`）
-  - `artifact_id`：对应的 SkeletonIndex artifact ID
-  - `artifact_link`：可选的树节点关联元数据
-- **`new_entity_attribute`**：图侧由 `add_entity_columns` 完成挖槽；仅当 gap 提供 **`default_value`（含 `false` 等显式默认値）** 时，才附加 `FillRequest`。
-- **`new_node_template`**（overflow `create_new` / `action=create_slot`）：可选载荷，供下游 **自行选择** 是否创建 reference 条目。
-- **`deferred`（TreeInformed v2 新增）**：`FarmOwnerReport.deferred` 存放 `action="needs_tree_session"` 的条目（规则无法判断且 LLM 也判定需要树级会话），与 `fill_requests` 隔离，由上层调度转交树会话处理。
+`new_entity` · `new_entity_attribute` · `conflict` · `overflow` · **`ambiguous_match`**（`ambiguous_candidates` 列表；单候选规则自动落 `tree_node_id`，多候选批量 LLM `pick`）。
+
+## `FillRequest` / `FarmOwnerReport`（与 `knowledge_schema` 一致）
+
+- **`FillRequest.action`** 合法集见 `OwnerAction`（含 `tree_create_*`、`merge_into_existing`、`needs_tree_session`、`discard`、`update`、`create_slot` 等）。
+- **常用扩展字段**：`tree_level`、`enrich_fields`、`chunk_meta_patch`（`document_category` / `tree_position` / `owner_excluded` 等补丁）、`target_block_id`（按块回填）、`new_node_template`（overflow 新建图实体时的可选文档形状）、`artifact_id` / `artifact_link`（契约保留；当前主路径以 **图写 + `SkeletonIndex.register_artifact`** 为主）。
+- **`new_entity_attribute`**：`add_entity_columns` 挖槽；仅当 **`default_value is not None`** 时附加 `FillRequest`（真实默认值，无布尔占位）。
+- **`FarmOwnerReport`**：`fill_requests`、`deferred`（仅 `needs_tree_session`）、`operation_log` + **`operation_summary()`** / **`dump_operation_log()`**、`tree_mutations`（`TreeMutation`）、`discarded_count` / `discarded_entities`、`errors`。
+
+### 农民执行 `FillRequest`（编排契约，非农场主代码内调用）
+
+- 农场主只产出 `FillRequest`；**落盘**由编排调用 **`KnowledgeFarmerAgent.apply_fill_request`**。
+- 农民侧：**reference 为主**——按 `target_block_id` 或 `target_node_id` / `entity_title` 匹配 chunk 的 `metadata`；合并 `fill_fields`、`enrich_fields`、`chunk_meta_patch`；`action=needs_tree_session` **跳过**；`discard` 可在带 `chunk_meta_patch` 等补丁时仍写 reference；`create_slot` 可追加新 reference 条目。
+- 若默认 `knowledge_base/reference/knowledge_base.json` 存在，同步合并到骨架中 **`metadata.node_id` 命中**的条目。
+- **不**替代 `merge_knowledge_base` / 混合向量刷新（见上文 § 混合向量刷新与农民的调用顺序）。
 
 ## 写入前 gap 校验（农场主侧）
 
@@ -58,9 +74,11 @@
 
 - `INAGENT/agents/knowledge_farm_owner_agent.py`
 - `INAGENT/rag/graphrag_adapter.py`、`INAGENT/rag/graphrag_integration.py` 中与 farm_owner **结构写入**直接相关、且已确认安全的调用点（小步、可回滚）
-- `INAGENT/rag/knowledge_schema.py` 中 Farm 相关模型（**需变更契约时**，在 PR 中说明并同步农民/采购单测预期）
-- `INAGENT/config/farm_owner_overflow_denylist.json`（可选策略配置）
-- `INAGENT/rag/cli_graph_store.py`、`INAGENT/rag/skeleton_index.py`（树查询层御用，**只读**）
+- `INAGENT/rag/knowledge_schema.py` 中 Farm / Tree / `FillRequest` / `SchemaGapEntry` 等契约（变更时 PR 说明 + 同步农民/采购/树相关单测）
+- `INAGENT/config/farm_owner_overflow_denylist.json`（可选）
+- `INAGENT/scripts/run_scenario_cultivation.py`（枝干场景骨架入口，与 `cultivate_scenarios` 对齐）
+- 农场主在 **`refresh_hybrid_vectors=True`** 时 **会调用** `INAGENT/data_tools/merge_knowledge_base.py` 与 `workflow_config_generator.refresh_hybrid_vector_index`；改动合并或向量语义时需协调 **混合搜索（06）** 宪章
+- `INAGENT/rag/cli_graph_store.py`、`INAGENT/rag/skeleton_index.py`：农场主 **只读**；若改查询契约需同步本文档与农民/树会话
 
 ## 非范围（勿改）
 

@@ -24,7 +24,7 @@
 ## 共享契约（勿在未协调时破坏）
 
 - `INAGENT/rag/knowledge_schema.py`：`SchemaGapEntry`、`FillRequest`、`FarmOwnerReport` 等
-- `INAGENT/rag/knowledge_config.py`：`DOCUMENT_CATEGORIES`、`MODE_CATEGORY_WHITELIST`
+- `INAGENT/rag/knowledge_config.py`：`MODE_TREE_STRATEGY`（mode→`tree_level` 白名单）、`MODE_CATEGORY_WHITELIST`（同义别名）、`DOCUMENT_CATEGORIES` / `CATEGORY_TO_TREE_LEVEL`（兼容与推导）
 - `INAGENT/docs/DATA_FLOW.md`：L0 chunk 与元数据字段约定
 
 ## 与 ARCHITECTURE 中「五层评审栈」的区别

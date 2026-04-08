@@ -183,7 +183,7 @@ def get_hybrid_fusion():
         _hybrid_fusion = HybridKnowledgeFusion(
             unified_rag=get_unified_rag(),
             neo4j_store=get_neo4j_store(),
-            skeleton_index=get_skeleton_index(),
+            entity_link_store=get_entity_link_store(),
         )
     return _hybrid_fusion
 

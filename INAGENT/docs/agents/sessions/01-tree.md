@@ -28,7 +28,7 @@
 - `INAGENT/scripts/enrich_cli_leaf_schema.py`、`rebuild_cli_docs.py`、`import_cli_graph_to_neo4j.py`（与树/图数据直接相关时）
 - `INAGENT/scripts/snapshot_retrieval_baseline.py`（**检索基线**：树 + reference + GraphRAG `output/` + 本地 Qdrant 一体快照/恢复，用于污染回退）
 - `INAGENT/knowledge_base/cli_keyword_graph.json`（由脚本再生成时）
-- `INAGENT/agents/knowledge_farmer_agent.py` 中 **仅** 与 `_match_tree_node`、骨架加载、`kb_index`、交叉引用检测直接相关的逻辑（大块重构前先与农民会话对齐）
+- `INAGENT/agents/knowledge_farmer_agent.py` 中 **仅** 与 `_match_tree_node`、`_load_kb_index` / `_load_skeleton`、`_refine_ac_meta_command_prefix`、交叉引用检测、`farmer_tree_alias.json` 消费直接相关的逻辑（**不含** `enrich_scenario_nodes` 等场景正文 LLM；大块重构前先与农民会话对齐）
 
 ## 非范围（勿改）
 
@@ -89,16 +89,20 @@ python INAGENT/scripts/snapshot_retrieval_baseline.py restore INAGENT/knowledge_
 | **骨架索引 DB** | `INAGENT/vector_store/skeleton_index.db` | Module/Feature/Artifact 注册表，连接 Qdrant/GraphRAG；农民当前以 JSON 骨架为主，树会话负责与图数据一致地维护该注册表 |
 | **reference 分文件** | `INAGENT/knowledge_base/reference/*.json` | 农民写入 enrich 后的 chunk；**树匹配仍以 `reference/knowledge_base.json` 为准**，二者需在 `node_id` / `command_prefix` 上可核对 |
 
-**匹配链路（农民，实现于 `knowledge_farmer_agent.py`）**
+**匹配链路（农民，实现于 `knowledge_farmer_agent._match_tree_node`）**
 
 1. `_load_kb_index()`：仅当条目中 **同时存在** `metadata.node_id` 与 `metadata.command_prefix` 时，才把 `command_prefix` 编入索引。
-2. `_match_tree_node(content, meta, ac_meta)`（`ac_meta` 为 auto_convert 输出，带 `section_title` 等）：
-   - `meta` / `ac_meta` 中 `tree_node_id` 或 `node_id` 已在骨架中存在则直接采用；
-   - `section_title`（及首行形似英文 CLI 的正文）经规范化（小写、空格转下划线）后与骨架键 **精确** 匹配；
-   - `command_prefix` 来自 `_step1_rules` 或 `ac_meta`，**精确** 命中索引则采用；
-   - 否则从正文抽取 CLI 候选行（含 `<>`/`[]` 的行、`_CLI_COMMAND_LINE_RE` 命中行，最后整段正文），对索引 key 做 **最长前缀** 匹配；若同长度多条命中且对应 **不同** `node_id` 则放弃（返回未匹配）。
-3. `_refine_ac_meta_command_prefix`（农民侧）：在 auto_convert 给出 **粗粒度** `command_prefix` 时，若正文对 `kb_index` 存在 **唯一最长前缀** 解析，则把 `ac_meta["command_prefix"]` 提升为对应骨架 label（`auto_convert` 本身保持通用抽取，不与树契约绑死）。
-4. **可选别名表** `reference/farmer_tree_alias.json`：JSON 对象，键为 `_normalize_heading_to_node_slug(section_title)` 形式的 **slug**，值为骨架 `node_id`。当标题 slug 无法与骨架键直接相等、但需固定绑到某叶时，由 **树会话** 维护该文件，农民只读。
+2. **优先级（高 → 低）**（与源码 docstring 一致）：
+   - **1** `meta` / `ac_meta` 中 `tree_node_id` 或 `node_id`：若在骨架字典中存在则直接返回。
+   - **2** `section_title` → `_normalize_heading_to_node_slug`：先与骨架键比，再查 **`farmer_tree_alias.json`**（slug → `node_id`）。
+   - **2b** `section_title` 去掉尾部参数语法（`{…}` / `<…>` / `[…(` 起头之后）→ `kb_index` **精确键**；否则取 **最短 `command_prefix` 键** 的同族匹配（`startswith(st_base + " ")`）。
+   - **3** `command_prefix`（`meta` 或 `ac_meta`）在 `kb_index` 精确命中时：正文非空则要求 **前 300 字符**（小写）含该前缀，防跨节误标；正文为空则信任 meta。
+   - **4** 正文 **首行**（ASCII 字母起头）slug：与骨架/别名命中后，若与 `command_prefix` 的最长前缀节点 **不一致** → 记 `_last_ambiguous_candidates` 并返回 `None`（农民产出 **`ambiguous_match` gap**）。
+   - **5** 仅当 `ac_meta["chunk_type"]` 为空或为 **`single_command`** 时，对 `_extract_cli_prefix_strings(content)` 做 **最长前缀** 命中 `kb_index`；否则跳过（防多命令块误绑一叶）。
+3. **命中后**：`cultivate_batch` 会用该 `node_id` 在 `kb_index` 中 **最长** 的 `command_prefix` 回填 `meta["command_prefix"]`（若当前前缀不在该节点的键集合中）。
+4. `_refine_ac_meta_command_prefix`：`cultivate_batch` 在匹配前调用；用正文对 `kb_index` **最长前缀** 将 `ac_meta["command_prefix"]` 升为骨架 label（仅当正文以该 label 为前缀且新 label 更长）。
+5. **结构化阶段**：`cultivate_batch` 使用 `_structure_via_auto_convert` → **`_extract_chunk_metadata(..., skip_llm=True)`**（当前实现 **不** 在批处理路径调 LLM；缺字段走 gap / 农场主）。
+6. **可选别名表** `reference/farmer_tree_alias.json`：JSON 对象 slug → `node_id`，**树会话**维护，农民只读。
 
 **树会话的维护约束**
 
@@ -124,13 +128,14 @@ python INAGENT/scripts/snapshot_retrieval_baseline.py restore INAGENT/knowledge_
 
 ### 匹配失败或结构不一致时：建议上报的 `SchemaGapEntry.gap_type`
 
-与 `INAGENT/rag/knowledge_schema.py` 中 `SchemaGapKind` 一致：`new_entity` | `new_entity_attribute` | `conflict` | `overflow`。
+与 `INAGENT/rag/knowledge_schema.py` 中 `SchemaGapKind` 一致：`new_entity` | `new_entity_attribute` | `conflict` | `overflow` | `ambiguous_match`。
 
 | 场景 | 当前农民行为（`cultivate_batch` / `_diff_with_skeleton`） | 农民会话上报/排错时可标注 |
 |------|----------------------------------------------------------|---------------------------|
 | 命中骨架节点，某 `_SKELETON_META_FIELDS` 字段骨架有值且新值不同 | `gap_type="conflict"`，`field_name` / `skeleton_value` / `new_value` | **冲突**：需农场主或人工裁决 |
 | 命中骨架节点，auto_convert 出现骨架 `metadata` 中**不存在**的字段 | `gap_type="overflow"` | **字段溢出**：是否升维 schema |
-| 未命中骨架但有 `command_prefix` | `gap_type="overflow"`，`entity_title`=前缀，`nearest_matches` 辅助 | **无树节点**：多为缺 `knowledge_base.json` 条目或前缀不一致；**树会话优先补骨架/前缀** |
+| 首行 slug 与 `command_prefix` 指向 **不同** `node_id`（`_last_ambiguous_candidates`） | `gap_type="ambiguous_match"`，`field_name="tree_node_id"`，`ambiguous_candidates` 列表 | **歧义**：农场主裁决；树侧可核对别名与索引 |
+| 未命中骨架但有 `command_prefix`（且无歧义候选） | `gap_type="overflow"`，`entity_title`=前缀，`nearest_matches` 辅助 | **无树节点**：多为缺 `knowledge_base.json` 条目或前缀不一致；**树会话优先补骨架/前缀** |
 | 正文中出现覆盖类表述（如「支持覆盖」等，见 `_SCHEMA_GAP_OVERRIDE_RE`） | `gap_type="new_entity_attribute"`，`column_name="supports_override"` | **新属性**：农场主侧 schema 扩展 |
 | `new_entity` | 农民流水线**默认不**从纯无匹配路径发出（无匹配用 `overflow`）；农场主仍处理来自其他来源的 `new_entity` | 若希望无匹配统一标为 `new_entity`，需与农民会话**联合改代码**，不在树会话单独改决策逻辑 |
 

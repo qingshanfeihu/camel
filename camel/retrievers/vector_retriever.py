@@ -154,44 +154,46 @@ class VectorRetriever(BaseRetriever):
             )
 
             # Process chunks in batches and store embeddings
-            for i in range(0, len(chunks), embed_batch):
-                batch_chunks = chunks[i : i + embed_batch]
+            embed_workers = kwargs.get("embed_workers", 1)
+            batches = [
+                (i, chunks[i : i + embed_batch])
+                for i in range(0, len(chunks), embed_batch)
+            ]
+
+            if isinstance(content, str):
+                content_path_info = {"content path": content[:100]}
+            elif isinstance(content, IOBase):
+                content_path_info = {"content path": "From file bytes"}
+            elif isinstance(content, Element):
+                content_path_info = {
+                    "content path": content.metadata.file_directory[:100]
+                    if content.metadata.file_directory
+                    else ""
+                }
+            elif isinstance(content, list) and content and isinstance(content[0], Element):
+                content_path_info = {
+                    "content path": content[0].metadata.file_directory[:100]
+                    if content[0].metadata.file_directory
+                    else "List of Elements"
+                }
+            else:
+                content_path_info = {"content path": "Unknown"}
+
+            def _embed_and_build(batch_offset: int, batch_chunks):
                 batch_vectors = self.embedding_model.embed_list(
                     objs=[str(chunk) for chunk in batch_chunks]
                 )
-
                 records = []
-                offset = 0
-                # Prepare the payload for each vector record, includes the
-                # content path, chunk metadata, and chunk text
-                for vector, chunk in zip(batch_vectors, batch_chunks):
-                    if isinstance(content, str):
-                        content_path_info = {"content path": content[:100]}
-                    elif isinstance(content, IOBase):
-                        content_path_info = {"content path": "From file bytes"}
-                    elif isinstance(content, Element):
-                        content_path_info = {
-                            "content path": content.metadata.file_directory[
-                                :100
-                            ]
-                            if content.metadata.file_directory
-                            else ""
-                        }
-                    elif isinstance(content, list) and content and isinstance(content[0], Element):
-                        content_path_info = {
-                            "content path": content[0].metadata.file_directory[:100]
-                            if content[0].metadata.file_directory
-                            else "List of Elements"
-                        }
-                    else:
-                        content_path_info = {"content path": "Unknown"}
-
+                for j, (vector, chunk) in enumerate(
+                    zip(batch_vectors, batch_chunks)
+                ):
                     chunk_metadata = {"metadata": chunk.metadata.to_dict()}
-                    # Remove the 'orig_elements' key if it exists
                     chunk_metadata["metadata"].pop("orig_elements", "")
                     chunk_metadata["extra_info"] = extra_info or {}
                     chunk_text = {"text": str(chunk)}
-                    chunk_metadata["metadata"]["piece_num"] = i + offset + 1
+                    chunk_metadata["metadata"]["piece_num"] = (
+                        batch_offset + j + 1
+                    )
                     chunk_id = (
                         chunk_metadata["metadata"].get("chunk_id")
                         or chunk_metadata["metadata"].get("block_id")
@@ -203,13 +205,38 @@ class VectorRetriever(BaseRetriever):
                         **chunk_text,
                         "chunk_id": chunk_id,
                     }
-
                     records.append(
                         VectorRecord(vector=vector, payload=combined_dict)
                     )
-                    offset += 1
+                return records
 
-                self.storage.add(records=records)
+            if embed_workers > 1:
+                import logging
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                _logger = logging.getLogger(__name__)
+                done_count = 0
+                total_batches = len(batches)
+
+                with ThreadPoolExecutor(max_workers=embed_workers) as pool:
+                    futures = {
+                        pool.submit(_embed_and_build, bi, bc): bi
+                        for bi, bc in batches
+                    }
+                    for future in as_completed(futures):
+                        records = future.result()
+                        self.storage.add(records=records)
+                        done_count += 1
+                        if done_count % 10 == 0 or done_count == total_batches:
+                            _logger.info(
+                                "Embedding progress: %d/%d batches",
+                                done_count,
+                                total_batches,
+                            )
+            else:
+                for bi, bc in batches:
+                    records = _embed_and_build(bi, bc)
+                    self.storage.add(records=records)
 
     def query(
         self,

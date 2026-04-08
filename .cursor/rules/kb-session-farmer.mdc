@@ -10,5 +10,6 @@ alwaysApply: false
 
 ## 摘要
 
-- **负责**：`KnowledgeFarmerAgent` — `cultivate_batch`、`reference` 写入、`schema_gaps`、`apply_fill_request`。
-- **禁止**：采购员 / 农场主内决策与 GraphRAG 结构写入；销售员侧 `knowledge_router` / `unified_rag`（除非极小修复）。
+- **负责**：`KnowledgeFarmerAgent` — `cultivate_batch`（批处理元数据 **`skip_llm=True`**，与全量 LLM 抽取区分）、**`enrich_scenario_nodes`**（读 **`scenarios_scaffold.json`** → 写 **`scenarios_synthesized.json`**）、`write_to_reference`、`emit_schema_gaps`（含 **`ambiguous_match`**）、可选 **`update_skeleton`**（补 `[说明]`/`参数:`/`语法:`/`相关操作:`）、**`apply_fill_request`**（农场主已产出的 `FillRequest`：**批量**合并到 `reference/*.json` 的 chunk `metadata`，`kb_path` 存在时同步骨架 `node_id` 命中项；含 `fill_fields` / `enrich_fields` / `chunk_meta_patch`、`target_block_id`、`create_slot`、`discard`+patch、`needs_tree_session` 跳过）。
+- **禁止**：采购/农场主内决策与 GraphRAG 结构写入；销售员侧 `knowledge_router` / `unified_rag`（除非极小修复）。
+- **同步**：职责或 `apply_fill_request`/匹配策略变更时，须同批更新 `02-farmer.md`、本 `.mdc`、`knowledge_farmer_agent.py` 模块头、`farmer-design.md`。

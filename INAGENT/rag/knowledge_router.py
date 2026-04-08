@@ -110,7 +110,7 @@ class KnowledgeRouter:
                 "rag_context": RAG 检索上下文,
                 "similar_tests": [],
                 "constraints": 约束信息,
-                "category_whitelist": 本次使用的树层级策略,
+                "category_whitelist": 本次使用的树层级列表（同 MODE_TREE_STRATEGY[mode]）,
             }
         """
         category_whitelist = MODE_TREE_STRATEGY.get(mode, [])

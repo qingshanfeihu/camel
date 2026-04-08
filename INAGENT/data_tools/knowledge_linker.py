@@ -1,11 +1,17 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
 """
-知识链接器：农民-农场主二层架构
+知识链接器：农民结构匹配层
 
-农民（farmer_link）：规则匹配，将文档块挂到已有命令树节点
-农场主（owner_decide）：LLM 决策，处理农民无法匹配的块，可修改树结构
+农民（farmer_link）：结构规则匹配，将文档块挂到已有命令树节点
+无法匹配的块产出 SchemaGapEntry，由调用方传递给农场主
+(KnowledgeFarmOwnerAgent.process_gap_entries) 做结构裁决。
 
-树位置模型（替代 document_category）：
+宪章对齐：
+  - 农民只做结构验证（command_exists, module 解析），不做语义决策
+  - 纯关键词匹配不构成结构证据，仅作为 gap 线索提供给农场主
+  - 农场主通过 TreeInformed Decision Engine 裁决，禁止硬编码阈值
+
+树位置模型：
   leaf     — 补充已有命令的属性槽
   new_leaf — 新发现的命令
   branch   — 多命令组合功能
@@ -14,10 +20,8 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -64,29 +68,20 @@ def farmer_link(
     block_text: str,
     block_meta: Dict[str, Any],
     cli_graph_store,
-    *,
-    manifest_hint: Optional[str] = None,
 ) -> Optional[TreePosition]:
-    """规则匹配：尝试将一个知识块挂到已有命令树节点。
+    """结构规则匹配：尝试将一个知识块挂到已有命令树节点。
 
-    匹配策略（按优先级）：
-      1. manifest tree_level_hint（用户显式声明）
-      2. command_prefix → command_exists() → leaf
-      3. function_hierarchy → branch 匹配
-      4. 关键词 → keywords_index 匹配
+    匹配策略（按优先级，仅结构验证）：
+      1. command_prefix → command_exists() → leaf
+      2. function_hierarchy → branch/leaf 匹配
+      3. section_title → command_exists() 回退（CLI 文档常以命令名作标题）
+
+    纯关键词匹配不构成结构证据，不在此函数范围内。
+    无法匹配 → 返回 None → 由 link_blocks 产出 SchemaGapEntry。
 
     Returns:
-        TreePosition if matched, None if needs escalation.
+        TreePosition if structural match found, None if needs escalation.
     """
-    if manifest_hint and manifest_hint in TREE_LEVELS:
-        nodes = _match_by_hierarchy(block_meta, cli_graph_store)
-        return TreePosition(
-            tree_level=manifest_hint,
-            linked_nodes=nodes or [],
-            confidence=0.9,
-            knowledge_role="manifest_declared",
-        )
-
     cmd_prefix = block_meta.get("command_prefix", "").strip()
     if cmd_prefix:
         pos = _match_command_leaf(cmd_prefix, block_text, cli_graph_store)
@@ -99,9 +94,11 @@ def farmer_link(
         if pos:
             return pos
 
-    kw_pos = _match_keywords(block_text, block_meta, cli_graph_store)
-    if kw_pos:
-        return kw_pos
+    title = block_meta.get("section_title", "").strip()
+    if title:
+        pos = _match_title_as_command(title, cli_graph_store)
+        if pos:
+            return pos
 
     return None
 
@@ -134,6 +131,36 @@ def _match_command_leaf(
     return None
 
 
+def _match_title_as_command(
+    section_title: str, cli_graph_store
+) -> Optional[TreePosition]:
+    """用 section_title 尝试精确命令匹配。
+
+    去掉 CLI 语法标记 ({...}, [...], <...>) 后，用 command_exists 做精确匹配。
+    仅精确命中才构成结构证据；模糊候选作为 gap 线索留给农场主 LLM 裁决。
+    """
+    import re
+    cleaned = re.sub(r"[\{<\[][^\}\]>]*[\}\]>]", "", section_title).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+
+    try:
+        exists, similar = cli_graph_store.command_exists(cleaned)
+    except Exception:
+        return None
+
+    if exists:
+        return TreePosition(
+            tree_level="leaf",
+            linked_nodes=similar[:3],
+            confidence=0.85,
+            knowledge_role="title_command_match",
+        )
+
+    return None
+
+
 def _match_hierarchy_branch(
     function_hierarchy: str, cli_graph_store
 ) -> Optional[TreePosition]:
@@ -156,6 +183,7 @@ def _match_hierarchy_branch(
                 seeds = []
 
     if seeds:
+        seeds = list(seeds)
         module_hits = sum(1 for s in seeds if s in cli_graph_store._module_ids)
         level = "branch" if module_hits > len(seeds) // 2 else "leaf"
         return TreePosition(
@@ -185,10 +213,15 @@ def _match_by_hierarchy(
     return []
 
 
-def _match_keywords(
+# ── 关键词线索收集（不构成决策，仅为 gap 提供上下文） ───────────────────
+
+def _gather_keyword_candidates(
     block_text: str, block_meta: Dict[str, Any], cli_graph_store
-) -> Optional[TreePosition]:
-    """用关键词匹配 keywords_index。"""
+) -> List[str]:
+    """从关键词索引中收集候选节点 ID，作为 SchemaGapEntry 的线索。
+
+    不作为农民决策依据，仅供农场主 TreeInformed Engine 参考。
+    """
     candidates: list[str] = []
 
     kws = block_meta.get("required_keywords", [])
@@ -204,11 +237,11 @@ def _match_keywords(
         candidates = [w for w in words if len(w) >= 4][:10]
 
     if not candidates:
-        return None
+        return []
 
     ki = getattr(cli_graph_store, "_keywords_index", {})
     if not ki:
-        return None
+        return []
 
     matched_nodes: list[str] = []
     for kw in candidates:
@@ -216,180 +249,66 @@ def _match_keywords(
         matched_nodes.extend(node_ids)
 
     if not matched_nodes:
-        return None
+        return []
 
     from collections import Counter
     counts = Counter(matched_nodes)
-    top_nodes = [n for n, _ in counts.most_common(5)]
+    return [n for n, _ in counts.most_common(5)]
 
-    module_hits = sum(1 for n in top_nodes if n in cli_graph_store._module_ids)
-    module_ratio = module_hits / len(top_nodes)
 
-    if module_ratio >= 0.6:
-        level = "trunk" if module_ratio >= 0.8 else "branch"
-    else:
-        level = "leaf"
+# ── Gap 构建 ─────────────────────────────────────────────────────────────
 
-    return TreePosition(
-        tree_level=level,
-        linked_nodes=top_nodes,
-        confidence=0.5,
-        knowledge_role="keyword_match",
+def _build_gap_entry(
+    block: Dict[str, Any],
+    block_idx: int,
+    cli_graph_store,
+):
+    """为农民无法结构匹配的块构建 SchemaGapEntry。
+
+    收集两类线索供农场主 TreeInformed Engine 裁决：
+      1. 模糊命令候选 — section_title 去掉语法标记后 command_exists 的 similar 列表
+      2. 关键词候选 — keywords_index 中匹配的节点
+    """
+    import re
+    from INAGENT.rag.knowledge_schema import SchemaGapEntry
+
+    meta = block.get("metadata", {})
+    text = str(block.get("page_content") or block.get("text") or "")
+
+    nearest = []
+
+    title = meta.get("section_title", "").strip()
+    if title:
+        cleaned = re.sub(r"[\{<\[][^\}\]>]*[\}\]>]", "", title).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            try:
+                _, similar = cli_graph_store.command_exists(cleaned)
+                nearest.extend({"node_id": s, "match_type": "fuzzy_command"} for s in similar[:3])
+            except Exception:
+                pass
+
+    kw_candidates = _gather_keyword_candidates(text, meta, cli_graph_store)
+    seen = {n["node_id"] for n in nearest}
+    nearest.extend(
+        {"node_id": n, "match_type": "keyword"} for n in kw_candidates if n not in seen
     )
 
+    gap_type = "ambiguous_match" if nearest else "new_entity"
 
-# ── 农场主决策 ───────────────────────────────────────────────────────────
-
-_OWNER_SYSTEM_PROMPT = """\
-你是网络设备知识库的农场主。农民（auto_convert）在处理文档时发现了一些无法自动挂载到命令树上的知识块。
-
-命令树结构说明：
-- 树根（root）：产品底层架构、硬件架构
-- 躯干（trunk）：跨功能知识，如协议栈、转发面、管理面
-- 枝丫（branch）：多个命令组合实现的功能
-- 叶子（leaf）：单个命令的属性补充
-- 新叶子（new_leaf）：文档中发现的新命令
-
-当前树的模块列表：
-{module_list}
-
-你的任务：为每个知识块判断它属于树的哪个层级，以及应该挂载到哪些节点。
-
-对每个块，返回 JSON：
-{{
-  "block_id": <int>,
-  "tree_level": "leaf|new_leaf|branch|trunk|root",
-  "linked_nodes": ["node_id1", "node_id2"],
-  "confidence": 0.0-1.0,
-  "knowledge_role": "简要描述这块知识的角色"
-}}
-
-如果这个块确实无法挂载到任何位置（比如完全无关的内容），返回：
-{{"block_id": <int>, "tree_level": "", "linked_nodes": [], "confidence": 0, "knowledge_role": "irrelevant"}}
-
-只输出 JSON 数组，不要解释。"""
-
-_OWNER_BLOCK_TEMPLATE = """\
---- Block {block_id} ---
-标题: {title}
-内容预览（前300字）: {preview}
-已有元数据: product_module={product_module}, protocol={protocol}, function_hierarchy={fh}
-"""
-
-
-def owner_decide(
-    escalated_blocks: List[Dict[str, Any]],
-    cli_graph_store,
-    *,
-    batch_size: int = 20,
-) -> List[Tuple[int, Optional[TreePosition]]]:
-    """农场主 LLM 决策：为 escalate 的块确定树位置。
-
-    Args:
-        escalated_blocks: block dicts, 必须含 "block_id" 和 "text"/"page_content"
-        cli_graph_store: CLI 图实例
-        batch_size: 每批发给 LLM 的块数
-
-    Returns:
-        (block_id, TreePosition | None) 列表
-    """
-    if not escalated_blocks:
-        return []
-
-    module_list = ", ".join(sorted(cli_graph_store._module_ids))
-    system_prompt = _OWNER_SYSTEM_PROMPT.format(module_list=module_list)
-
-    results: List[Tuple[int, Optional[TreePosition]]] = []
-
-    for i in range(0, len(escalated_blocks), batch_size):
-        batch = escalated_blocks[i : i + batch_size]
-        user_parts = []
-        for blk in batch:
-            bid = blk.get("block_id", i)
-            meta = blk.get("metadata", {})
-            text = str(blk.get("page_content") or blk.get("text") or "")
-            title = meta.get("section_title", "") or meta.get("title", "")
-            user_parts.append(_OWNER_BLOCK_TEMPLATE.format(
-                block_id=bid,
-                title=title,
-                preview=text[:300],
-                product_module=meta.get("product_module", ""),
-                protocol=meta.get("protocol_type", ""),
-                fh=meta.get("function_hierarchy", ""),
-            ))
-
-        user_msg = "\n".join(user_parts)
-        batch_results = _call_owner_llm(system_prompt, user_msg)
-
-        bid_set = {blk.get("block_id", i + j) for j, blk in enumerate(batch)}
-        for item in batch_results:
-            bid = item.get("block_id")
-            if bid not in bid_set:
-                continue
-            level = item.get("tree_level", "")
-            if level and level in TREE_LEVELS:
-                pos = TreePosition(
-                    tree_level=level,
-                    linked_nodes=item.get("linked_nodes", []),
-                    confidence=item.get("confidence", 0.6),
-                    knowledge_role=item.get("knowledge_role", ""),
-                )
-                results.append((bid, pos))
-            else:
-                results.append((bid, None))
-
-        decided_ids = {r[0] for r in results}
-        for blk in batch:
-            bid = blk.get("block_id", 0)
-            if bid not in decided_ids:
-                results.append((bid, None))
-
-    return results
-
-
-def _call_owner_llm(system_prompt: str, user_msg: str) -> List[dict]:
-    """调用 LLM 网关获取农场主决策。"""
-    try:
-        from INAGENT.utils.llm_config import get_gateway_config
-        from openai import OpenAI
-
-        cfg = get_gateway_config()
-        api_key = cfg.get("api_key", "")
-        base_url = cfg.get("base_url", "")
-        model = cfg.get("chat_model", "")
-        if not all([api_key, base_url, model]):
-            logger.warning("[owner] LLM 网关配置不完整，跳过农场主决策")
-            return []
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            max_tokens=4096,
-            temperature=0.0,
-        )
-        raw = resp.choices[0].message.content.strip()
-
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            data = [data]
-        if not isinstance(data, list):
-            return []
-        return data
-
-    except json.JSONDecodeError as e:
-        logger.warning("[owner] LLM 返回非法 JSON: %s", e)
-        return []
-    except Exception as e:
-        logger.warning("[owner] LLM 调用失败: %s", e)
-        return []
+    return SchemaGapEntry(
+        gap_type=gap_type,
+        entity_title=title or meta.get("title", ""),
+        entity_description=text[:300],
+        entity_type=meta.get("document_category", ""),
+        evidence=(
+            f"farmer structural match failed; "
+            f"nearest: {[n['node_id'] for n in nearest[:5]]}"
+        ),
+        source_file=meta.get("source_file", ""),
+        nearest_matches=nearest,
+        chunk_content=text[:500],
+    )
 
 
 # ── 批量处理入口 ─────────────────────────────────────────────────────────
@@ -397,68 +316,39 @@ def _call_owner_llm(system_prompt: str, user_msg: str) -> List[dict]:
 def link_blocks(
     blocks: List[Dict[str, Any]],
     cli_graph_store,
-    *,
-    manifest_hints: Optional[Dict[str, str]] = None,
-    enable_owner: bool = True,
-) -> Tuple[List[Dict[str, Any]], dict]:
-    """批量链接知识块到命令树。
+) -> Tuple[List[Dict[str, Any]], List, dict]:
+    """农民规则匹配：批量将知识块挂到命令树。
 
-    两阶段：farmer_link → owner_decide (对 escalate 的块)
+    仅做结构验证（command_exists, hierarchy 解析, section_title 命令匹配）。
+    无法匹配的块产出 SchemaGapEntry，由调用方传递给农场主处理。
 
     Args:
         blocks: 知识块列表（会被原地修改，添加 tree_position）
         cli_graph_store: CLI 图实例
-        manifest_hints: {source_file_stem: tree_level_hint}
-        enable_owner: 是否启用农场主 LLM 决策
 
     Returns:
-        (blocks, stats) — stats 含 farmer_matched, owner_decided, escalated, total
+        (blocks, gap_entries, stats)
+        - gap_entries: List[SchemaGapEntry] — 农民无法匹配的块
+        - stats: {"total", "farmer_matched", "escalated"}
     """
-    manifest_hints = manifest_hints or {}
-    stats = {"total": len(blocks), "farmer_matched": 0, "owner_decided": 0, "escalated": 0}
-    escalate_list: List[Dict[str, Any]] = []
-
-    # Farmer matches below this confidence are treated as uncertain and forwarded
-    # to the owner (LLM) for semantic validation.  Threshold 0.6 keeps high-
-    # confidence rule-based paths (manifest=0.9, command_prefix=0.95/0.7,
-    # hierarchy=0.8) while escalating pure keyword-coincidence matches (0.5).
-    _FARMER_CONFIDENCE_THRESHOLD = 0.6
+    stats = {"total": len(blocks), "farmer_matched": 0, "escalated": 0}
+    gap_entries = []
 
     for idx, block in enumerate(blocks):
         meta = block.get("metadata", {})
         text = str(block.get("page_content") or block.get("text") or "")
 
-        source = meta.get("source_file", "")
-        stem = Path(source).stem.lower() if source else ""
-        hint = manifest_hints.get(stem)
-
-        pos = farmer_link(text, meta, cli_graph_store, manifest_hint=hint)
-        if pos and pos.is_valid() and pos.confidence >= _FARMER_CONFIDENCE_THRESHOLD:
+        pos = farmer_link(text, meta, cli_graph_store)
+        if pos and pos.is_valid():
             meta["tree_position"] = pos.to_dict()
             stats["farmer_matched"] += 1
         else:
-            block["block_id"] = idx
-            escalate_list.append(block)
-
-    if escalate_list and enable_owner:
-        decisions = owner_decide(escalate_list, cli_graph_store)
-        decided_map = {bid: pos for bid, pos in decisions}
-
-        for block in escalate_list:
-            bid = block.get("block_id", -1)
-            pos = decided_map.get(bid)
-            meta = block.get("metadata", {})
-            if pos and pos.is_valid():
-                meta["tree_position"] = pos.to_dict()
-                stats["owner_decided"] += 1
-            else:
-                stats["escalated"] += 1
-    else:
-        stats["escalated"] = len(escalate_list)
+            gap = _build_gap_entry(block, idx, cli_graph_store)
+            gap_entries.append(gap)
+            stats["escalated"] += 1
 
     logger.info(
-        "[linker] 链接完成: total=%d, farmer=%d, owner=%d, escalated=%d",
-        stats["total"], stats["farmer_matched"],
-        stats["owner_decided"], stats["escalated"],
+        "[linker] farmer match: total=%d, matched=%d, escalated=%d",
+        stats["total"], stats["farmer_matched"], stats["escalated"],
     )
-    return blocks, stats
+    return blocks, gap_entries, stats

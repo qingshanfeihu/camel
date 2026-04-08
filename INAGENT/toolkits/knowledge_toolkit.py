@@ -20,7 +20,8 @@ KnowledgeToolkit — 将 INAGENT 知识库暴露为 CAMEL FunctionTool
 - search_similar_tests: 通过 TestRulesEngine 搜索已有测试用例
 
 每个 KnowledgeToolkit 实例绑定一个 mode（config / test_write /
-test_review / explain），自动携带对应的 category_whitelist。
+test_review / explain），自动携带 ``MODE_TREE_STRATEGY[mode]`` 树层级白名单
+（``MODE_CATEGORY_WHITELIST`` 为其别名）。
 """
 import logging
 import re
@@ -31,7 +32,11 @@ from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 
 from INAGENT.config.project_config import cfg_float
-from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES, MODE_CATEGORY_WHITELIST
+from INAGENT.rag.knowledge_config import (
+    DOCUMENT_CATEGORIES,
+    MODE_CATEGORY_WHITELIST,
+    MODE_TREE_STRATEGY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +47,8 @@ class KnowledgeToolkit(BaseToolkit):
 
     Each instance is bound to a *mode* (``"config"``, ``"test_write"``,
     ``"test_review"``, ``"explain"``).  The mode automatically constrains
-    the document categories that ``search_product_knowledge`` will query
-    via :data:`MODE_CATEGORY_WHITELIST`.
+        the tree-level whitelist that ``search_product_knowledge`` passes to
+        UnifiedRAG (see :data:`MODE_TREE_STRATEGY` / ``MODE_CATEGORY_WHITELIST``).
 
     Args:
         mode: Operating mode that determines default category whitelist.
@@ -222,10 +227,16 @@ class KnowledgeToolkit(BaseToolkit):
             query: Natural-language search query describing the knowledge
                 you need.  Be as specific as possible (e.g. include the
                 feature name, CLI command, or requirement ID).
-            category_filter: Optional comma-separated document categories
-                to restrict the search scope (e.g.
-                ``"cli/reference,spec/design"``).  When empty, the default
-                whitelist for the current mode is used.
+            category_filter: Optional comma-separated **tree levels** matching
+                ``knowledge_config.TREE_LEVELS`` (e.g. ``"leaf,branch"``).
+                These are passed to ``UnifiedRAGRetriever`` as
+                ``category_whitelist`` and filter on
+                ``metadata.tree_position.tree_level`` (with
+                ``document_category → tree_level`` fallback via
+                ``CATEGORY_TO_TREE_LEVEL``).  Legacy ``cli/reference``-style
+                strings are **not** valid whitelist members unless they equal a
+                tree level name.  When empty, ``MODE_TREE_STRATEGY[mode]`` is
+                used.
             max_results: Maximum number of top results to include in the
                 response (default 8).
 
@@ -351,12 +362,13 @@ class KnowledgeToolkit(BaseToolkit):
             Formatted text listing similar existing test cases, or a
             message indicating none were found.
         """
-        # 优先使用统一 RAG 的语义检索，失败时回退到规则引擎关键词检索
+        # 与 test_write 相同的树层级策略（硬过滤的是 tree_level，非旧式 document_category 字符串）
+        similar_whitelist = list(MODE_TREE_STRATEGY.get("test_write", ["leaf", "branch"]))
         try:
             ctx, _constraints, _decomp = self._retrieve_with_timeout(
                 query=query,
                 top_k_final=max_results,
-                category_whitelist=["test/test_list"],
+                category_whitelist=similar_whitelist,
                 use_graphrag=use_graphrag,
             )
             if ctx:
@@ -370,7 +382,7 @@ class KnowledgeToolkit(BaseToolkit):
                 ctx, _constraints, _decomp = self._retrieve_with_timeout(
                     query=query,
                     top_k_final=max_results,
-                    category_whitelist=["test/test_list"],
+                    category_whitelist=similar_whitelist,
                     use_graphrag=False,
                     timeout_seconds=30.0,
                 )

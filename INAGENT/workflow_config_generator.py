@@ -52,21 +52,10 @@ from INAGENT.agents.lb_ops_agent import (
 
 # 尝试导入 GraphRAG 集成模块
 try:
-    from INAGENT.rag.graphrag_integration import GraphRAGRetriever, HybridGraphRAGRetriever
+    from INAGENT.rag.graphrag_integration import GraphRAGRetriever
     GRAPHRAG_AVAILABLE = True
 except ImportError:
     GRAPHRAG_AVAILABLE = False
-
-# 导入评分工具
-try:
-    from INAGENT.rag.scoring_utils import (
-        apply_scoring_boost,
-        extract_entities_from_query,
-        compute_protocol_boost,
-    )
-    SCORING_UTILS_AVAILABLE = True
-except ImportError:
-    SCORING_UTILS_AVAILABLE = False
 
 # 统一 RAG：向量 + GraphRAG + Rerank + 协议加权
 try:
@@ -74,247 +63,6 @@ try:
     UNIFIED_RAG_AVAILABLE = True
 except ImportError:
     UNIFIED_RAG_AVAILABLE = False
-
-# 尝试导入 fallback_retrieval（供回退或其他脚本使用）
-try:
-    from INAGENT.rag.fallback_retrieval import _adaptive_rag_retrieval, _analyze_step_coverage
-except ImportError:
-    # 如果workforce_config_ops不存在，定义一个改进的实现，支持metadata提取和动态协议加权
-    def _compute_dynamic_protocol_boost(query: str, item: Dict[str, Any]) -> float:
-        """
-        动态计算协议类型加权，区别于 camel-ai 的硬编码方式
-        
-        核心差异：
-        - camel-ai: 硬编码 HTTP/HTTPS 关键词和固定加权值
-        - INFOAGEN: 从查询和文档 metadata 动态提取协议类型，自动匹配
-        
-        Args:
-            query: 查询字符串
-            item: 文档项，包含 text 和 metadata
-        
-        Returns:
-            float: 加权值（正值表示增强，负值表示降权）
-        """
-        q_lower = (query or "").lower()
-        
-        # 从文档 metadata 和文本中动态提取协议类型
-        meta = item.get("metadata", {}) or {}
-        text = (item.get("text") or item.get("content") or "")[:500].lower()
-        
-        # 动态提取查询中的协议类型（不硬编码协议列表）
-        query_protocols = set()
-        doc_protocols = set()
-        
-        # 1. 从 metadata 中提取协议类型（INFOAGEN 特有的动态元数据）
-        meta_protocols = meta.get("protocol_type", [])
-        if isinstance(meta_protocols, list):
-            doc_protocols.update([p.lower() for p in meta_protocols if p])
-        elif meta_protocols:
-            doc_protocols.add(meta_protocols.lower())
-        
-        # 2. 从文本中动态识别协议类型
-        # 常见协议模式（但不硬编码，支持扩展）
-        import re
-        protocol_patterns = [
-            r'\b(https?)\b',
-            r'\b(tcp|udp)\b',
-            r'\b(ftp|ftps)\b',
-            r'\b(dns|dhcp)\b',
-            r'\b(sip|rtsp)\b',
-            r'\b(smtp|pop3|imap)\b'
-        ]
-        for pattern in protocol_patterns:
-            # 从查询中提取
-            query_matches = re.findall(pattern, q_lower)
-            query_protocols.update(query_matches)
-            # 从文档中提取
-            doc_matches = re.findall(pattern, text)
-            doc_protocols.update(doc_matches)
-        
-        # 3. 计算动态加权
-        boost = 0.0
-        
-        # 精准匹配加权
-        exact_matches = query_protocols & doc_protocols
-        if exact_matches:
-            boost += 0.05 * len(exact_matches)  # 每个精准匹配 +0.05
-        
-        # 部分匹配降权（查询要求但文档没有）
-        missing_in_doc = query_protocols - doc_protocols
-        if missing_in_doc and len(doc_protocols) > 0:
-            # 如果文档有协议但不是查询要求的，轻微降权
-            boost -= 0.03
-        
-        # 协议泛化支持（如 HTTP 应该也匹配 HTTPS）
-        if "http" in query_protocols:
-            if "https" in doc_protocols:
-                boost += 0.02  # HTTPS 可以部分满足 HTTP 需求
-        elif "https" in query_protocols:
-            if "http" in doc_protocols:
-                boost -= 0.02  # HTTP 不完全满足 HTTPS 需求（安全性差异）
-        
-        return boost
-    
-    def _adaptive_rag_retrieval(hybrid_retriever, reranker, job_content, decomposition_result=None, **kwargs):
-        """
-        改进的RAG检索实现，集成以下优化：
-        1. 正确调用 reranker（修复 bug）
-        2. 扩大候选池（默认 top_k × 10）
-        3. 动态协议加权（区别于 camel-ai 硬编码）
-        4. 支持 metadata 提取和过滤
-        5. 可选 GraphRAG 图增强检索（合并向量+图结果）
-        """
-        import re
-        import json
-        import asyncio
-        
-        # 动态候选池策略：top_k_rerank × retrieval_multiplier
-        top_k_rerank = kwargs.get("top_k_rerank", 5)
-        retrieval_multiplier = kwargs.get("retrieval_multiplier", 10)  # 可配置，默认10倍
-        top_k_retrieval = kwargs.get("top_k_retrieval") or (top_k_rerank * retrieval_multiplier)  # 默认：5 × 10 = 50
-        graphrag_retriever = kwargs.get("graphrag_retriever")
-        
-        logger.info(f"[RAG] 使用动态候选池策略：初始检索 {top_k_retrieval} 个候选，rerank 后返回 top {top_k_rerank}")
-        
-        def _parse_metadata_from_text(text: str) -> Dict[str, Any]:
-            """从文本中解析INAGENT_META_JSON格式的元数据"""
-            match = re.match(r'^INAGENT_META_JSON:({.*?})\n', text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    return {}
-            return {}
-        
-        # 1. 混合检索（扩大候选池）
-        try:
-            retrieved_result = hybrid_retriever.query(
-                job_content, 
-                top_k=top_k_retrieval,
-                return_detailed_info=True
-            )
-            retrieved_context = retrieved_result.get("Retrieved Context", [])
-        except Exception as e:
-            logger.warning(f"混合检索失败: {e}")
-            retrieved_context = []
-        
-        # 1b. 可选：GraphRAG 图增强检索，合并结果
-        if graphrag_retriever and getattr(graphrag_retriever, "is_available", lambda: False)():
-            try:
-                import asyncio
-                _graphrag = graphrag_retriever
-                async def _fetch_graph():
-                    _, graph_results = await _graphrag.local_search(
-                        job_content, top_k=min(top_k_retrieval // 2, 25)
-                    )
-                    out = []
-                    for r in graph_results:
-                        out.append({
-                            "text": getattr(r, "text", ""),
-                            "metadata": getattr(r, "metadata", {}),
-                            "similarity score": getattr(r, "score", 0.0),
-                        })
-                    return out
-                graph_docs = asyncio.run(_fetch_graph())
-                if graph_docs:
-                    seen = {hash((d.get("text", "") or "")[:300]): True for d in retrieved_context if isinstance(d, dict)}
-                    for g in graph_docs:
-                        t = (g.get("text", "") or "")[:300]
-                        if t and hash(t) not in seen:
-                            seen[hash(t)] = True
-                            retrieved_context.append(g)
-                    logger.info(f"[RAG] GraphRAG 合并 {len(graph_docs)} 个图结果，合并后共 {len(retrieved_context)} 个候选")
-            except Exception as e:
-                logger.warning(f"GraphRAG 检索失败: {e}，仅使用向量结果")
-        
-        if not retrieved_context:
-            return "", {}, decomposition_result or {}
-        
-        # 2. 提取文本和 metadata
-        documents = []
-        for doc in retrieved_context:
-            if isinstance(doc, dict):
-                text = doc.get("text", "") or doc.get("page_content", "") or doc.get("content", "")
-                metadata = doc.get("metadata", {})
-                if not metadata and text:
-                    metadata = _parse_metadata_from_text(text)
-            else:
-                text = str(doc)
-                metadata = _parse_metadata_from_text(text) if text else {}
-            
-            if text:
-                documents.append({
-                    "text": text,
-                    "metadata": metadata,
-                    "similarity score": doc.get("similarity score", 0.0) if isinstance(doc, dict) else 0.0
-                })
-        
-        # 3. 调用 reranker 重排序（修复：之前缺失这一步！）
-        if reranker and documents:
-            try:
-                logger.info(f"[RAG] 调用 reranker 重排序 {len(documents)} 个文档，目标 top_{top_k_rerank}")
-                reranked_docs = reranker.query(
-                    query=job_content,
-                    retrieved_result=documents,
-                    top_k=top_k_rerank
-                )
-                documents = reranked_docs
-                logger.info(f"[RAG] Rerank 完成，返回 {len(documents)} 个文档")
-            except Exception as e:
-                logger.warning(f"Rerank 失败: {e}，使用原始结果")
-                documents = documents[:top_k_rerank]
-        else:
-            logger.warning(f"[RAG] Reranker 未启用或无文档，跳过 rerank")
-            documents = documents[:top_k_rerank]
-        
-        # 4. 应用动态协议加权（区别于 camel-ai 的硬编码方式）
-        for doc in documents:
-            boost = _compute_dynamic_protocol_boost(job_content, doc)
-            if boost != 0.0:
-                original_score = doc.get("similarity score", 0.0)
-                doc["similarity score"] = original_score + boost
-                doc["protocol_boost"] = boost
-                logger.debug(f"[RAG] 协议加权: {boost:+.3f} (原始: {original_score:.3f} -> {doc['similarity score']:.3f})")
-        
-        # 5. 重新排序（应用加权后）
-        documents = sorted(documents, key=lambda x: x.get("similarity score", 0.0), reverse=True)
-        
-        # 6. 提取最终上下文
-        texts = []
-        metadata_list = []
-        for doc in documents[:top_k_rerank]:
-            text = doc.get("text", "")
-            metadata = doc.get("metadata", {})
-            if text:
-                texts.append(text[:1000])
-                metadata_list.append(metadata)
-        
-        context = "\n\n".join(texts)
-        
-        # 7. 从 metadata 中提取约束条件
-        constraints = {}
-        if metadata_list:
-            product_modules = set()
-            protocol_types = set()
-            for meta in metadata_list:
-                if meta.get("product_module"):
-                    product_modules.add(meta["product_module"])
-                if meta.get("protocol_type"):
-                    if isinstance(meta["protocol_type"], list):
-                        protocol_types.update(meta["protocol_type"])
-                    else:
-                        protocol_types.add(meta["protocol_type"])
-            
-            if product_modules:
-                constraints["product_modules"] = list(product_modules)
-            if protocol_types:
-                constraints["protocol_types"] = list(protocol_types)
-        
-        return context, constraints, decomposition_result or {}
-    
-    def _analyze_step_coverage(*args, **kwargs):
-        """占位函数"""
-        return set()
 
 # 加载环境变量
 env_utils.load_inagent_env()
@@ -507,10 +255,12 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
         (qdrant_persist_dir / "rag_meta.json") if qdrant_persist_dir is not None else None
     )
     cached_kb_fp = ""
+    cached_chunk_hashes: Dict[str, str] = {}
     if local_meta_path and local_meta_path.exists():
         try:
             cached = json.loads(local_meta_path.read_text(encoding="utf-8"))
             cached_kb_fp = str(cached.get("knowledge_base_sha256", ""))
+            cached_chunk_hashes = cached.get("chunk_hashes", {})
         except Exception:
             cached_kb_fp = ""
 
@@ -522,6 +272,7 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
         pass
 
     need_rebuild_vectors = existing_points <= 0
+    incremental_mode = False
     if force_rebuild_vectors:
         logger.info("force_rebuild_vectors=True：清空 Qdrant 集合并从 knowledge_base 目录重建混合向量")
         need_rebuild_vectors = True
@@ -530,7 +281,6 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
             existing_points = 0
         except Exception as e:
             logger.warning("Qdrant 清空失败: %s", e)
-    # Also rebuild when fingerprint metadata is missing (e.g. after manual cleanup)
     if existing_points > 0 and kb_fp and not cached_kb_fp:
         logger.info("Qdrant 元数据缺失 (rag_meta.json)，强制重建向量索引")
         need_rebuild_vectors = True
@@ -540,23 +290,61 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
         except Exception as e:
             logger.warning("Qdrant 清空失败: %s", e)
     if existing_points > 0 and kb_fp and cached_kb_fp and kb_fp != cached_kb_fp:
-        logger.info("检测到 knowledge_base.json 变更，重建 Qdrant 向量索引")
-        try:
-            storage.clear()
-            existing_points = 0
+        if cached_chunk_hashes:
+            logger.info("检测到 knowledge_base.json 变更，启用增量更新模式")
+            incremental_mode = True
             need_rebuild_vectors = True
-        except Exception as e:
-            logger.warning("Qdrant 清空失败，保留旧向量索引: %s", e)
+        else:
+            logger.info("检测到 knowledge_base.json 变更，重建 Qdrant 向量索引")
+            try:
+                storage.clear()
+                existing_points = 0
+                need_rebuild_vectors = True
+            except Exception as e:
+                logger.warning("Qdrant 清空失败，保留旧向量索引: %s", e)
+
+    def _compute_chunk_hashes(elems: list) -> Dict[str, str]:
+        """Build chunk_id → content_hash map for incremental diff.
+
+        Only hashes page_content (not metadata) so that metadata-only
+        changes (e.g. tree_level overlay) do not trigger re-embedding.
+        """
+        import hashlib as _hl
+        hashes = {}
+        for e in elems:
+            cid = (
+                getattr(e.metadata, "chunk_id", None)
+                or getattr(e.metadata, "block_id", None)
+                or str(getattr(e.metadata, "piece_num", ""))
+            )
+            if cid:
+                text = getattr(e, "text", None) or str(e)
+                hashes[str(cid)] = _hl.md5(text.encode("utf-8")).hexdigest()
+        return hashes
 
     if existing_points > 0 and not need_rebuild_vectors:
         logger.info(
             f"Qdrant 已有 {existing_points} 个向量点，跳过重复写入"
         )
-        # 仍需初始化 BM25 索引（内存态，不写 Qdrant）
         docs = env_utils.load_knowledge_base(reference_dir)
         elements = _documents_to_elements(docs)
         if elements:
             hybrid_retriever.build_bm25_only(elements)
+            if local_meta_path and kb_fp and not cached_chunk_hashes:
+                try:
+                    local_meta_path.write_text(
+                        json.dumps(
+                            {
+                                "collection": qdrant_collection,
+                                "knowledge_base_sha256": kb_fp,
+                                "chunk_hashes": _compute_chunk_hashes(elements),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
     else:
         docs = env_utils.load_knowledge_base(reference_dir)
         elements = _documents_to_elements(docs)
@@ -565,10 +353,77 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
                 1,
                 cfg_int("workflow.embedding_batch", 50, env="EMBEDDING_BATCH"),
             )
-            try:
-                hybrid_retriever.process(elements, embed_batch=embed_batch, should_chunk=False)
-            except Exception as _proc_err:
-                logger.warning("向量化过程部分失败 (已写入的点仍保留): %s", _proc_err)
+            embed_workers = max(
+                1,
+                cfg_int("workflow.embedding_workers", 4, env="EMBEDDING_WORKERS"),
+            )
+            new_chunk_hashes = _compute_chunk_hashes(elements)
+
+            if incremental_mode and cached_chunk_hashes:
+                added_ids = set(new_chunk_hashes) - set(cached_chunk_hashes)
+                removed_ids = set(cached_chunk_hashes) - set(new_chunk_hashes)
+                changed_ids = {
+                    cid for cid in (set(new_chunk_hashes) & set(cached_chunk_hashes))
+                    if new_chunk_hashes[cid] != cached_chunk_hashes[cid]
+                }
+                upsert_ids = added_ids | changed_ids
+                logger.info(
+                    "增量更新: +%d 新增, ~%d 变更, -%d 删除 (共 %d/%d 需处理)",
+                    len(added_ids), len(changed_ids), len(removed_ids),
+                    len(upsert_ids), len(elements),
+                )
+                if removed_ids or changed_ids:
+                    from qdrant_client.http.models import Filter, FieldCondition, MatchAny
+                    delete_ids = list(removed_ids | changed_ids)
+                    for di in range(0, len(delete_ids), 500):
+                        batch_del = delete_ids[di : di + 500]
+                        try:
+                            storage.client.delete(
+                                collection_name=qdrant_collection,
+                                points_selector=Filter(
+                                    must=[
+                                        FieldCondition(
+                                            key="chunk_id",
+                                            match=MatchAny(any=batch_del),
+                                        )
+                                    ]
+                                ),
+                            )
+                        except Exception as e:
+                            logger.warning("增量删除失败: %s", e)
+
+                if upsert_ids:
+                    upsert_elements = [
+                        e for e in elements
+                        if str(
+                            getattr(e.metadata, "chunk_id", None)
+                            or getattr(e.metadata, "block_id", None)
+                            or getattr(e.metadata, "piece_num", "")
+                        ) in upsert_ids
+                    ]
+                    if upsert_elements:
+                        try:
+                            hybrid_retriever.vr.process(
+                                content=upsert_elements,
+                                embed_batch=embed_batch,
+                                should_chunk=False,
+                                embed_workers=embed_workers,
+                            )
+                        except Exception as _proc_err:
+                            logger.warning("增量向量化部分失败: %s", _proc_err)
+
+                hybrid_retriever.build_bm25_only(elements)
+                logger.info("增量更新完成")
+            else:
+                try:
+                    hybrid_retriever.process(
+                        elements,
+                        embed_batch=embed_batch,
+                        should_chunk=False,
+                        embed_workers=embed_workers,
+                    )
+                except Exception as _proc_err:
+                    logger.warning("向量化过程部分失败 (已写入的点仍保留): %s", _proc_err)
             logger.info(f"已加载 {len(elements)} 个文档块到RAG系统")
             if local_meta_path and kb_fp:
                 try:
@@ -577,9 +432,9 @@ def initialize_rag_system(use_graphrag: bool = None, *, force_rebuild_vectors: b
                             {
                                 "collection": qdrant_collection,
                                 "knowledge_base_sha256": kb_fp,
+                                "chunk_hashes": new_chunk_hashes,
                             },
                             ensure_ascii=False,
-                            indent=2,
                         ),
                         encoding="utf-8",
                     )

@@ -14,31 +14,33 @@
 """
 采购员 Agent (Knowledge Procurement Agent)
 
-职责：对 auto_convert 产出的 chunk 进行三层筛查，
-决定每个 chunk 是否进入知识库，以及以什么形态进入。
+对 auto_convert 等产出的 chunk 做三层筛查，输出四类 action 与 target_kb。
 
-三层：
-  Layer 1: 机械检查（长度 / 空白内容）— 无 LLM，零代价
-  Layer 2: 采购员 LLM 判断（理解 CLI 树的需求，按 source_file 批处理）
-  Layer 3: 元数据合法性检查 — 无 LLM
+三层
+  L1 机械：page_content/text strip 后长度 < 50 → reject，否则进 L2。
+  L2 LLM：按 metadata.source_file 分组，每文件一次 ChatAgent.step；prompt 内每段仅展示正文前 500 字
+          （用于判断，不修改入库正文）。JSON 字段 suggested_category → ProcurementDecision.suggested_value。
+          confidence < 0.6 且 action 为 accept/reject → 改为 pending_review；非法 action → pending_review。
+  L3 元数据：reject/pending_review 直接返回；否则用 suggested_value 或 metadata.document_category
+          校验 DOCUMENT_CATEGORIES，不在白名单 → staging (new_category)；
+          再校验 product_module 是否在 product_modules_registry.json 的 modules 中 → 否且表非空 → staging (new_module)。
 
-输出 action：
-  accept         → 正常入库
-  reject         → 不入库，写 reject_log.jsonl
-  pending_review → 置信度不足，待人工确认，写 pending_review.jsonl
-  staging        → 元数据 schema gap，暂存等 patch，写 schema_gaps.jsonl
+公开入口
+  KnowledgeProcurementAgent.evaluate_batch, enrich_decisions_for_farmer, filter_accepted, write_logs
+  enrich_chunk_decision_for_farmer(cd)  # 模块函数，accept 上同步 metadata 供农民
 
-职责或契约变更时，请同步更新：
-  INAGENT/docs/agents/sessions/03-procurement.md
-  与 .cursor/rules/kb-session-procurement.mdc
+日志（默认 knowledge_base/logs/，accept 不写 jsonl）
+  reject → reject_log.jsonl；pending_review → pending_review.jsonl；staging → schema_gaps.jsonl
 
-交给农民（KnowledgeFarmerAgent.cultivate_batch）前须满足：
-  - 勿截断 page_content / text（含 MinerU 表格）；勿清除 auto_convert 已写入的元数据字段。
-  - metadata.source_file 与 ChunkDecision.source_file 一致（reference/{stem}.json、block_id 依赖 stem）。
-  - 对 accept：将 LLM suggested_category（ProcurementDecision.suggested_value）写入 metadata：
-      suggested_value 始终写入（非空时）；若在 DOCUMENT_CATEGORIES 内则同时写入 document_category。
-  - cultivate_batch 只应传入 action==accept 的决策子集，或先用 enrich_decisions_for_farmer 再交给农民；
-      chunk_index 须稳定，勿与 pending/staging 混在同一批除非有意跳过。
+农民交接：enrich_chunk_decision_for_farmer / enrich_decisions_for_farmer / filter_accepted
+  浅拷贝 chunk；非空 suggested_value → metadata.suggested_value；在 DOCUMENT_CATEGORIES 内则写 document_category；
+  source_file 与 ChunkDecision 对齐。不截断正文、不删 auto_convert 元数据。
+
+SchemaGapType 含 new_entity / new_entity_attribute：当前 L3 仅产生 new_category、new_module。
+
+职责或实现变更时同步更新：
+  INAGENT/docs/agents/sessions/03-procurement.md（含「实现摘要」）
+  .cursor/rules/kb-session-procurement.mdc
 """
 from __future__ import annotations
 

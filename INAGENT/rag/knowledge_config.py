@@ -75,16 +75,23 @@ MODE_BUDGET_WEIGHTS: Dict[str, int] = {
 # 新文档不再使用 document_category，此映射仅服务于未重新入库的历史数据。
 CATEGORY_TO_TREE_LEVEL: Dict[str, str] = {
     "cli/reference": "leaf",
+    "cli": "leaf",
     "app/reference": "branch",
+    "app": "branch",
     "architecture/design": "root",
+    "architecture": "root",
     "spec/prd": "trunk",
     "spec/func_spec": "trunk",
     "spec/design": "trunk",
+    "spec": "trunk",            # infer_document_category("trunk") → "spec" 的反向映射
     "test/test_list": "branch",
     "test/test_strategy": "trunk",
     "test/test_template": "branch",
+    "test": "branch",           # 裸别名
     "review/rules": "trunk",
     "review/bug_fix": "leaf",
+    "review": "branch",         # 裸别名（与 CAT_TO_LEVEL 保持一致）
+    "doc": "branch",            # infer_document_category("new_leaf") 兜底返回 "doc"
 }
 
 # ── 向后兼容别名 ──────────────────────────────────────────────────

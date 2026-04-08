@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
+import re
 from typing import Any, Dict, List
 
 from camel.loaders import UnstructuredIO
@@ -18,6 +19,50 @@ from camel.retrievers import BaseRetriever
 from camel.utils import dependencies_required
 
 DEFAULT_TOP_K_RESULTS = 1
+
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
+_NON_ALNUM_RE = re.compile(r'[^\w\s]', re.UNICODE)
+_META_JSON_RE = re.compile(r'^INAGENT_META_JSON:\{[^}]*\}\n?')
+
+
+def _tokenize(text: str) -> List[str]:
+    r"""CJK-aware tokenizer: bigram + unigram for CJK, whitespace split for
+    Latin/digit tokens. Falls back to plain ``str.split(" ")`` when no CJK
+    characters are detected so that existing non-CJK workloads are
+    unaffected.
+    """
+    text = _META_JSON_RE.sub('', text)
+    if not _CJK_RE.search(text):
+        return text.split(" ")
+
+    text = _NON_ALNUM_RE.sub(' ', text).lower()
+    tokens: List[str] = []
+    buf: List[str] = []
+
+    def _flush_latin():
+        if buf:
+            word = ''.join(buf).strip()
+            if word:
+                tokens.append(word)
+            buf.clear()
+
+    for ch in text:
+        if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
+            _flush_latin()
+            tokens.append(ch)
+        elif ch in (' ', '\t', '\n', '\r'):
+            _flush_latin()
+        else:
+            buf.append(ch)
+    _flush_latin()
+
+    bigrams: List[str] = []
+    for i in range(len(tokens) - 1):
+        if len(tokens[i]) == 1 and len(tokens[i + 1]) == 1:
+            if (_CJK_RE.match(tokens[i]) and _CJK_RE.match(tokens[i + 1])):
+                bigrams.append(tokens[i] + tokens[i + 1])
+    tokens.extend(bigrams)
+    return tokens
 
 
 class BM25Retriever(BaseRetriever):
@@ -88,7 +133,7 @@ class BM25Retriever(BaseRetriever):
         if self.chunks:
 
             # Convert chunks to a list of strings for tokenization
-            tokenized_corpus = [str(chunk).split(" ") for chunk in self.chunks]
+            tokenized_corpus = [_tokenize(str(chunk)) for chunk in self.chunks]
             self.bm25 = BM25Okapi(tokenized_corpus)
         else:
             self.bm25 = None
@@ -124,7 +169,7 @@ class BM25Retriever(BaseRetriever):
             )
 
         # Preprocess query similarly to how documents were processed
-        processed_query = query.split(" ")
+        processed_query = _tokenize(query)
         # Retrieve documents based on BM25 scores
         scores = self.bm25.get_scores(processed_query)
 
