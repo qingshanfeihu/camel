@@ -350,6 +350,17 @@ def merge_to_sapling() -> int:
     return len(kb_data)
 
 
+def _rebuild_graphrag_index():
+    graph_path = INAGENT_ROOT / "knowledge_base" / "cli_keyword_graph.json"
+    if not graph_path.exists():
+        logger.warning("cli_keyword_graph.json 不存在，跳过 GraphRAG 重建")
+        return
+    logger.info("重建 GraphRAG 索引 (from cli_keyword_graph.json) ...")
+    from INAGENT.scripts.build_graphrag_from_graph import build
+    build()
+    logger.info("GraphRAG 索引重建完成")
+
+
 def run_farm_owner(gap_count: int):
     from INAGENT.rag.graphrag_integration import GraphRAGRetriever
     from INAGENT.agents.knowledge_farm_owner_agent import KnowledgeFarmOwnerAgent
@@ -436,6 +447,7 @@ def run_full_pipeline(doc_statuses: Dict[str, bool]):
         }
 
     final_kb_size = merge_to_sapling()
+    _rebuild_graphrag_index()
     owner, report = run_farm_owner(total_gap_count)
 
     if owner and report:
@@ -757,8 +769,12 @@ def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
         kws = section.split()[:3] + ([module] if module else [])
         s4 = _graphrag_search(query, kws)
 
-        tp = m.get("tree_position", {})
-        tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
+        bid = m.get("block_id") or m.get("chunk_id") or ""
+        src = m.get("source_file", "")
+        tree_level = _lookup_tree_level(block_id=bid, title=section, source_file=src)
+        if tree_level == "?":
+            tp = m.get("tree_position", {})
+            tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
 
         results.append({
             "cmd": section, "module": module, "tree_level": tree_level,
@@ -891,7 +907,7 @@ def run_arch_4way(arch_blocks: list, count: int, seed: int):
         if tree_level == "?":
             tp = m.get("tree_position", {})
             tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
-        s2_tree = {"valid": tree_level in ("trunk", "root"),
+        s2_tree = {"valid": tree_level != "?",
                     "tree_level": tree_level,
                     "doc_category": m.get("document_category", "?")}
 
@@ -1114,7 +1130,7 @@ def main():
         logger.info("ARCH 4-way: %d source blocks, %d random (seed=%d)",
                      len(arch_blocks), args.arch_count, args.seed)
         arch_results = run_arch_4way(arch_blocks, args.arch_count, args.seed)
-        arch_totals = print_track_report("ARCH", arch_results, s2_label="TreeLevel(trunk/root)")
+        arch_totals = print_track_report("ARCH", arch_results, s2_label="TreeLevel(assigned)")
         arch_totals["n"] = len(arch_results)
         all_totals["ARCH"] = arch_totals
     else:

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CLI 知识子图（服务）</title>
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #1e1e1e; color: #e0e0e0; }
+    #toolbar {
+      padding: 8px 12px; background: #2d2d2d; border-bottom: 1px solid #444;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    }
+    #toolbar input { padding: 6px 10px; border-radius: 4px; border: 1px solid #555; background: #333; color: #fff; min-width: 120px; }
+    #toolbar button { padding: 6px 12px; border-radius: 4px; border: none; background: #4A90D9; color: #fff; cursor: pointer; }
+    #toolbar button:hover { filter: brightness(1.1); }
+    #err { color: #f66; padding: 8px 12px; display: none; }
+    #meta { font-size: 12px; color: #aaa; flex: 1; min-width: 200px; }
+    #network { width: 100%; height: calc(100vh - 140px); background: #252525; }
+    #legend {
+      padding: 8px 12px; font-size: 12px; color: #bbb; border-top: 1px solid #444; background: #2d2d2d;
+    }
+    #legend span { margin-right: 16px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <label>module <input type="text" id="mod" placeholder="slb" /></label>
+    <label>max_nodes <input type="number" id="maxn" value="80" min="10" max="500" /></label>
+    <label>max_depth <input type="number" id="maxd" value="2" min="1" max="6" /></label>
+    <label><input type="checkbox" id="skel" checked /> 骨架着色</label>
+    <label>布局
+      <select id="layoutMode" title="层级树=模块在上、命令为叶（仅结构边）">
+        <option value="tree" selected>层级树</option>
+        <option value="force">力导向</option>
+      </select>
+    </label>
+    <label>筛选 <input type="text" id="search" placeholder="label / id" style="min-width:160px" /></label>
+    <button type="button" id="load">加载子图</button>
+    <button type="button" id="fit">适应画布</button>
+    <button type="button" id="exportJson">导出 JSON</button>
+    <span id="meta"></span>
+  </div>
+  <div id="err"></div>
+  <div id="network"></div>
+  <div id="legend">
+    <span><i class="dot" style="background:#4A90D9;border:1px solid #2E5A8A"></i>module</span>
+    <span><i class="dot" style="background:#7CB342;border:1px solid #558B2F"></i>command</span>
+    <span><i class="dot" style="background:#FF9800;border:1px solid #E65100"></i>operation_command</span>
+    <span><i class="dot" style="background:#7CB342;border:3px solid #00C853"></i>骨架中有 node_id</span>
+    <span style="color:#888">层级树隐藏 shares_keyword</span>
+  </div>
+  <script>
+    var TREE_EDGE_TYPES = new Set(['contains', 'has_operation', 'parent_of']);
+
+    function decorateNodes(arr) {
+      return (arr || []).map(function (n) {
+        var g = n.group || '';
+        var shape = 'ellipse';
+        var size = 18;
+        if (g === 'module') { shape = 'box'; size = 32; }
+        else if (g === 'operation_command') { shape = 'triangleDown'; size = 18; }
+        var o = {};
+        for (var k in n) { if (n.hasOwnProperty(k)) o[k] = n[k]; }
+        o.shape = shape;
+        o.size = size;
+        return o;
+      });
+    }
+
+    function filterTreeEdges(arr) {
+      return (arr || []).filter(function (e) { return TREE_EDGE_TYPES.has(e.title || ''); });
+    }
+
+    function buildOptions(layoutMode) {
+      var smoothTree = { type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.35 };
+      var smoothForce = { type: 'continuous' };
+      var base = {
+        nodes: { font: { color: '#f0f0f0', size: 13 }, scaling: { min: 8, max: 28 } },
+        edges: {
+          color: { color: '#6a9fb5', highlight: '#fff' },
+          smooth: layoutMode === 'tree' ? smoothTree : smoothForce
+        },
+        interaction: { hover: true, tooltipDelay: 120 }
+      };
+      if (layoutMode === 'tree') {
+        base.layout = {
+          hierarchical: {
+            enabled: true,
+            direction: 'UD',
+            sortMethod: 'directed',
+            nodeSpacing: 150,
+            levelSeparation: 175,
+            treeSpacing: 200,
+            blockShifting: true,
+            edgeMinimization: true,
+            parentCentralization: true
+          }
+        };
+        base.physics = false;
+      } else {
+        base.layout = { hierarchical: false };
+        base.physics = {
+          enabled: true,
+          stabilization: { iterations: 200 },
+          barnesHut: { gravitationalConstant: -8000, springConstant: 0.04, springLength: 120 }
+        };
+      }
+      return base;
+    }
+
+    let network = null;
+    let nodesDs = null;
+    let GRAPH_DATA = { nodes: [], edges: [], meta: {} };
+    let allEdgesFull = [];
+
+    function qsParams() {
+      const mod = document.getElementById('mod').value.trim() || 'slb';
+      const maxn = parseInt(document.getElementById('maxn').value, 10) || 80;
+      const maxd = parseInt(document.getElementById('maxd').value, 10) || 2;
+      const skel = document.getElementById('skel').checked ? 1 : 0;
+      const layout = document.getElementById('layoutMode').value;
+      return { mod, maxn, maxd, skel, layout };
+    }
+
+    function pushUrl() {
+      const { mod, maxn, maxd, skel, layout } = qsParams();
+      const u = new URL(window.location.href);
+      u.searchParams.set('module', mod);
+      u.searchParams.set('max_nodes', String(maxn));
+      u.searchParams.set('max_depth', String(maxd));
+      u.searchParams.set('skeleton', String(skel));
+      u.searchParams.set('layout', layout);
+      history.replaceState({}, '', u);
+    }
+
+    function showErr(msg) {
+      const el = document.getElementById('err');
+      el.style.display = msg ? 'block' : 'none';
+      el.textContent = msg || '';
+    }
+
+    function setMeta(layoutMode, edgeCount) {
+      const m = GRAPH_DATA.meta || {};
+      const modeLabel = layoutMode === 'tree' ? '层级树' : '力导向';
+      document.getElementById('meta').textContent =
+        'hints: ' + (m.hints || []).join(', ') +
+        ' | modules: ' + (m.modules || []).join(', ') +
+        ' | nodes: ' + (GRAPH_DATA.nodes || []).length +
+        ' | 显示边: ' + edgeCount + ' / 全量 ' + allEdgesFull.length +
+        ' | 布局: ' + modeLabel +
+        (m.skeleton_loaded ? ' | skeleton ids: ' + (m.skeleton_node_count || 0) : ' | skeleton: off');
+    }
+
+    function buildNetwork() {
+      const container = document.getElementById('network');
+      allEdgesFull = (GRAPH_DATA.edges || []).slice();
+      var layoutMode = document.getElementById('layoutMode').value;
+      var toUse = layoutMode === 'tree' ? filterTreeEdges(allEdgesFull) : allEdgesFull.slice();
+      if (layoutMode === 'tree' && toUse.length === 0) {
+        layoutMode = 'force';
+        toUse = allEdgesFull.slice();
+        document.getElementById('layoutMode').value = 'force';
+      }
+      const nd = decorateNodes(GRAPH_DATA.nodes || []);
+      if (network) network.destroy();
+      const nodes = new vis.DataSet(nd);
+      const edges = new vis.DataSet(toUse);
+      network = new vis.Network(container, { nodes: nodes, edges: edges }, buildOptions(layoutMode));
+      nodesDs = nodes;
+      setMeta(layoutMode, toUse.length);
+
+      if (layoutMode === 'force') {
+        network.once('stabilizationIterationsDone', function () { network.setOptions({ physics: false }); });
+      } else {
+        setTimeout(function () { network.fit({ animation: true }); }, 80);
+      }
+
+      document.getElementById('fit').onclick = function () { network.fit({ animation: true }); };
+      document.getElementById('exportJson').onclick = function () {
+        const blob = new Blob([JSON.stringify(GRAPH_DATA, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'cli_subgraph.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+    }
+
+    async function loadGraph() {
+      showErr('');
+      const { mod, maxn, maxd, skel } = qsParams();
+      pushUrl();
+      const url = '/api/subgraph?module=' + encodeURIComponent(mod) +
+        '&max_nodes=' + maxn + '&max_depth=' + maxd + '&skeleton=' + skel;
+      const r = await fetch(url);
+      if (!r.ok) {
+        showErr('HTTP ' + r.status + ': ' + (await r.text()).slice(0, 400));
+        return;
+      }
+      GRAPH_DATA = await r.json();
+      buildNetwork();
+    }
+
+    document.getElementById('load').onclick = loadGraph;
+    document.getElementById('layoutMode').addEventListener('change', function () {
+      if (nodesDs && GRAPH_DATA.nodes && GRAPH_DATA.nodes.length) {
+        pushUrl();
+        buildNetwork();
+      }
+    });
+
+    document.getElementById('search').addEventListener('input', function () {
+      if (!nodesDs) return;
+      const q = (this.value || '').trim().toLowerCase();
+      const all = nodesDs.get();
+      const upd = all.map(function (n) {
+        const lab = (n.label || '').toLowerCase();
+        const id = (n.id || '').toLowerCase();
+        const hide = q && lab.indexOf(q) < 0 && id.indexOf(q) < 0;
+        return { id: n.id, hidden: hide };
+      });
+      nodesDs.update(upd);
+    });
+
+    (function initFromUrl() {
+      const u = new URLSearchParams(window.location.search);
+      if (u.has('module')) document.getElementById('mod').value = u.get('module');
+      if (u.has('max_nodes')) document.getElementById('maxn').value = u.get('max_nodes');
+      if (u.has('max_depth')) document.getElementById('maxd').value = u.get('max_depth');
+      if (u.has('skeleton')) document.getElementById('skel').checked = u.get('skeleton') !== '0';
+      if (u.has('layout')) document.getElementById('layoutMode').value = u.get('layout') === 'force' ? 'force' : 'tree';
+    })();
+
+    loadGraph();
+  </script>
+</body>
+</html>
