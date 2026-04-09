@@ -514,9 +514,14 @@ def _cjk_overlap(kw: str, text: str, strict: bool = False) -> bool:
         return False
     if len(kw) >= 3 and any('\u4e00' <= c <= '\u9fff' for c in kw):
         for j in range(len(kw) - 1):
-            if kw[j:j+2] in text:
+            bg = kw[j:j+2]
+            if any('\u4e00' <= c <= '\u9fff' for c in bg) and bg in text:
                 return True
     return False
+
+
+_MODULE_HUB_THRESHOLD = 200
+_CJK_RELEVANCE_RATIO = 0.3
 
 
 def _graphrag_search(query: str, keywords: List[str]) -> Dict[str, Any]:
@@ -530,11 +535,47 @@ def _graphrag_search(query: str, keywords: List[str]) -> Dict[str, Any]:
     descs = (_gr_entities["description"].str.lower().tolist()
              if "description" in _gr_entities.columns else [""] * len(titles))
 
+    types = (_gr_entities["type"].str.upper().tolist()
+             if "type" in _gr_entities.columns else [""] * len(titles))
+
     matched_entities = []
     for kw in keywords:
         kw_lower = kw.lower()
-        use_strict = len(kw_lower) <= 3
+        # Pass 1: exact title match (works for SECTION entities whose title = section_title)
+        exact = None
         for i, t in enumerate(titles):
+            if str(t) == kw_lower:
+                exact = str(t)
+                break
+        if exact:
+            matched_entities.append(exact)
+            continue
+        # Pass 1.5: substring match for SECTION entities (length ratio guard)
+        if len(kw_lower) >= 4:
+            sub_match = None
+            sub_len = 0
+            for i, t in enumerate(titles):
+                if types[i] != "SECTION":
+                    continue
+                t_str = str(t)
+                shorter = min(len(kw_lower), len(t_str))
+                longer = max(len(kw_lower), len(t_str))
+                if shorter < 4 or shorter / longer < 0.3:
+                    continue
+                if kw_lower in t_str or t_str in kw_lower:
+                    if sub_match is None or len(t_str) < sub_len:
+                        sub_match = t_str
+                        sub_len = len(t_str)
+            if sub_match:
+                matched_entities.append(sub_match)
+                continue
+        # Pass 2: CJK overlap on COMMAND/MODULE entities only (skip SECTION/DOCUMENT)
+        use_strict = len(kw_lower) <= 3
+        if use_strict and not any('\u4e00' <= c <= '\u9fff' for c in kw_lower):
+            continue
+        for i, t in enumerate(titles):
+            if types[i] in ("SECTION", "DOCUMENT"):
+                continue
             if _cjk_overlap(kw_lower, str(t), strict=use_strict) or (
                 not use_strict and _cjk_overlap(kw_lower, str(descs[i]))
             ):
@@ -542,18 +583,31 @@ def _graphrag_search(query: str, keywords: List[str]) -> Dict[str, Any]:
                 break
 
     if matched_entities:
-        result["hit"] = True
         result["entity_matches"] = matched_entities[:5]
 
+    has_specific = False
     if _gr_rels is not None and matched_entities:
         src_col = "source" if "source" in _gr_rels.columns else "source_id"
         tgt_col = "target" if "target" in _gr_rels.columns else "target_id"
         rel_count = 0
         for ent in matched_entities[:3]:
             mask = (_gr_rels[src_col].str.lower() == ent) | (_gr_rels[tgt_col].str.lower() == ent)
-            rel_count += mask.sum()
-        result["rel_count"] = int(rel_count)
+            cnt = int(mask.sum())
+            rel_count += cnt
+            ent_type = ""
+            ent_mask = _gr_entities[title_col].str.lower() == ent
+            if ent_mask.any():
+                ent_type = str(_gr_entities.loc[ent_mask, "type"].iloc[0]).upper() if "type" in _gr_entities.columns else ""
+            if cnt > 0:
+                if ent_type == "DOCUMENT":
+                    pass
+                elif ent_type == "MODULE" and cnt > _MODULE_HUB_THRESHOLD:
+                    pass
+                else:
+                    has_specific = True
+        result["rel_count"] = rel_count
 
+    result["hit"] = bool(result["entity_matches"]) and result["rel_count"] > 0 and has_specific
     return result
 
 
@@ -590,6 +644,7 @@ def _extract_text_meta(text: str) -> tuple:
 def _vector_search(query: str, top_k: int = 10) -> Dict[str, Any]:
     _init_retriever()
     result = {"hit": False, "rank": None, "top1_cat": "", "top1_module": "",
+              "top1_command_prefix": "", "top1_section_title": "",
               "top3_snippets": [], "scores": [], "relevant": False}
     try:
         raw = _hybrid_retriever.query(query, top_k=top_k, return_detailed_info=True)
@@ -614,6 +669,8 @@ def _vector_search(query: str, top_k: int = 10) -> Dict[str, Any]:
             if i == 0:
                 result["top1_cat"] = meta.get("document_category", "")
                 result["top1_module"] = meta.get("product_module", "")
+                result["top1_command_prefix"] = meta.get("command_prefix", "")
+                result["top1_section_title"] = meta.get("section_title", "")
         for h in items[:5]:
             if isinstance(h, dict):
                 s = h.get("rrf_score", 0) or h.get("score", 0)
@@ -621,16 +678,18 @@ def _vector_search(query: str, top_k: int = 10) -> Dict[str, Any]:
                 s = 0
             result["scores"].append(round(float(s), 4) if s else 0)
         result["hit"] = top_score >= _VEC_HIT_THRESHOLD
-        top_module = result["top1_module"].lower()
         q_words = [w.lower() for w in query.split() if len(w) > 1]
-        module_match = top_module and any(
-            _cjk_overlap(w, top_module) or _cjk_overlap(top_module, w)
-            for w in q_words if len(w) >= 2
-        )
-        title_match = any(
-            _cjk_overlap(w, all_text, strict=(len(w) <= 2)) for w in q_words
-        )
-        result["relevant"] = result["hit"] and (module_match or title_match)
+        has_cjk_q = any('\u4e00' <= c <= '\u9fff' for c in query)
+        if has_cjk_q:
+            q_cjk = [c for c in query.lower() if '\u4e00' <= c <= '\u9fff']
+            if q_cjk:
+                matched_c = sum(1 for c in q_cjk if c in all_text)
+                title_match = matched_c >= max(2, len(q_cjk) * _CJK_RELEVANCE_RATIO)
+            else:
+                title_match = True
+        else:
+            title_match = any(w in all_text for w in q_words if len(w) >= 2)
+        result["relevant"] = result["hit"] and title_match
     except Exception as exc:
         logger.warning("Vector search error: %s", exc)
     return result
@@ -696,27 +755,38 @@ def _ct_lookup_fuzzy(section_title: str, ct_data: list) -> Dict[str, Any]:
     import re
     cleaned = re.sub(r"\{[^}]*\}", "", section_title).strip()
     title_lower = cleaned.lower()
-    title_words = title_lower.split()
+    title_norm = title_lower.replace("_", " ")
+    title_words = title_norm.split()
     if not title_words:
         return {"found": False, "content_len": 0, "module": "", "snippet": ""}
     for entry in ct_data:
         m = entry.get("metadata", {})
         prefix = m.get("command_prefix", "").lower()
-        if prefix == title_lower:
+        prefix_norm = prefix.replace("_", " ")
+        if prefix_norm == title_norm or prefix == title_lower:
             pc = entry.get("page_content", "")
             return {"found": True, "content_len": len(pc),
                     "module": m.get("product_module", ""), "snippet": pc[:120]}
+    if len(title_words) < 2:
+        return {"found": False, "content_len": 0, "module": "", "snippet": ""}
     best = None
     best_score = 0
     for entry in ct_data:
         m = entry.get("metadata", {})
-        prefix = m.get("command_prefix", "").lower()
+        prefix = m.get("command_prefix", "").lower().replace("_", " ")
         prefix_words = prefix.split()
         if not prefix_words:
             continue
+        if title_norm.startswith(prefix + " ") or prefix.startswith(title_norm + " "):
+            pc = entry.get("page_content", "")
+            score = min(len(prefix_words), len(title_words)) / max(len(prefix_words), len(title_words))
+            if score > best_score:
+                best = entry
+                best_score = score
+            continue
         common = sum(1 for w in title_words if w in prefix_words)
         score = common / max(len(title_words), len(prefix_words))
-        if score > best_score and score >= 0.5:
+        if score > best_score and score >= 0.7:
             best = entry
             best_score = score
     if best:
@@ -758,14 +828,32 @@ def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
         module = m.get("product_module", "")
         query = section + " " + module
 
-        s1 = {"found": True, "content_len": len(entry.get("page_content", "")),
-              "snippet": entry.get("page_content", "")[:120]}
+        _pc = entry.get("page_content", "")
+        s1 = {"found": len(_pc) >= 80,
+              "content_len": len(_pc), "snippet": _pc[:120]}
         cmd_prefix = m.get("command_prefix", "")
-        if cmd_prefix:
+        s2 = _ct_lookup_fuzzy(section, ct_data)
+        if not s2["found"] and cmd_prefix and cmd_prefix.lower() != section.lower():
             s2 = _ct_lookup_fuzzy(cmd_prefix, ct_data)
-        else:
-            s2 = _ct_lookup_fuzzy(section, ct_data)
         s3 = _vector_search(query, top_k=10)
+        _top1_cp = s3.get("top1_command_prefix", "").lower().replace("_", " ")
+        _top1_title = s3.get("top1_section_title", "").lower()
+        _target_cp = section.lower().replace("_", " ")
+        _target_words = {w for w in _target_cp.split() if len(w) >= 2}
+        _has_cjk = any('\u4e00' <= c <= '\u9fff' for c in _target_cp)
+        if s3["hit"]:
+            top_text = (_top1_cp + " " + _top1_title + " " +
+                        " ".join(s3.get("top3_snippets", []))).lower()
+            if _has_cjk:
+                target_cjk = [c for c in _target_cp if '\u4e00' <= c <= '\u9fff']
+                if target_cjk:
+                    matched = sum(1 for c in target_cjk if c in top_text)
+                    s3["relevant"] = matched >= max(2, len(target_cjk) * _CJK_RELEVANCE_RATIO)
+                else:
+                    s3["relevant"] = True
+            elif _target_words:
+                matched_words = sum(1 for w in _target_words if w in top_text)
+                s3["relevant"] = matched_words >= max(1, len(_target_words) * 0.5)
         kws = section.split()[:3] + ([module] if module else [])
         s4 = _graphrag_search(query, kws)
 
@@ -778,6 +866,7 @@ def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
 
         results.append({
             "cmd": section, "module": module, "tree_level": tree_level,
+            "query": query, "kws": kws,
             "s1_pdf": s1, "s2_ct": s2, "s3_vec": s3, "s4_gr": s4,
         })
     return results
@@ -848,8 +937,8 @@ def run_app_4way(app_blocks: list, ct_data: list, count: int, seed: int,
         pc = entry.get("page_content", "")
         query, kws = _enrich_generic_query(section, module, path, content=pc)
 
-        s1 = {"found": True, "content_len": len(pc),
-              "snippet": pc[:150]}
+        s1 = {"found": len(pc) >= 80,
+              "content_len": len(pc), "snippet": pc[:150]}
 
         bid = m.get("block_id") or m.get("chunk_id") or ""
         src = m.get("source_file", "")
@@ -868,6 +957,7 @@ def run_app_4way(app_blocks: list, ct_data: list, count: int, seed: int,
         results.append({
             "section": section, "module": module, "path": path,
             "tree_level": tree_level, "label": label,
+            "query": query.strip(), "kws": kws,
             "s1_src": s1, "s2_tree": s2_tree, "s3_vec": s3, "s4_gr": s4,
         })
     return results
@@ -898,8 +988,8 @@ def run_arch_4way(arch_blocks: list, count: int, seed: int):
         pc = entry.get("page_content", "")
         query, kws = _enrich_generic_query(section, module, path, content=pc)
 
-        s1 = {"found": True, "content_len": len(pc),
-              "snippet": pc[:150]}
+        s1 = {"found": len(pc) >= 80,
+              "content_len": len(pc), "snippet": pc[:150]}
 
         bid = m.get("block_id") or m.get("chunk_id") or ""
         src = m.get("source_file", "")
@@ -917,6 +1007,7 @@ def run_arch_4way(arch_blocks: list, count: int, seed: int):
         results.append({
             "section": section, "module": module, "path": path,
             "tree_level": tree_level,
+            "query": query.strip(), "kws": kws,
             "s1_src": s1, "s2_tree": s2_tree, "s3_vec": s3, "s4_gr": s4,
         })
     return results
@@ -1001,6 +1092,120 @@ def print_pipeline_summary(farm_stats: Dict, kb_size: int):
                    f"gaps={stats.get('gaps',0)}")
     tprint(f"  最终 knowledge_base.json: {kb_size} chunks")
     tprint("=" * 70)
+
+
+def export_detail_md(all_results: Dict[str, list], md_path: Path):
+    PASS_ICON, WARN_ICON, FAIL_ICON = "✅", "⚠️", "❌"
+    lines: list[str] = []
+    w = lines.append
+
+    w("# 4-way 检索详情报告")
+    w("")
+    w(f"> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    w("")
+
+    for track_name, results in all_results.items():
+        w(f"## {track_name} ({len(results)} entries)")
+        w("")
+
+        for i, r in enumerate(results):
+            label = r.get("cmd", r.get("section", "?"))
+            module = r.get("module", "?")
+            tl = r.get("tree_level", "?")
+            query = r.get("query", "")
+            kws = r.get("kws", [])
+
+            s1 = r.get("s1_pdf", r.get("s1_src", {}))
+            s3 = r["s3_vec"]
+            s4 = r["s4_gr"]
+
+            s1_ok = s1.get("found", False)
+            s3_hit = s3.get("hit", False)
+            s3_rel = s3.get("relevant", False)
+            s4_hit = s4.get("hit", False)
+
+            if "s2_ct" in r:
+                s2 = r["s2_ct"]
+                s2_ok = s2.get("found", False)
+                s2_label = "CommandTree"
+            elif "s2_tree" in r:
+                s2 = r["s2_tree"]
+                s2_ok = s2.get("valid", False)
+                s2_label = "TreeLevel"
+            else:
+                s2 = {}
+                s2_ok = False
+                s2_label = "?"
+
+            verdict = f"S1:{PASS_ICON if s1_ok else FAIL_ICON} " \
+                       f"S2:{PASS_ICON if s2_ok else FAIL_ICON} " \
+                       f"S3:{PASS_ICON if s3_rel else (WARN_ICON if s3_hit else FAIL_ICON)} " \
+                       f"S4:{PASS_ICON if s4_hit else FAIL_ICON}"
+
+            w(f"### {i+1}. {label}")
+            w("")
+            w(f"| 属性 | 值 |")
+            w(f"|------|------|")
+            w(f"| 模块 | `{module}` |")
+            w(f"| 树层级 | `{tl}` |")
+            w(f"| 判定 | {verdict} |")
+            w(f"| 检索 query | `{query}` |")
+            w(f"| 检索 keywords | `{kws}` |")
+            w("")
+
+            w(f"#### S1 原文内容 ({s2_label})")
+            w("")
+            w(f"- 长度: {s1.get('content_len', 0)} 字符")
+            snippet = s1.get("snippet", "")
+            if snippet:
+                w(f"- 片段:")
+                w(f"  ```")
+                w(f"  {snippet}")
+                w(f"  ```")
+            w("")
+
+            w(f"#### S2 {s2_label} 查找")
+            w("")
+            if s2_label == "CommandTree":
+                w(f"- 命中: {PASS_ICON if s2_ok else FAIL_ICON}")
+                w(f"- 内容长度: {s2.get('content_len', 0)}")
+                ct_snippet = s2.get("snippet", "")
+                if ct_snippet:
+                    w(f"- 片段: `{ct_snippet[:80]}`")
+            else:
+                w(f"- 有效: {PASS_ICON if s2_ok else FAIL_ICON}")
+                w(f"- tree_level: `{s2.get('tree_level', '?')}`")
+                w(f"- document_category: `{s2.get('doc_category', '?')}`")
+            w("")
+
+            w(f"#### S3 向量检索")
+            w("")
+            scores = s3.get("scores", [])
+            w(f"- 命中: {PASS_ICON if s3_hit else FAIL_ICON}  相关: {PASS_ICON if s3_rel else (WARN_ICON if s3_hit else FAIL_ICON)}")
+            w(f"- Top scores: `{scores[:5]}`")
+            w(f"- Top1 module: `{s3.get('top1_module', '')}`")
+            w(f"- Top1 command_prefix: `{s3.get('top1_command_prefix', '')}`")
+            w(f"- Top1 section_title: `{s3.get('top1_section_title', '')}`")
+            w(f"- Top1 category: `{s3.get('top1_cat', '')}`")
+            snippets = s3.get("top3_snippets", [])
+            if snippets:
+                w(f"- Top3 片段:")
+                for si, snip in enumerate(snippets):
+                    w(f"  {si+1}. `{snip}`")
+            w("")
+
+            w(f"#### S4 GraphRAG")
+            w("")
+            w(f"- 命中: {PASS_ICON if s4_hit else FAIL_ICON}")
+            w(f"- 匹配实体: `{s4.get('entity_matches', [])}`")
+            w(f"- 关系数: {s4.get('rel_count', 0)}")
+            w("")
+            w("---")
+            w("")
+
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    logger.info("详情 MD 已写入: %s", md_path)
 
 
 def print_final_summary(all_totals: Dict[str, Dict]):
@@ -1153,12 +1358,44 @@ def main():
     # 综合评估
     print_final_summary(all_totals)
 
+    # 详情 MD 导出
+    all_detail_results = {}
+    if "CLI" in all_totals and cli_ref.exists():
+        all_detail_results["CLI"] = cli_results
+    if "APP" in all_totals and app_ref.exists():
+        all_detail_results["APP"] = app_results
+    if "ARCH" in all_totals and arch_ref.exists():
+        all_detail_results["ARCH"] = arch_results
+    if "HA-SLB" in all_totals and haslb_ref.exists():
+        all_detail_results["HA-SLB"] = haslb_results
+    if all_detail_results:
+        export_detail_md(all_detail_results, LOGS_DIR / "4way_detail.md")
+
     elapsed = time.perf_counter() - start_time
     logger.info("总耗时: %.1f 秒 (%.1f 分钟)", elapsed, elapsed / 60)
 
     if _report_file:
         _report_file.close()
         logger.info("报告已写入: %s", LOGS_DIR / "4way_report.txt")
+
+    _cleanup_qdrant()
+
+
+def _cleanup_qdrant():
+    global _hybrid_retriever
+    if _hybrid_retriever is None:
+        return
+    try:
+        vr = getattr(_hybrid_retriever, "vr", None)
+        if vr is not None:
+            storage = getattr(vr, "storage", None)
+            if storage is not None:
+                client = getattr(storage, "_client", None)
+                if client is not None:
+                    client.close()
+    except Exception:
+        pass
+    _hybrid_retriever = None
 
 
 if __name__ == "__main__":

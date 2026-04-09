@@ -1,8 +1,12 @@
 """
-从 cli_keyword_graph.json 直接生成 GraphRAG parquet 文件。
+从 cli_keyword_graph.json + knowledge_base.json 构建全产品知识图谱。
 
-零 LLM 调用：利用已有的图结构（5505 nodes, 25750 edges）直接转换为
-GraphRAG 格式，替代昂贵的 LLM 实体提取流程。
+零 LLM 调用：
+  - CLI graph nodes → COMMAND / MODULE 实体 + 命令间关系
+  - KB 元数据 → SECTION / DOCUMENT 实体 + 语义关系
+    (BELONGS_TO, FROM_DOCUMENT, PARENT_OF, REFERENCES_COMMAND)
+  - 每个 KB chunk → 独立 text_unit（细粒度）
+  - MODULE 级社区 + DOCUMENT 级社区
 
 用法:
     python -m INAGENT.scripts.build_graphrag_from_graph
@@ -112,25 +116,23 @@ def build():
         if nid:
             nodes_by_id[nid].append(n)
 
-    # Load KB for text_units
     kb = json.loads(_KB_PATH.read_text("utf-8"))
-    kb_by_nid = {}
-    for entry in kb:
-        nid = entry.get("metadata", {}).get("node_id", "")
-        if nid:
-            kb_by_nid[nid] = entry
+    print(f"  KB entries: {len(kb)}")
 
-    # --- Entities ---
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase A: Entities
+    # ═══════════════════════════════════════════════════════════════════
+
     seen_ids = set()
     entity_rows = []
-    node_to_entity_id = {}
+    node_to_entity_id = {}  # key (lowercase) → entity id (sha256)
 
+    # A1: CLI graph nodes → COMMAND / MODULE entities
     for node in nodes:
         nid = node.get("id", "")
         if not nid or nid in seen_ids:
             continue
         seen_ids.add(nid)
-
         eid = _sha256(nid)
         node_to_entity_id[nid] = eid
         entity_rows.append({
@@ -145,12 +147,12 @@ def build():
             "x": 0,
             "y": 0,
         })
+    cli_entity_count = len(entity_rows)
+    print(f"  CLI entities: {cli_entity_count}")
 
-    print(f"  Entities: {len(entity_rows)}")
-
-    # Enrich module entities with overview snippets from KB
     entity_title_to_idx = {r["title"].lower(): i for i, r in enumerate(entity_rows)}
-    overview_count = 0
+
+    # A2: Enrich MODULE entities with KB overview snippets
     enriched_entities = set()
     for entry in kb:
         em = entry.get("metadata", {})
@@ -159,8 +161,7 @@ def build():
             continue
         mod = em.get("product_module", "")
         nid = em.get("node_id", "")
-        candidates = [nid, mod] if nid else [mod]
-        for cand in candidates:
+        for cand in ([nid, mod] if nid else [mod]):
             if not cand:
                 continue
             idx = entity_title_to_idx.get(cand.lower())
@@ -169,182 +170,440 @@ def build():
                 if snippet:
                     cur = entity_rows[idx]["description"]
                     entity_rows[idx]["description"] = f"{cur}. 概述: {snippet}"
-                    overview_count += 1
                     enriched_entities.add(idx)
                 break
-    if overview_count:
-        print(f"  Overview-enriched entities: {overview_count}")
 
-    # --- Relationships ---
+    # A3: DOCUMENT entities (from source_file)
+    doc_source_files = sorted({
+        e.get("metadata", {}).get("source_file", "")
+        for e in kb if e.get("metadata", {}).get("source_file", "")
+    })
+    doc_entity_ids = {}  # source_file → entity_id
+    for sf in doc_source_files:
+        eid = _sha256(f"doc::{sf}")
+        doc_entity_ids[sf] = eid
+        idx = len(entity_rows)
+        entity_rows.append({
+            "id": eid,
+            "human_readable_id": idx,
+            "title": sf,
+            "type": "DOCUMENT",
+            "description": f"产品文档: {sf}",
+            "text_unit_ids": [],
+            "frequency": 1,
+            "degree": 0,
+            "x": 0,
+            "y": 0,
+        })
+        entity_title_to_idx[sf.lower()] = idx
+    print(f"  DOCUMENT entities: {len(doc_source_files)}")
+
+    # A4: SECTION entities (from KB section_title, deduped by (source_file, section_title))
+    # Pre-scan: collect longest page_content per section_title for description
+    _best_section_desc = {}  # title_lower → longest page_content[:500]
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        title = meta.get("section_title", "").strip()
+        if not title:
+            continue
+        content = entry.get("page_content", "").strip()
+        title_lower = title.lower()
+        prev = _best_section_desc.get(title_lower, "")
+        if len(content) > len(prev):
+            _best_section_desc[title_lower] = content[:500]
+
+    section_entity_ids = {}  # (source_file, section_title) → entity_id
+    section_count = 0
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        title = meta.get("section_title", "").strip()
+        sf = meta.get("source_file", "")
+        if not title:
+            continue
+        sec_key = (sf, title)
+        if sec_key in section_entity_ids:
+            continue
+        title_lower = title.lower()
+        if title_lower in entity_title_to_idx:
+            section_entity_ids[sec_key] = entity_rows[entity_title_to_idx[title_lower]]["id"]
+            continue
+        eid = _sha256(f"sec::{sf}::{title}")
+        idx = len(entity_rows)
+        desc = _best_section_desc.get(title_lower, "")[:300].strip()
+        entity_rows.append({
+            "id": eid,
+            "human_readable_id": idx,
+            "title": title,
+            "type": "SECTION",
+            "description": desc,
+            "text_unit_ids": [],
+            "frequency": 1,
+            "degree": 0,
+            "x": 0,
+            "y": 0,
+        })
+        entity_title_to_idx[title_lower] = idx
+        section_entity_ids[sec_key] = eid
+        section_count += 1
+    print(f"  SECTION entities: {section_count}")
+
+    # A5: MODULE entities from KB that don't exist in CLI graph
+    kb_modules = sorted({
+        e.get("metadata", {}).get("product_module", "")
+        for e in kb if e.get("metadata", {}).get("product_module", "")
+    })
+    new_mod_count = 0
+    for mod in kb_modules:
+        if mod.lower() in entity_title_to_idx:
+            continue
+        eid = _sha256(f"kbmod::{mod}")
+        idx = len(entity_rows)
+        entity_rows.append({
+            "id": eid,
+            "human_readable_id": idx,
+            "title": mod,
+            "type": "MODULE",
+            "description": f"产品模块: {mod}",
+            "text_unit_ids": [],
+            "frequency": 1,
+            "degree": 0,
+            "x": 0,
+            "y": 0,
+        })
+        entity_title_to_idx[mod.lower()] = idx
+        node_to_entity_id[mod.lower()] = eid
+        new_mod_count += 1
+    if new_mod_count:
+        print(f"  KB-only MODULE entities: {new_mod_count}")
+
+    print(f"  Total entities: {len(entity_rows)}")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase B: Relationships
+    # ═══════════════════════════════════════════════════════════════════
+
     degree_counter = defaultdict(int)
     rel_rows = []
     seen_edges = set()
 
-    for edge in edges:
-        src = edge.get("source", "")
-        tgt = edge.get("target", "")
-        if not src or not tgt:
-            continue
-        edge_key = (src, tgt)
+    def _add_rel(src_title: str, tgt_title: str, rel_type: str, desc: str):
+        if src_title.lower() == tgt_title.lower():
+            return
+        edge_key = (src_title.lower(), tgt_title.lower(), rel_type)
         if edge_key in seen_edges:
-            continue
+            return
         seen_edges.add(edge_key)
-
-        if src not in node_to_entity_id or tgt not in node_to_entity_id:
-            continue
-
-        degree_counter[src] += 1
-        degree_counter[tgt] += 1
-
+        degree_counter[src_title.lower()] += 1
+        degree_counter[tgt_title.lower()] += 1
         rel_rows.append({
-            "id": _sha256(f"{src}->{tgt}"),
+            "id": _sha256(f"{src_title}->{tgt_title}::{rel_type}"),
             "human_readable_id": len(rel_rows),
-            "source": src.upper(),
-            "target": tgt.upper(),
-            "description": _edge_description(edge, nodes_by_id),
+            "source": src_title,
+            "target": tgt_title,
+            "description": desc,
             "weight": 1.0,
             "combined_degree": 0,
             "text_unit_ids": [],
         })
 
-    # Update degree
+    # B1: CLI graph edges (COMMAND → COMMAND)
+    for edge in edges:
+        src = edge.get("source", "")
+        tgt = edge.get("target", "")
+        if not src or not tgt:
+            continue
+        if src not in node_to_entity_id or tgt not in node_to_entity_id:
+            continue
+        _add_rel(src.upper(), tgt.upper(), "CLI_EDGE",
+                 _edge_description(edge, nodes_by_id))
+    cli_rel_count = len(rel_rows)
+
+    # B2: SECTION → MODULE (BELONGS_TO)
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        title = meta.get("section_title", "").strip()
+        mod = meta.get("product_module", "")
+        sf = meta.get("source_file", "")
+        if not title or not mod:
+            continue
+        sec_key = (sf, title)
+        sec_eid = section_entity_ids.get(sec_key)
+        if not sec_eid:
+            continue
+        sec_title = entity_rows[entity_title_to_idx[title.lower()]]["title"]
+        mod_idx = entity_title_to_idx.get(mod.lower())
+        if mod_idx is not None:
+            mod_title = entity_rows[mod_idx]["title"]
+            _add_rel(sec_title, mod_title, "BELONGS_TO",
+                     f"{sec_title} 属于模块 {mod_title}")
+
+    # B3: SECTION → DOCUMENT (FROM_DOCUMENT)
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        title = meta.get("section_title", "").strip()
+        sf = meta.get("source_file", "")
+        if not title or not sf:
+            continue
+        sec_idx = entity_title_to_idx.get(title.lower())
+        if sec_idx is None:
+            continue
+        sec_title = entity_rows[sec_idx]["title"]
+        if sf in doc_entity_ids:
+            _add_rel(sec_title, sf, "FROM_DOCUMENT",
+                     f"{sec_title} 来自文档 {sf}")
+
+    # B4: SECTION → SECTION (PARENT_OF, from section_path hierarchy)
+    seen_parent_rels = set()
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        path = meta.get("section_path", "")
+        if not path:
+            continue
+        parts = [p.strip() for p in path.replace(">", "/").split("/") if p.strip()]
+        for i in range(len(parts) - 1):
+            parent = parts[i]
+            child = parts[i + 1]
+            pkey = (parent.lower(), child.lower())
+            if pkey in seen_parent_rels:
+                continue
+            seen_parent_rels.add(pkey)
+            p_idx = entity_title_to_idx.get(parent.lower())
+            c_idx = entity_title_to_idx.get(child.lower())
+            if p_idx is not None and c_idx is not None:
+                p_title = entity_rows[p_idx]["title"]
+                c_title = entity_rows[c_idx]["title"]
+                _add_rel(p_title, c_title, "PARENT_OF",
+                         f"{p_title} 包含子章节 {c_title}")
+
+    # B5: SECTION → COMMAND (REFERENCES_COMMAND, from command_prefix)
+    for entry in kb:
+        meta = entry.get("metadata", {})
+        title = meta.get("section_title", "").strip()
+        cp = meta.get("command_prefix", "").strip()
+        if not title or not cp:
+            continue
+        sec_idx = entity_title_to_idx.get(title.lower())
+        cmd_idx = entity_title_to_idx.get(cp.lower())
+        if sec_idx is not None and cmd_idx is not None and sec_idx != cmd_idx:
+            sec_title = entity_rows[sec_idx]["title"]
+            cmd_title = entity_rows[cmd_idx]["title"]
+            _add_rel(sec_title, cmd_title, "REFERENCES_COMMAND",
+                     f"{sec_title} 引用命令 {cmd_title}")
+
+    kb_rel_count = len(rel_rows) - cli_rel_count
+
+    # Update degree on entities
     entity_id_to_idx = {r["id"]: i for i, r in enumerate(entity_rows)}
-    for nid, deg in degree_counter.items():
-        eid = node_to_entity_id.get(nid)
-        if eid and eid in entity_id_to_idx:
-            entity_rows[entity_id_to_idx[eid]]["degree"] = deg
+    for nid_lower, deg in degree_counter.items():
+        idx = entity_title_to_idx.get(nid_lower)
+        if idx is not None:
+            entity_rows[idx]["degree"] += deg
 
-    # Update combined_degree for relationships
     for rel in rel_rows:
-        src_nid = rel["source"].lower()
-        tgt_nid = rel["target"].lower()
-        rel["combined_degree"] = degree_counter.get(src_nid, 0) + degree_counter.get(tgt_nid, 0)
+        src_lower = rel["source"].lower()
+        tgt_lower = rel["target"].lower()
+        rel["combined_degree"] = degree_counter.get(src_lower, 0) + degree_counter.get(tgt_lower, 0)
 
-    print(f"  Relationships: {len(rel_rows)}")
+    print(f"  Relationships: {len(rel_rows)} (CLI: {cli_rel_count}, KB: {kb_rel_count})")
 
-    # --- Text Units (from KB) ---
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase C: Text Units (fine-grained, one per KB chunk)
+    # ═══════════════════════════════════════════════════════════════════
+
     tu_rows = []
     doc_rows = []
-    modules = defaultdict(list)
-    for entry in kb:
-        m = entry.get("metadata", {})
-        mod = m.get("product_module", "unknown")
-        modules[mod].append(entry)
+    tu_id_by_kb_idx = {}  # kb list index → text_unit id
+
+    source_file_entries = defaultdict(list)
+    for i, entry in enumerate(kb):
+        sf = entry.get("metadata", {}).get("source_file", "unknown")
+        source_file_entries[sf].append((i, entry))
 
     doc_id_counter = 0
-    for mod, entries in sorted(modules.items()):
+    for sf, entries_with_idx in sorted(source_file_entries.items()):
         doc_id = f"doc_{doc_id_counter:04d}"
         doc_id_counter += 1
+        tu_ids_in_doc = []
 
-        texts = []
-        entity_ids_in_doc = []
-        rel_ids_in_doc = []
-
-        for entry in entries:
-            nid = entry.get("metadata", {}).get("node_id", "")
+        for kb_idx, entry in entries_with_idx:
+            meta = entry.get("metadata", {})
             text = entry.get("page_content", "")
-            texts.append(text)
+            if not text.strip():
+                continue
 
-            eid = node_to_entity_id.get(nid)
-            if eid:
-                entity_ids_in_doc.append(eid)
+            tu_id = _sha256(f"tu::{kb_idx}::{text[:100]}")
+            tu_id_by_kb_idx[kb_idx] = tu_id
 
-        full_text = "\n\n".join(texts)
-        tu_id = _sha256(full_text)
+            linked_eids = []
+            title = meta.get("section_title", "").strip()
+            if title:
+                idx = entity_title_to_idx.get(title.lower())
+                if idx is not None:
+                    linked_eids.append(entity_rows[idx]["id"])
+            nid = meta.get("node_id", "")
+            if nid:
+                eid = node_to_entity_id.get(nid)
+                if eid and eid not in linked_eids:
+                    linked_eids.append(eid)
+            cp = meta.get("command_prefix", "").strip()
+            if cp:
+                cp_idx = entity_title_to_idx.get(cp.upper().lower())
+                if cp_idx is not None:
+                    cp_eid = entity_rows[cp_idx]["id"]
+                    if cp_eid not in linked_eids:
+                        linked_eids.append(cp_eid)
+            mod = meta.get("product_module", "")
+            if mod:
+                mod_idx = entity_title_to_idx.get(mod.lower())
+                if mod_idx is not None:
+                    mod_eid = entity_rows[mod_idx]["id"]
+                    if mod_eid not in linked_eids:
+                        linked_eids.append(mod_eid)
 
-        tu_rows.append({
-            "id": tu_id,
-            "text": full_text,
-            "document_ids": [doc_id],
-            "n_tokens": len(full_text) // 3,
-            "entity_ids": entity_ids_in_doc,
-            "relationship_ids": rel_ids_in_doc,
-        })
+            tu_rows.append({
+                "id": tu_id,
+                "text": text,
+                "document_ids": [doc_id],
+                "n_tokens": len(text) // 3,
+                "entity_ids": linked_eids,
+                "relationship_ids": [],
+            })
+            tu_ids_in_doc.append(tu_id)
+
+            for eid in linked_eids:
+                eidx = entity_id_to_idx.get(eid)
+                if eidx is not None:
+                    entity_rows[eidx]["text_unit_ids"].append(tu_id)
 
         doc_rows.append({
             "id": doc_id,
             "human_readable_id": doc_id_counter - 1,
-            "title": f"module_{mod}",
-            "text": full_text,
-            "text_unit_ids": [tu_id],
-            "creation_date": "2026-04-04",
+            "title": sf,
+            "text": "",
+            "text_unit_ids": tu_ids_in_doc,
+            "creation_date": "2026-04-08",
         })
 
-        # Link entities to text units
-        for eid in entity_ids_in_doc:
-            idx = entity_id_to_idx.get(eid)
-            if idx is not None:
-                entity_rows[idx]["text_unit_ids"].append(tu_id)
-
     # Link relationships to text units
-    # For each rel, find text units that contain both source and target entities
-    entity_to_tu = {}
-    for i, er in enumerate(entity_rows):
-        entity_to_tu[er["id"]] = set(er["text_unit_ids"])
+    entity_to_tus = {}
+    for er in entity_rows:
+        entity_to_tus[er["id"]] = set(er["text_unit_ids"])
 
     for rel in rel_rows:
-        src_eid = node_to_entity_id.get(rel["source"].lower())
-        tgt_eid = node_to_entity_id.get(rel["target"].lower())
-        if src_eid and tgt_eid:
-            common_tus = entity_to_tu.get(src_eid, set()) & entity_to_tu.get(tgt_eid, set())
-            if common_tus:
-                rel["text_unit_ids"] = list(common_tus)
-            else:
-                src_tus = entity_to_tu.get(src_eid, set())
-                tgt_tus = entity_to_tu.get(tgt_eid, set())
-                rel["text_unit_ids"] = list(src_tus | tgt_tus)[:1]
+        src_idx = entity_title_to_idx.get(rel["source"].lower())
+        tgt_idx = entity_title_to_idx.get(rel["target"].lower())
+        if src_idx is None or tgt_idx is None:
+            continue
+        src_eid = entity_rows[src_idx]["id"]
+        tgt_eid = entity_rows[tgt_idx]["id"]
+        common = entity_to_tus.get(src_eid, set()) & entity_to_tus.get(tgt_eid, set())
+        if common:
+            rel["text_unit_ids"] = list(common)[:3]
+        else:
+            union = entity_to_tus.get(src_eid, set()) | entity_to_tus.get(tgt_eid, set())
+            rel["text_unit_ids"] = list(union)[:1]
 
     print(f"  Text Units: {len(tu_rows)}")
     print(f"  Documents: {len(doc_rows)}")
 
-    # --- Communities (simple module-based) ---
+    # ═══════════════════════════════════════════════════════════════════
+    # Phase D: Communities (MODULE-level + DOCUMENT-level)
+    # ═══════════════════════════════════════════════════════════════════
+
     comm_rows = []
     comm_report_rows = []
-    for comm_id, (mod, entries) in enumerate(sorted(modules.items())):
-        eids = []
+    comm_id = 0
+
+    # D1: MODULE communities (level=0)
+    modules = defaultdict(list)
+    for entry in kb:
+        mod = entry.get("metadata", {}).get("product_module", "unknown")
+        modules[mod].append(entry)
+
+    for mod, entries in sorted(modules.items()):
+        eids = set()
         for entry in entries:
             nid = entry.get("metadata", {}).get("node_id", "")
-            eid = node_to_entity_id.get(nid)
-            if eid:
-                eids.append(eid)
-
+            if nid:
+                eid = node_to_entity_id.get(nid)
+                if eid:
+                    eids.add(eid)
+            title = entry.get("metadata", {}).get("section_title", "").strip()
+            if title:
+                idx = entity_title_to_idx.get(title.lower())
+                if idx is not None:
+                    eids.add(entity_rows[idx]["id"])
         if not eids:
             continue
-
-        rel_ids = []
-        top_cmds = [e.get("metadata", {}).get("command_prefix", "") for e in entries[:5]]
-
-        cid = _sha256(f"community_{comm_id}")
+        top_titles = []
+        seen = set()
+        for e in entries[:10]:
+            t = e.get("metadata", {}).get("section_title", "")
+            if t and t not in seen:
+                top_titles.append(t)
+                seen.add(t)
+                if len(top_titles) >= 5:
+                    break
+        cid = _sha256(f"community_mod_{comm_id}")
+        eids_list = list(eids)
         comm_rows.append({
-            "id": cid,
-            "community": comm_id,
-            "level": 0,
+            "id": cid, "community": comm_id, "level": 0,
             "title": f"Module: {mod}",
-            "entity_ids": eids,
-            "relationship_ids": rel_ids,
-            "text_unit_ids": [],
-            "period": "",
-            "size": len(eids),
+            "entity_ids": eids_list, "relationship_ids": [],
+            "text_unit_ids": [], "period": "", "size": len(eids_list),
         })
-
         comm_report_rows.append({
-            "id": cid,
-            "community": comm_id,
-            "level": 0,
+            "id": cid, "community": comm_id, "level": 0,
             "title": f"Module: {mod}",
-            "summary": f"模块 {mod} 包含 {len(eids)} 个CLI命令实体。主要命令: {', '.join(top_cmds)}",
-            "full_content": f"模块 {mod} 的命令集合, 包含 {len(eids)} 个命令。",
-            "rank": len(eids),
-            "rank_explanation": f"命令数量: {len(eids)}",
-            "findings": [],
-            "full_content_json": "",
-            "period": "",
-            "size": len(eids),
+            "summary": f"模块 {mod} 包含 {len(eids_list)} 个实体。主要章节: {', '.join(top_titles)}",
+            "full_content": f"模块 {mod} 的知识集合。",
+            "rank": len(eids_list),
+            "rank_explanation": f"实体数量: {len(eids_list)}",
+            "findings": [], "full_content_json": "",
+            "period": "", "size": len(eids_list),
         })
+        comm_id += 1
+
+    # D2: DOCUMENT communities (level=1)
+    for sf in doc_source_files:
+        eids = set()
+        sf_entries = source_file_entries.get(sf, [])
+        for _, entry in sf_entries:
+            title = entry.get("metadata", {}).get("section_title", "").strip()
+            if title:
+                idx = entity_title_to_idx.get(title.lower())
+                if idx is not None:
+                    eids.add(entity_rows[idx]["id"])
+        if sf in doc_entity_ids:
+            eids.add(doc_entity_ids[sf])
+        if not eids:
+            continue
+        cid = _sha256(f"community_doc_{comm_id}")
+        eids_list = list(eids)
+        comm_rows.append({
+            "id": cid, "community": comm_id, "level": 1,
+            "title": f"Document: {sf}",
+            "entity_ids": eids_list, "relationship_ids": [],
+            "text_unit_ids": [], "period": "", "size": len(eids_list),
+        })
+        comm_report_rows.append({
+            "id": cid, "community": comm_id, "level": 1,
+            "title": f"Document: {sf}",
+            "summary": f"文档 {sf} 包含 {len(sf_entries)} 个知识块, {len(eids_list)} 个实体。",
+            "full_content": f"文档 {sf} 的知识集合。",
+            "rank": len(eids_list),
+            "rank_explanation": f"实体数量: {len(eids_list)}",
+            "findings": [], "full_content_json": "",
+            "period": "", "size": len(eids_list),
+        })
+        comm_id += 1
 
     print(f"  Communities: {len(comm_rows)}")
 
-    # --- Write Parquet Files ---
+    # ═══════════════════════════════════════════════════════════════════
+    # Write Parquet Files
+    # ═══════════════════════════════════════════════════════════════════
+
     _OUTPUT.mkdir(parents=True, exist_ok=True)
 
     ent_df = pd.DataFrame(entity_rows)
@@ -367,11 +626,23 @@ def build():
 
     print(f"\nAll parquet files written to {_OUTPUT}")
 
-    # Verify coverage
-    kb_nids = {e.get("metadata", {}).get("node_id", "") for e in kb if e.get("metadata", {}).get("node_id", "")}
-    ent_titles = set(ent_df["title"].str.lower())
-    covered = sum(1 for nid in kb_nids if nid.lower() in ent_titles)
-    print(f"\nCoverage: {covered}/{len(kb_nids)} KB node_ids in entities ({covered/len(kb_nids):.1%})")
+    # ═══════════════════════════════════════════════════════════════════
+    # Coverage report
+    # ═══════════════════════════════════════════════════════════════════
+
+    ent_titles_lower = set(ent_df["title"].str.lower())
+    kb_nids = {e.get("metadata", {}).get("node_id", "") for e in kb
+               if e.get("metadata", {}).get("node_id", "")}
+    covered_nid = sum(1 for nid in kb_nids if nid.lower() in ent_titles_lower)
+
+    kb_sections = {e.get("metadata", {}).get("section_title", "").strip().lower()
+                   for e in kb if e.get("metadata", {}).get("section_title", "").strip()}
+    covered_sec = sum(1 for s in kb_sections if s in ent_titles_lower)
+
+    print(f"\nCoverage:")
+    print(f"  node_id: {covered_nid}/{len(kb_nids)} ({covered_nid/max(len(kb_nids),1):.1%})")
+    print(f"  section_title: {covered_sec}/{len(kb_sections)} ({covered_sec/max(len(kb_sections),1):.1%})")
+    print(f"  Entities by type: {dict(ent_df['type'].value_counts())}")
 
 
 def populate_lancedb(batch_size: int = 64):
