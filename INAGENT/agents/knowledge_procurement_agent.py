@@ -224,6 +224,7 @@ def build_procurement_agent(model: BaseModelBackend, product_name: str) -> ChatA
             content=_build_system_prompt(product_name, known_modules),
         ),
         model=model,
+        step_timeout=None,
     )
 
 
@@ -281,7 +282,6 @@ class KnowledgeProcurementAgent:
             else build_procurement_agent(model, product_name)
         )
         self._registry = self._load_registry(registry_path)
-        self._manifest = self._load_manifest()
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -403,29 +403,6 @@ class KnowledgeProcurementAgent:
 
     def _layer1_mechanical(self, chunk: Dict) -> Optional[ProcurementDecision]:
         """Document-level verdict first, then fallback length check."""
-        meta = chunk.get("metadata", {})
-        source_file = meta.get("source_file", "")
-        manifest_entry = self._resolve_manifest_entry(source_file)
-
-        if manifest_entry is not None:
-            doc_class = manifest_entry.get("doc_class", "")
-            if doc_class == "A":
-                desc = manifest_entry.get("description", "")
-                return ProcurementDecision(
-                    action="accept",
-                    target_kb="product",
-                    confidence=0.95,
-                    reason=f"manifest doc_class=A ({desc[:40]})",
-                    suggested_value=self._infer_category_from_manifest(manifest_entry),
-                )
-            if doc_class in ("C", "skip"):
-                return ProcurementDecision(
-                    action="reject",
-                    target_kb="unknown",
-                    confidence=0.95,
-                    reason=f"manifest doc_class={doc_class}，非本产品文档",
-                )
-
         content = (chunk.get("page_content") or chunk.get("text") or "").strip()
         if len(content) < 50:
             return ProcurementDecision(
@@ -436,16 +413,38 @@ class KnowledgeProcurementAgent:
             )
         return None
 
+    _LLM_BATCH_SIZE = 100
+
     def _layer2_llm_batch(
         self,
         source_file: str,
         indexed_chunks: List[Tuple[int, Dict]],
     ) -> Dict[int, ProcurementDecision]:
-        """One LLM call per source_file. Returns {global_idx: decision}."""
+        """LLM calls per source_file, split into sub-batches. Returns {global_idx: decision}."""
         results: Dict[int, ProcurementDecision] = {}
         if not indexed_chunks:
             return results
 
+        for batch_start in range(0, len(indexed_chunks), self._LLM_BATCH_SIZE):
+            sub_batch = indexed_chunks[batch_start:batch_start + self._LLM_BATCH_SIZE]
+            batch_num = batch_start // self._LLM_BATCH_SIZE + 1
+            total_batches = (len(indexed_chunks) + self._LLM_BATCH_SIZE - 1) // self._LLM_BATCH_SIZE
+            logger.info(
+                "[采购员] LLM batch %d/%d (%s): %d chunks",
+                batch_num, total_batches, source_file, len(sub_batch),
+            )
+            sub_results = self._layer2_llm_single_batch(source_file, sub_batch)
+            results.update(sub_results)
+
+        return results
+
+    def _layer2_llm_single_batch(
+        self,
+        source_file: str,
+        indexed_chunks: List[Tuple[int, Dict]],
+    ) -> Dict[int, ProcurementDecision]:
+        """Single LLM call for a sub-batch. Returns {global_idx: decision}."""
+        results: Dict[int, ProcurementDecision] = {}
         local_chunks = [chunk for _, chunk in indexed_chunks]
         prompt = build_procurement_prompt(source_file, local_chunks)
 
@@ -557,44 +556,6 @@ class KnowledgeProcurementAgent:
             for item in data
             if isinstance(item, dict) and "idx" in item
         }
-
-    @staticmethod
-    def _load_manifest() -> Dict[str, Dict]:
-        manifest_path = _INAGENT_ROOT / "knowledge_base" / "input" / "manifest.json"
-        if not manifest_path.exists():
-            return {}
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            return {k: v for k, v in data.items() if isinstance(v, dict)}
-        except Exception:
-            return {}
-
-    def _resolve_manifest_entry(self, source_file: str) -> Optional[Dict]:
-        if not self._manifest or not source_file:
-            return None
-        if source_file in self._manifest:
-            return self._manifest[source_file]
-        stem = Path(source_file).stem
-        for key, entry in self._manifest.items():
-            if Path(key).stem == stem:
-                return entry
-        return None
-
-    @staticmethod
-    def _infer_category_from_manifest(entry: Dict) -> Optional[str]:
-        hint = entry.get("tree_level_hint", "")
-        desc = (entry.get("description", "") or "").lower()
-        if hint == "leaf" or "cli" in desc or "命令" in desc:
-            return "cli/reference"
-        if "设计" in desc or "design" in desc or "架构" in desc:
-            return "architecture/design"
-        if "规格" in desc or "spec" in desc:
-            return "spec/func_spec"
-        if hint in ("branch", "trunk") or "配置" in desc or "功能" in desc:
-            return "app/reference"
-        if hint == "root":
-            return "architecture/design"
-        return None
 
     def _load_registry(self, path: Optional[Path]) -> Dict:
         candidates = [

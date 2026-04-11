@@ -9,7 +9,6 @@ Linker Quality Diagnostic — 农民/农场主处理质量评估
   D5 semantic_match_rate — linked_nodes 关键词出现在 page_content 中的比例（抽样验证）
 
 数据来源：自动扫描 reference/*.json，从块 metadata 推断 doc_class。
-可选：manifest.json 提供显式 quality 阈值覆盖自动推断。
 
 用法：
     python -m INAGENT.scripts.test_linker_quality
@@ -37,7 +36,6 @@ logging.basicConfig(
 logger = logging.getLogger("linker_quality")
 
 _INAGENT = Path(__file__).resolve().parent.parent
-_MANIFEST_PATH = _INAGENT / "knowledge_base" / "input" / "manifest.json"
 _REFERENCE_DIR = _INAGENT / "knowledge_base" / "reference"
 _CT_PATH = _REFERENCE_DIR / "commandtree_base.json"
 
@@ -89,12 +87,6 @@ def _load_json(path: Path) -> Any:
         return json.load(f)
 
 
-def _load_manifest() -> Optional[Dict[str, Any]]:
-    raw = _load_json(_MANIFEST_PATH)
-    if not raw or not isinstance(raw, dict):
-        return None
-    return {k: v for k, v in raw.items() if not k.startswith("_")}
-
 
 def _infer_doc_class(blocks: List[Dict]) -> str:
     from collections import Counter
@@ -109,10 +101,7 @@ def _infer_doc_class(blocks: List[Dict]) -> str:
     return _CATEGORY_TO_DOC_CLASS.get(top_cat, "B")
 
 
-def _build_contract(doc_class: str, manifest_contract: Optional[Dict] = None) -> Dict[str, Any]:
-    if manifest_contract and isinstance(manifest_contract, dict):
-        return manifest_contract
-
+def _build_contract(doc_class: str) -> Dict[str, Any]:
     if doc_class == "A":
         return {"doc_class": "A", "quality": dict(_DEFAULT_QUALITY_A)}
     elif doc_class == "C":
@@ -121,7 +110,6 @@ def _build_contract(doc_class: str, manifest_contract: Optional[Dict] = None) ->
 
 
 def _discover_documents(ref_dir: Path) -> Dict[str, Dict[str, Any]]:
-    manifest = _load_manifest() or {}
     docs: Dict[str, Dict[str, Any]] = {}
 
     for jf in sorted(ref_dir.glob("*.json")):
@@ -132,25 +120,9 @@ def _discover_documents(ref_dir: Path) -> Dict[str, Dict[str, Any]]:
         if not isinstance(blocks, list) or not blocks:
             continue
 
-        doc_name = jf.stem
+        doc_class = _infer_doc_class(blocks)
 
-        manifest_contract = None
-        for mkey, mval in manifest.items():
-            if not isinstance(mval, dict):
-                continue
-            if Path(mkey).stem.lower() == doc_name.lower():
-                manifest_contract = mval
-                break
-
-        if manifest_contract and manifest_contract.get("doc_class") == "skip":
-            continue
-
-        if manifest_contract:
-            doc_class = manifest_contract.get("doc_class", "B")
-        else:
-            doc_class = _infer_doc_class(blocks)
-
-        contract = _build_contract(doc_class, manifest_contract)
+        contract = _build_contract(doc_class)
         contract.setdefault("doc_class", doc_class)
         docs[jf.name] = contract
 

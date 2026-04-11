@@ -36,7 +36,10 @@ def batch_upload_and_put_files(
     model_version: str = "vlm",
     language: str = "ch",
     enable_table: bool = True,
-    enable_formula: bool = False,
+    enable_formula: bool = True,
+    is_ocr: bool = False,
+    no_cache: bool = False,
+    page_ranges: Optional[str] = None,
     post_timeout: float = 60.0,
     put_timeout: float = 300.0,
     logger: Optional[logging.Logger] = None,
@@ -44,14 +47,23 @@ def batch_upload_and_put_files(
     """Request upload URLs, PUT files, return ``batch_id``."""
     log = logger or logging.getLogger(__name__)
     url = f"{api_base.rstrip('/')}/file-urls/batch"
-    files_payload = [{"name": p.name, "data_id": p.stem} for p in pdf_paths]
-    payload = {
+    files_payload = []
+    for p in pdf_paths:
+        fentry: dict = {"name": p.name, "data_id": p.stem}
+        if is_ocr:
+            fentry["is_ocr"] = True
+        if page_ranges:
+            fentry["page_ranges"] = page_ranges
+        files_payload.append(fentry)
+    payload: dict = {
         "files": files_payload,
         "model_version": model_version,
         "language": language,
         "enable_table": enable_table,
         "enable_formula": enable_formula,
     }
+    if no_cache:
+        payload["no_cache"] = True
     log.info("[mineru-cloud] requesting upload URLs for %d file(s)...", len(pdf_paths))
     resp = requests.post(url, headers=_headers(token), json=payload, timeout=post_timeout)
     resp.raise_for_status()
@@ -210,6 +222,13 @@ def mineru_cloud_parse_pdfs(
     output_root: Path,
     token: str,
     api_base: str = DEFAULT_API_BASE,
+    model_version: str = "vlm",
+    language: str = "ch",
+    enable_table: bool = True,
+    enable_formula: bool = True,
+    is_ocr: bool = False,
+    no_cache: bool = False,
+    page_ranges: Optional[str] = None,
     poll_timeout: float = 3600.0,
     logger: Optional[logging.Logger] = None,
 ) -> List[Path]:
@@ -221,6 +240,13 @@ def mineru_cloud_parse_pdfs(
         token=token,
         pdf_paths=pdf_paths,
         api_base=api_base,
+        model_version=model_version,
+        language=language,
+        enable_table=enable_table,
+        enable_formula=enable_formula,
+        is_ocr=is_ocr,
+        no_cache=no_cache,
+        page_ranges=page_ranges,
         logger=log,
     )
     items = poll_batch_until_done(
@@ -239,6 +265,13 @@ def mineru_cloud_parse_one_pdf(
     output_root: Path,
     token: str,
     api_base: str = DEFAULT_API_BASE,
+    model_version: str = "vlm",
+    language: str = "ch",
+    enable_table: bool = True,
+    enable_formula: bool = True,
+    is_ocr: bool = False,
+    no_cache: bool = False,
+    page_ranges: Optional[str] = None,
     poll_timeout: float = 3600.0,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[Path]:
@@ -250,6 +283,13 @@ def mineru_cloud_parse_one_pdf(
             output_root=output_root,
             token=token,
             api_base=api_base,
+            model_version=model_version,
+            language=language,
+            enable_table=enable_table,
+            enable_formula=enable_formula,
+            is_ocr=is_ocr,
+            no_cache=no_cache,
+            page_ranges=page_ranges,
             poll_timeout=poll_timeout,
             logger=log,
         )

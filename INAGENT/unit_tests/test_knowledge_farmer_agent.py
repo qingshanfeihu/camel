@@ -571,16 +571,30 @@ class TestSkeletonDiff:
         overflow_gaps = [g for g in results[0].schema_gaps if g.gap_type == "overflow"]
         assert any(g.field_name == "scenario_id" for g in overflow_gaps)
 
-    def test_unmatched_chunk_gets_overflow(self):
+    def test_unmatched_multi_token_cmd_gets_new_entity(self):
+        # 多 token ASCII 命令 → new_entity gap（Phase A: new_leaf 通用方案）
         agent = _make_agent(ac_metas=[{"command_prefix": "new cmd", "description": "new"}])
         agent._skeleton = {}
         agent._kb_index = {}
 
         cd = _make_decision("new cmd args", command_prefix="new cmd")
         results = agent.cultivate_batch([cd])
+        new_entity = [g for g in results[0].schema_gaps if g.gap_type == "new_entity"]
+        assert len(new_entity) >= 1
+        assert new_entity[0].entity_title == "new cmd"
+        assert new_entity[0].entity_type == "COMMAND"
+
+    def test_unmatched_single_token_cmd_gets_overflow(self):
+        # 单 token 命令（如 "ipv6"）→ overflow gap
+        agent = _make_agent(ac_metas=[{"command_prefix": "ipv6", "description": "new"}])
+        agent._skeleton = {}
+        agent._kb_index = {}
+
+        cd = _make_decision("some description text without param markers", command_prefix="ipv6")
+        results = agent.cultivate_batch([cd])
         overflow = [g for g in results[0].schema_gaps if g.gap_type == "overflow"]
         assert len(overflow) >= 1
-        assert overflow[0].entity_title == "new cmd"
+        assert overflow[0].entity_title == "ipv6"
 
     def test_product_module_case_canonicalized_no_conflict(self):
         skeleton = {

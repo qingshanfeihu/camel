@@ -93,13 +93,15 @@ def _fmt_params(params: List[Dict[str, Any]]) -> str:
 def node_to_chunk(
     node: dict,
     root_id: str,
+    tree_level: str = "leaf",
 ) -> Optional[Dict[str, Any]]:
-    """将单个命令节点转换为 knowledge_base.json 格式的文档块。
+    """将单个节点转换为 knowledge_base.json 格式的文档块。
 
-    只处理有 XML 数据的节点（有 func 或 help_string），
-    其他孤立节点跳过（返回 None）。
+    module 节点生成 trunk 块，有子命令的 command 节点生成 branch 块，
+    叶子命令生成 leaf 块。节点必须有 func 或 help_string 才被导出。
     """
     nid   = node.get("id", "")
+    ntype = node.get("type", "command")
     label = node.get("label", nid.replace("_", " "))
     desc  = node.get("description", label)
     full  = node.get("full_syntax") or desc
@@ -109,22 +111,23 @@ def node_to_chunk(
     ops   = node.get("operations", {})
     params = node.get("parameters", [])
 
-    # 只导出 XML 匹配的节点：必须有 func 或 help_string
     if not func and not help_:
         return None
 
-    # ── 确定是否是 set 命令或变体 ──────────────────────────────────
     _OP_PREFIXES = ("no_", "show_", "clear_", "display_")
     is_variant = any(nid.startswith(p) for p in _OP_PREFIXES)
 
-    # ── 构建 page_content ──────────────────────────────────────────
     lines: List[str] = []
-
-    # 标题行（用于 BM25/GraphRAG 关键词命中）
-    lines.append(f"[命令] {label}")
-    if help_:
-        lines.append(f"[说明] {help_}")
-    lines.append(f"语法: {full}")
+    if ntype == "module":
+        lines.append(f"[模块] {label}")
+        if help_:
+            lines.append(f"[说明] {help_}")
+        lines.append(f"功能: {desc}")
+    else:
+        lines.append(f"[命令] {label}")
+        if help_:
+            lines.append(f"[说明] {help_}")
+        lines.append(f"语法: {full}")
 
     if params:
         lines.append("参数:")
@@ -133,7 +136,6 @@ def node_to_chunk(
     scope_str = " / ".join(scope)
     lines.append(f"适用范围: {scope_str}")
 
-    # 操作变体列表（仅在 set 基本命令上列出）
     if not is_variant and len(ops) > 1:
         op_names = " / ".join(sorted(ops.keys()))
         lines.append(f"相关操作: {op_names}")
@@ -143,23 +145,30 @@ def node_to_chunk(
 
     page_content = "\n".join(lines)
 
-    # ── 构建 metadata ─────────────────────────────────────────────
-    # 变体命令（operation_command）的 parent_of 边指向 clear/no/show 而非原始模块，
-    # build_root_map() 无法正确追溯；改用图谱节点上直接标注的 actual_module。
     if is_variant:
         actual = node.get("actual_module", "") or ""
         effective_module = actual if actual else root_id
     else:
         effective_module = root_id
 
+    knowledge_role = "module_overview" if ntype == "module" else (
+        "command_group" if tree_level == "branch" else "command_attribute"
+    )
+
     meta: Dict[str, Any] = {
-        "document_category": "cli/reference",
+        "document_category": "cli",
         "source_file": _GRAPH_PATH.name,
         "product_module": effective_module,
         "command_prefix": label,
         "scope": ",".join(scope),
         "node_id": nid,
         "is_variant": is_variant,
+        "tree_position": {
+            "tree_level": tree_level,
+            "linked_nodes": [nid],
+            "confidence": 0.95,
+            "knowledge_role": knowledge_role,
+        },
     }
     if func:
         meta["func"] = func
@@ -170,28 +179,57 @@ def node_to_chunk(
 # ── 主逻辑 ────────────────────────────────────────────────────────
 
 def build_cli_chunks(graph_path: Path) -> List[Dict[str, Any]]:
-    """从 cli_keyword_graph.json 生成所有 CLI 文档块。"""
+    """从 cli_keyword_graph.json 生成带 trunk/branch/leaf 层级的 CLI 文档块。
+
+    映射规则：
+    - module 节点  → trunk（顶层功能模块）
+    - command 节点有子命令  → branch（命令组）
+    - command 节点无子命令 / operation_command → leaf（叶子命令）
+    """
     logger.info("加载 CLI 图谱: %s", graph_path)
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
 
     logger.info("构建模块根节点映射...")
     root_map = build_root_map(graph)
 
+    child_to_parent: Dict[str, str] = {}
+    for e in graph.get("edges", []):
+        if e.get("type") == "parent_of":
+            child_to_parent[e["target"]] = e["source"]
+    has_children: set = {e["source"] for e in graph.get("edges", []) if e.get("type") == "parent_of"}
+
+    def get_tree_level(node: dict) -> str:
+        ntype = node.get("type", "")
+        nid = node.get("id", "")
+        if ntype == "module":
+            return "trunk"
+        if ntype == "operation_command":
+            return "leaf"
+        if nid in has_children:
+            return "branch"
+        return "leaf"
+
     chunks = []
     skipped = 0
+    counts: Dict[str, int] = {"trunk": 0, "branch": 0, "leaf": 0}
     for node in graph.get("nodes", []):
-        if node.get("type") not in ("command", "operation_command"):
+        ntype = node.get("type", "")
+        if ntype not in ("module", "command", "operation_command"):
             continue
         nid = node.get("id", "")
-        root_id = root_map.get(nid, nid.split("_")[0])
-        chunk = node_to_chunk(node, root_id)
+        root_id = root_map.get(nid, nid.split("_")[0]) if ntype != "module" else nid
+        level = get_tree_level(node)
+        chunk = node_to_chunk(node, root_id, tree_level=level)
         if chunk:
             chunks.append(chunk)
+            counts[level] = counts.get(level, 0) + 1
         else:
             skipped += 1
 
     logger.info(
-        "CLI 块生成完毕: %d 块 (%d 跳过 / 无XML数据)", len(chunks), skipped
+        "CLI 块生成完毕: %d 块 (trunk=%d, branch=%d, leaf=%d, 跳过=%d)",
+        len(chunks), counts.get("trunk", 0), counts.get("branch", 0),
+        counts.get("leaf", 0), skipped,
     )
     return chunks
 
@@ -232,6 +270,17 @@ def rebuild(dry_run: bool = False) -> None:
     logger.info(
         "写入新 knowledge_base.json: 仅 cli/reference 叶子 %d 块 (%.1f MB)",
         len(cli_chunks), size_mb,
+    )
+
+    # ── 4. 同步更新 commandtree_base.json ─────────────────────────
+    ct_path = _KB_PATH.parent / "commandtree_base.json"
+    ct_path.write_text(
+        json.dumps(cli_chunks, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    logger.info(
+        "同步写入 commandtree_base.json: %d 块",
+        len(cli_chunks),
     )
 
 

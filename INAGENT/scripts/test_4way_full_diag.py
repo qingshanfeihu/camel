@@ -492,22 +492,24 @@ def _cli_leaf_association(section_title: str, product_module: str,
     kws.discard("")
     if product_module:
         kws.add(product_module.lower())
-    if page_content and len(kws) <= 1:
+    if page_content:
         import re
-        extra = re.findall(r"[a-zA-Z]{2,}", page_content[:300])
-        for term in extra[:5]:
+        extra = re.findall(r"[a-zA-Z]{2,}", page_content[:500])
+        for term in extra[:10]:
             kws.add(term.lower())
 
     kws -= {"的", "和", "在", "是", "了", "等", "或", "概述", "注意", "注意：", "说明"}
 
     matched_cmds = []
     mod_lower = product_module.lower() if product_module else ""
+    # Only filter by module when both sides are ASCII (same language); skip filter for Chinese modules
+    mod_is_ascii = mod_lower.isascii() if mod_lower else True
     for entry in ct_data:
         m = entry.get("metadata", {})
         cmd = m.get("command_prefix", "")
         entry_mod = m.get("product_module", "").lower()
 
-        if mod_lower and entry_mod and mod_lower != entry_mod:
+        if mod_lower and entry_mod and mod_is_ascii and mod_lower != entry_mod:
             continue
 
         cmd_lower = cmd.lower()

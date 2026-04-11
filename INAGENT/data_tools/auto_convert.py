@@ -86,8 +86,8 @@ def _remove_section_number(title: str) -> str:
         return title
     
     # 匹配开头的数字编号模式
-    # 模式1: "11.3.1. " 或 "11.3.1 "
-    pattern1 = r"^(?:\d+\.)+\s*"
+    # 模式1: "11.3.1. " 或 "11.3.1 " 或 "11.3 "
+    pattern1 = r"^\d+(?:\.\d+)*\.?\s+"
     # 模式2: "第11章 " 或 "第11节 "
     pattern2 = r"^第\d+[章节]\s*"
     
@@ -393,66 +393,6 @@ MINERU_OUTPUT_DIR = DOC_LOCAL_DIR / "mineru_output"
 # 备份目录：大文件移到这里而非删除，MinerU 重新生成代价很高
 MINERU_BACKUP_DIR = DOC_LOCAL_DIR / "mineru_backup"
 
-_MANIFEST_PATH = DOC_LOCAL_DIR / "input" / "manifest.json"
-_manifest_cache: Optional[Dict[str, Any]] = None
-
-
-def _load_manifest() -> Dict[str, Any]:
-    global _manifest_cache
-    if _manifest_cache is not None:
-        return _manifest_cache
-    if _MANIFEST_PATH.exists():
-        try:
-            raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-            _manifest_cache = {k: v for k, v in raw.items() if not k.startswith("_")}
-        except Exception as exc:
-            logger.warning("[manifest] load failed: %s", exc)
-            _manifest_cache = {}
-    else:
-        _manifest_cache = {}
-    return _manifest_cache
-
-
-def _get_manifest_hints(filename: str) -> Dict[str, Any]:
-    manifest = _load_manifest()
-    return manifest.get(filename, {})
-
-
-def _update_manifest_observed(filename: str, blocks: List[Dict[str, Any]],
-                              link_stats: Dict[str, Any]) -> None:
-    """农场主写回：将观测到的 tree_level 分布和链接统计写入 manifest._observed。"""
-    if not _MANIFEST_PATH.exists():
-        return
-    try:
-        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return
-
-    tree_dist: Dict[str, int] = {}
-    for blk in blocks:
-        tl = blk.get("metadata", {}).get("tree_position", {}).get("tree_level", "unknown")
-        tree_dist[tl] = tree_dist.get(tl, 0) + 1
-
-    total = len(blocks)
-    linked = link_stats.get("linked", 0)
-    link_rate = round(linked / total, 4) if total else 0.0
-
-    observed = {
-        "block_count": total,
-        "link_rate": link_rate,
-        "tree_level_distribution": tree_dist,
-    }
-
-    if filename not in raw:
-        raw[filename] = {}
-    raw[filename]["_observed"] = observed
-
-    _MANIFEST_PATH.write_text(
-        json.dumps(raw, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info("[manifest] wrote _observed for %s: link_rate=%.2f, dist=%s",
-                filename, link_rate, tree_dist)
 
 # vLLM Docker Configuration (optional MinerU hybrid-http-client backend)
 # Docs: https://opendatalab.github.io/MinerU/zh/quick_start/docker_deployment/
@@ -526,6 +466,23 @@ def _mineru_cloud_poll_timeout() -> float:
             env="MINERU_CLOUD_POLL_TIMEOUT",
         )
     )
+
+
+def _mineru_cloud_model_version() -> str:
+    return cfg_str(
+        "auto_convert.mineru.cloud.model_version", "vlm",
+        env="MINERU_CLOUD_MODEL_VERSION",
+    ).strip() or "vlm"
+
+
+def _mineru_cloud_is_ocr() -> bool:
+    v = os.environ.get("MINERU_CLOUD_IS_OCR", "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+def _mineru_cloud_no_cache() -> bool:
+    v = os.environ.get("MINERU_CLOUD_NO_CACHE", "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
 
 
 # Cached availability checks
@@ -1587,6 +1544,20 @@ def _merge_llm_meta(llm_meta: Dict, meta_item: Dict, meta_rules: Dict) -> None:
         if tl in ("leaf", "branch", "trunk", "root"):
             meta_item["tree_level"] = tl
 
+    # Header block override: MinerU 有时把命令语法行识别为章节标题（header）
+    # 若 clean_text 以小写 ASCII token 开头且含参数标记，修正为 single_command/cli
+    if meta_item.get("block_type") == "header":
+        _hdr_text = str(meta_item.get("clean_text") or "").strip()
+        _hdr_tokens = _hdr_text.split()
+        if (
+            _hdr_tokens
+            and _hdr_tokens[0].isascii()
+            and _hdr_tokens[0].islower()
+            and re.search(r'[<\[{]', _hdr_text)
+        ):
+            meta_item["chunk_type"] = "single_command"
+            meta_item["document_category"] = "cli"
+
 
 def _apply_llm_metadata_extraction_batch(
     items: List[Tuple[str, Dict[str, object]]],
@@ -1826,6 +1797,78 @@ def _auto_promote_branches(knowledge_blocks: List[Dict[str, Any]]) -> int:
     if promoted:
         logger.info("[auto-promote] %d blocks promoted branch→trunk in modules: %s",
                     promoted, sorted(dense_modules))
+    return promoted
+
+
+_LEAF_PROMOTE_THRESHOLD = 8
+
+
+def _auto_promote_dense_leaves(knowledge_blocks: List[Dict[str, Any]]) -> int:
+    """叶子密集晋升：当同一 product_module + parent_section 下 leaf 块过多时，
+    将该组中 function_hierarchy 层级最浅的少数叶子晋升为 branch（概述性质→trunk）。
+
+    规则：同一 (product_module, parent_section) 下 leaf 数量 >= _LEAF_PROMOTE_THRESHOLD
+    → 取该组 function_hierarchy 深度最浅的块，最多晋升 ceil(group_size/4) 个。
+    """
+    from collections import defaultdict
+    import math
+
+    def _fh_depth(b):
+        fh = b.get("metadata", {}).get("function_hierarchy", "")
+        return len([p for p in fh.replace(">", "/").split("/") if p.strip()]) if fh else 999
+
+    group_leaves: Dict[tuple, List[Dict]] = defaultdict(list)
+    for blk in knowledge_blocks:
+        meta = blk.get("metadata", {})
+        tp = meta.get("tree_position", {})
+        if tp.get("tree_level") != "leaf":
+            continue
+        mod = meta.get("product_module", "").strip()
+        parent = meta.get("parent_section", "").strip()
+        if mod:
+            group_leaves[(mod, parent)].append(blk)
+
+    _MAX_PROMOTE_GROUP_SIZE = 100
+    dense_groups = {k: v for k, v in group_leaves.items() if len(v) >= _LEAF_PROMOTE_THRESHOLD}
+    if not dense_groups:
+        return 0
+
+    _OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构", "工作模式", "功能介绍")
+    promoted = 0
+    promoted_modules = set()
+    for (mod, parent), leaves in dense_groups.items():
+        if len(leaves) > _MAX_PROMOTE_GROUP_SIZE:
+            logger.warning(
+                "[auto-promote] skip oversized group (%s/%s): %d leaves > %d limit, "
+                "likely heading-stack pollution",
+                mod, parent, len(leaves), _MAX_PROMOTE_GROUP_SIZE,
+            )
+            continue
+        max_promote = max(2, math.ceil(len(leaves) / 4))
+        sorted_leaves = sorted(leaves, key=_fh_depth)
+        min_depth = _fh_depth(sorted_leaves[0])
+        group_promoted = 0
+        for blk in sorted_leaves:
+            if group_promoted >= max_promote:
+                break
+            depth = _fh_depth(blk)
+            if depth > min_depth + 1:
+                break
+            meta = blk.get("metadata", {})
+            tp = meta.get("tree_position", {})
+            sp = meta.get("section_path", "").strip()
+            title = meta.get("section_title", "").strip()
+            is_overview = any(kw in sp for kw in _OVERVIEW_KW) or any(kw in title for kw in _OVERVIEW_KW)
+            tp["tree_level"] = "trunk" if is_overview else "branch"
+            tp["_auto_promoted"] = True
+            tp["_leaf_group_size"] = len(leaves)
+            group_promoted += 1
+            promoted += 1
+            promoted_modules.add(mod)
+    if promoted:
+        logger.info("[auto-promote] %d leaf blocks promoted in modules: %s (groups: %s)",
+                    promoted, sorted(promoted_modules),
+                    {f"{m}/{p}": len(v) for (m, p), v in dense_groups.items()})
     return promoted
 
 
@@ -2219,17 +2262,19 @@ def _build_section_context_map(blocks: List[Dict]) -> Dict[int, Dict[str, str]]:
         heading_level: Optional[int] = None
         heading_title = ""
 
+        first_line_raw = raw_text.strip().split('\n')[0].strip() if raw_text.strip() else ""
+
         if isinstance(text_level, int) and text_level > 0:
             heading_level = int(text_level)
-            heading_title = clean_text
+            heading_title = first_line_raw or clean_text
         else:
             inferred_level = _infer_section_level_from_heading(clean_text)
             if inferred_level:
                 heading_level = inferred_level
-                heading_title = clean_text
+                heading_title = first_line_raw or clean_text
             elif block_type in {"title", "heading", "section"} and clean_text:
                 heading_level = 1
-                heading_title = clean_text
+                heading_title = first_line_raw or clean_text
 
         if heading_level and heading_title:
             normalized_title = _remove_section_number(heading_title)
@@ -2433,6 +2478,66 @@ def _filter_frontmatter_blocks(blocks: List[Dict]) -> Tuple[List[Dict], List[int
     return filtered, frontmatter_pages
 
 
+def _assign_fallback_tree_position(knowledge_blocks: List[Dict[str, Any]]) -> int:
+    """为没有 tree_position 的非 CLI 块按 section_path 深度赋予默认层级。
+
+    CLI 块由 farmer_link 处理，此处只处理 app/arch/spec 类文档。
+    section_path 深度 <= 1 → trunk，深度 2 → branch，深度 >= 3 → leaf。
+    """
+    assigned = 0
+    for blk in knowledge_blocks:
+        meta = blk.get("metadata", {})
+        if meta.get("tree_position"):
+            continue
+        doc_cat = meta.get("document_category", "")
+        if doc_cat.startswith("cli"):
+            continue  # CLI 块由 farmer_link 负责
+        sp = meta.get("section_path", "")
+        depth = len([p for p in sp.replace(">", "/").split("/") if p.strip()]) if sp else 0
+        if depth <= 1:
+            level = "trunk"
+        elif depth == 2:
+            level = "branch"
+        else:
+            level = "leaf"
+        meta["tree_position"] = {
+            "tree_level": level,
+            "linked_nodes": [],
+            "confidence": 0.5,
+            "knowledge_role": "fallback_section_depth",
+        }
+        assigned += 1
+    if assigned:
+        logger.info("[fallback-tree] assigned tree_position to %d non-CLI blocks", assigned)
+    return assigned
+
+
+def _infer_pdf_document_category(pdf: Path) -> str:
+    """Infer document_category from PDF filename heuristics.
+
+    Convention (based on project naming):
+      - cli*.pdf / *命令*.pdf          → "cli/reference"
+      - app*.pdf / *应用*.pdf          → "app/reference"
+      - *架构* / *设计* / *design*       → "architecture/design"
+      - *spec* / *需求* / *prd*          → "spec/design"
+      - default                         → "spec/design"
+    """
+    name_lower = pdf.stem.lower()
+    # CLI pattern: starts with "cli" or contains CLI-specific keywords
+    if re.match(r"^cli", name_lower) or any(k in name_lower for k in ("命令参考", "cli_ref", "cliref")):
+        return "cli/reference"
+    # App/feature guide pattern
+    if re.match(r"^app", name_lower) or any(k in name_lower for k in ("应用配置", "app_guide", "feature")):
+        return "app/reference"
+    # Architecture/design pattern
+    if any(k in name_lower for k in ("架构", "design", "arch", "architecture", "设计")):
+        return "architecture/design"
+    # Spec/requirement pattern
+    if any(k in name_lower for k in ("spec", "需求", "prd", "requirement")):
+        return "spec/design"
+    return "spec/design"
+
+
 async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[int] = None) -> None:
     json_path, cache_path = _target_paths(pdf)
 
@@ -2507,6 +2612,9 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                     output_root=MINERU_OUTPUT_DIR,
                     token=tok,
                     api_base=_mineru_cloud_api_base(),
+                    model_version=_mineru_cloud_model_version(),
+                    is_ocr=_mineru_cloud_is_ocr(),
+                    no_cache=_mineru_cloud_no_cache(),
                     poll_timeout=_mineru_cloud_poll_timeout(),
                     logger=logger,
                 )
@@ -2617,6 +2725,7 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                 "parent_section": section_context.get("parent_section", ""),
                 "section_path": section_context.get("section_path", ""),
                 "product_module": "unknown",
+                "document_category": _infer_pdf_document_category(pdf),
             }
             if img_path:
                 base_meta["img_path"] = img_path
@@ -2762,19 +2871,7 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                     }
                 )
     
-    # 3.5 Manifest hint injection: 从 manifest.json 读取 document_category 等提示
-    hints = _get_manifest_hints(pdf.name)
-    hint_doc_cat = hints.get("document_category", "")
-    if hint_doc_cat:
-        for blk in knowledge_blocks:
-            meta = blk.get("metadata", {})
-            meta["document_category"] = hint_doc_cat
-        logger.info(
-            "[manifest] injected document_category for %s: %s",
-            pdf.name, hint_doc_cat,
-        )
-
-    # 3.6 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
+    # 3.5 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
     DOC_LOCAL_REF_DIR.mkdir(parents=True, exist_ok=True)
     doc_ref_path = DOC_LOCAL_REF_DIR / f"{_output_stem_for_file(pdf)}.json"
     doc_ref_path.write_text(
@@ -2820,11 +2917,14 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     # 农民匹配 + 农场主决策：将知识块挂载到命令树
     knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
 
+    # Fallback tree_position：为没有 tree_position 的非 CLI 块按 section_path 深度赋予默认层级
+    _assign_fallback_tree_position(knowledge_blocks)
+
     # 自然树生长：branch 过密时自动晋升为 trunk
     _auto_promote_branches(knowledge_blocks)
 
-    # 农场主写回：将观测结果记录到 manifest
-    _update_manifest_observed(pdf.name, knowledge_blocks, link_stats)
+    # 叶子密集晋升：同模块下 leaf 过多时晋升为 branch/trunk
+    _auto_promote_dense_leaves(knowledge_blocks)
 
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),

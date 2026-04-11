@@ -48,7 +48,12 @@ from camel.messages import BaseMessage
 from camel.models import BaseModelBackend
 
 from INAGENT.agents.knowledge_procurement_agent import ChunkDecision
-from INAGENT.rag.knowledge_schema import FillRequest, SchemaGapEntry
+from INAGENT.rag.knowledge_schema import (
+    FillRequest,
+    SchemaGapEntry,
+    build_tree_position,
+    infer_knowledge_role,
+)
 from INAGENT.utils.env_utils import load_inagent_env, get_product_name
 
 logger = logging.getLogger(__name__)
@@ -160,6 +165,42 @@ def _normalize_heading_to_node_slug(text: str) -> str:
     while "__" in slug:
         slug = slug.replace("__", "_")
     return slug
+
+
+def _extract_cli_command_from_content(content: str) -> str:
+    """Extracts a full CLI command verb from content (tokens before first parameter marker).
+
+    Looks for the first line that:
+      - starts with a lowercase ASCII letter
+      - contains no CJK characters
+      - contains at least one parameter marker: '<', '[', or '{'
+
+    Returns the whitespace-stripped tokens before the first marker, joined by spaces.
+    Requires at least 2 tokens. Returns empty string if no match.
+
+    Example: "ipv6 ospf advertise <interface_name> <filter_prefix>" -> "ipv6 ospf advertise"
+    """
+    _CJK_RANGE = range(0x4E00, 0xA000)
+    _PARAM_MARKS = frozenset("<[{")
+    for line in (content or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if not (s[0].isalpha() and s[0].islower() and s[0].isascii()):
+            continue
+        if any(ord(c) in _CJK_RANGE for c in s):
+            continue
+        mark_pos = min(
+            (s.find(m) for m in _PARAM_MARKS if m in s),
+            default=-1,
+        )
+        if mark_pos < 0:
+            continue
+        verb = s[:mark_pos].strip()
+        tokens = verb.split()
+        if len(tokens) >= 2:
+            return " ".join(tok.lower() for tok in tokens)
+    return ""
 
 
 def _extract_cli_prefix_strings(content: str) -> List[str]:
@@ -306,6 +347,20 @@ class KnowledgeFarmerAgent:
             enriched = list(step1.keys())
 
             content = (chunk.get("page_content") or chunk.get("text") or "")
+
+            _qflags = []
+            if len(content.strip()) <= 25:
+                _qflags.append("extremely_short")
+            else:
+                _st = meta.get("section_title", "").strip()
+                if _st and content.strip():
+                    _st_chars = set(_st)
+                    _content_head = set(content[:100])
+                    if not (_st_chars & _content_head - {" ", "\n", "\t"}):
+                        _qflags.append("title_content_mismatch")
+            if _qflags:
+                meta["_quality_flags"] = _qflags
+
             self._refine_ac_meta_command_prefix(content, ac_meta)
 
             if not meta.get("command_prefix") and ac_meta.get("command_prefix"):
@@ -326,6 +381,23 @@ class KnowledgeFarmerAgent:
             if tree_node_id:
                 meta["tree_node_id"] = tree_node_id
                 enriched.append("tree_node_id")
+                # Bug-A fix: 匹配成功时立即构建 tree_position，
+                # 从骨架节点推导 tree_level，保留 linked_nodes 关联
+                skel_node = skeleton.get(tree_node_id, {})
+                skel_meta = skel_node.get("metadata", {})
+                skel_tp = skel_meta.get("tree_position", {})
+                skel_level = (
+                    skel_tp.get("tree_level", "")
+                    if isinstance(skel_tp, dict) else ""
+                ) or skel_meta.get("tree_level", "leaf")
+                meta["tree_position"] = build_tree_position(
+                    tree_level=skel_level,
+                    linked_nodes=[tree_node_id],
+                    confidence=0.9,
+                    knowledge_role=infer_knowledge_role(skel_level),
+                )
+                if "tree_position" not in enriched:
+                    enriched.append("tree_position")
                 index = self._load_kb_index()
                 if index:
                     keys_for_node = [k for k, n in index.items() if n == tree_node_id]
@@ -358,6 +430,61 @@ class KnowledgeFarmerAgent:
                     if k not in enriched:
                         enriched.append(k)
                 gaps.extend(diff_gaps)
+
+                # Shadow new_entity: block 的 command_prefix 比匹配到的 CT 节点
+                # 更具体（子命令），且 content 含参数标记 → 需要创建 new_leaf
+                _sne_cp = str(meta.get("command_prefix") or "").strip()
+                _sne_tokens = _sne_cp.split()
+                if (
+                    matched_node_id
+                    and len(_sne_tokens) >= 2
+                    and all(t.isascii() for t in _sne_tokens)
+                    and not any(g.gap_type == "new_entity" for g in gaps)
+                ):
+                    _sne_idx = self._load_kb_index()
+                    _node_keys = {
+                        k.lower() for k, nid in _sne_idx.items()
+                        if nid == matched_node_id
+                    }
+                    _sne_cp_lower = _sne_cp.lower()
+                    if (
+                        _sne_cp_lower not in _node_keys
+                        and any(
+                            _sne_cp_lower.startswith(k + " ") for k in _node_keys
+                        )
+                        and re.search(r'[<\[{]', content)
+                    ):
+                        gaps.append(SchemaGapEntry(
+                            gap_type="new_entity",
+                            entity_title=_sne_cp,
+                            entity_type="COMMAND",
+                            entity_description=str(
+                                ac_meta.get("description") or meta.get("description", "")
+                            ),
+                            evidence=content[:200],
+                            source_file=cd.source_file,
+                            timestamp=datetime.now().isoformat(),
+                            chunk_content=content[:500],
+                            chunk_block_id=str(meta.get("block_id", "")),
+                        ))
+                        # shadow new_entity 是纯规则判断，直接写 tree_level=new_leaf
+                        # 无需等待农场主 LLM 决策（需_tree_session 路径永远不回写）
+                        meta["tree_level"] = "new_leaf"
+                        meta["document_category"] = "cli/reference"
+                        _tp = meta.get("tree_position")
+                        if isinstance(_tp, dict):
+                            _tp["tree_level"] = "new_leaf"
+                            _tp["knowledge_role"] = "command_ref"
+                        else:
+                            meta["tree_position"] = {
+                                "tree_level": "new_leaf",
+                                "linked_nodes": [matched_node_id] if matched_node_id else [],
+                                "confidence": 0.8,
+                                "knowledge_role": "command_ref",
+                            }
+                        for _fk in ("tree_level", "document_category", "tree_position"):
+                            if _fk not in enriched:
+                                enriched.append(_fk)
             else:
                 for fname in ("product_module", "protocol_type", "intent",
                               "config_mode", "description"):
@@ -382,21 +509,68 @@ class KnowledgeFarmerAgent:
                         timestamp=datetime.now().isoformat(),
                         chunk_content=content[:500],
                         ambiguous_candidates=ambiguous_candidates,
+                        chunk_block_id=str(meta.get("block_id", "")),
                     ))
                 elif cmd_prefix:
-                    gaps.append(SchemaGapEntry(
-                        gap_type="overflow",
-                        entity_title=str(cmd_prefix),
-                        field_name="unmatched_chunk",
-                        entity_description=str(ac_meta.get("description", "")),
-                        evidence=content[:200],
-                        source_file=cd.source_file,
-                        timestamp=datetime.now().isoformat(),
-                        chunk_content=content[:500],
-                        nearest_matches=self._find_nearest_skeleton_matches(
-                            content, skeleton,
-                        ),
-                    ))
+                    from datetime import datetime as _dt
+                    _block_id = meta.get("block_id", "")
+                    _full_cmd = _extract_cli_command_from_content(content)
+                    if (
+                        _full_cmd
+                        and len(_full_cmd) > len(str(cmd_prefix))
+                        and _full_cmd.startswith(str(cmd_prefix).lower())
+                    ):
+                        cmd_prefix = _full_cmd
+                        meta["command_prefix"] = _full_cmd
+                        if "command_prefix" not in enriched:
+                            enriched.append("command_prefix")
+                    _cmd_tokens = str(cmd_prefix).strip().split()
+                    _all_ascii = all(t.isascii() for t in _cmd_tokens)
+                    if len(_cmd_tokens) >= 2 and _all_ascii:
+                        gaps.append(SchemaGapEntry(
+                            gap_type="new_entity",
+                            entity_title=str(cmd_prefix),
+                            entity_type="COMMAND",
+                            entity_description=str(ac_meta.get("description", "")),
+                            evidence=content[:200],
+                            source_file=cd.source_file,
+                            timestamp=datetime.now().isoformat(),
+                            chunk_content=content[:500],
+                            chunk_block_id=_block_id,
+                        ))
+                    else:
+                        gaps.append(SchemaGapEntry(
+                            gap_type="overflow",
+                            entity_title=str(cmd_prefix),
+                            field_name="unmatched_chunk",
+                            entity_description=str(ac_meta.get("description", "")),
+                            evidence=content[:200],
+                            source_file=cd.source_file,
+                            timestamp=datetime.now().isoformat(),
+                            chunk_content=content[:500],
+                            chunk_block_id=str(meta.get("block_id", "")),
+                            nearest_matches=self._find_nearest_skeleton_matches(
+                                content, skeleton,
+                            ),
+                        ))
+                else:
+                    # 非 CLI 文档且无 command_prefix — 用 section_title 生成 overflow gap
+                    _title = str(meta.get("section_title") or meta.get("product_module") or "?")
+                    if _title and _title != "?" and content.strip():
+                        gaps.append(SchemaGapEntry(
+                            gap_type="overflow",
+                            entity_title=_title,
+                            field_name="unmatched_non_cli",
+                            entity_description=str(ac_meta.get("description", "")),
+                            evidence=content[:200],
+                            source_file=cd.source_file,
+                            timestamp=datetime.now().isoformat(),
+                            chunk_content=content[:500],
+                            chunk_block_id=str(meta.get("block_id", "")),
+                            nearest_matches=self._find_nearest_skeleton_matches(
+                                content, skeleton,
+                            ),
+                        ))
 
             # Schema gap detection (supports_override etc.)
             gaps.extend(self._detect_schema_gaps(content, meta, ac_meta))
@@ -817,6 +991,7 @@ class KnowledgeFarmerAgent:
 
             existing: List[Dict] = []
             existing_ids: set = set()
+            existing_hashes: set = set()
             if out_path.exists():
                 try:
                     existing = json.loads(out_path.read_text(encoding="utf-8"))
@@ -824,8 +999,14 @@ class KnowledgeFarmerAgent:
                         item.get("metadata", {}).get("block_id", "")
                         for item in existing
                     }
+                    existing_hashes = {
+                        hashlib.md5(
+                            (item.get("page_content") or item.get("text") or "").strip().encode()
+                        ).hexdigest()
+                        for item in existing
+                    }
                 except Exception:
-                    existing, existing_ids = [], set()
+                    existing, existing_ids, existing_hashes = [], set(), set()
 
             cache: Dict[str, str] = {}
             if cache_path.exists():
@@ -839,11 +1020,21 @@ class KnowledgeFarmerAgent:
                         cache = {}
 
             new_chunks: List[Dict] = []
+            dup_hash_count = 0
             for r in stem_results:
                 if r.block_id in existing_ids or r.block_id in cache:
                     continue
+                _pc = (r.chunk.get("page_content") or r.chunk.get("text") or "").strip()
+                _ch = hashlib.md5(_pc.encode()).hexdigest()
+                if _ch in existing_hashes:
+                    dup_hash_count += 1
+                    continue
+                existing_hashes.add(_ch)
                 new_chunks.append(r.chunk)
                 cache[r.block_id] = datetime.now().isoformat()
+
+            if dup_hash_count:
+                logger.info("[农民] %s: 跳过 %d 条内容重复块", stem, dup_hash_count)
 
             if new_chunks:
                 merged = existing + new_chunks
@@ -1255,6 +1446,22 @@ class KnowledgeFarmerAgent:
                     family.sort(key=lambda x: len(x[0]))
                     return family[0][1]
 
+        # Priority 2c: product_module → trunk/branch node (非 CLI 文档的核心匹配路径)
+        # APP/ARCH/HASLB 文档没有 command_prefix，但有中文 product_module（如 "高可用"、"安全"）。
+        # 通过 CLI 图 module 节点的 cn_aliases 反查，将中文模块映射到骨架 trunk 节点。
+        # section_path 层级可进一步匹配 branch 节点。
+        pm = str(meta.get("product_module") or ac_meta.get("product_module") or "").strip()
+        has_cp = bool(meta.get("command_prefix") or ac_meta.get("command_prefix"))
+        if pm and pm != "unknown" and not has_cp:
+            module_node_id = self._match_module_by_name(pm, skeleton)
+            if module_node_id:
+                # 尝试用 section_path 匹配更具体的 branch 节点
+                sp = str(meta.get("section_path") or ac_meta.get("section_path") or "")
+                branch_hit = self._match_branch_under_module(
+                    module_node_id, sp, skeleton, index,
+                )
+                return branch_hit or module_node_id
+
         # Priority 3: command_prefix exact match in kb_index
         # Validate: cp must appear in the leading portion of content to guard
         # against mixed-section chunks where auto_convert tagged a later section.
@@ -1315,6 +1522,108 @@ class KnowledgeFarmerAgent:
             if nid:
                 return nid
         return None
+
+    # ── 模块级匹配辅助（Priority 2c） ──────────────────────────────────────
+
+    _module_cn_map: Optional[Dict[str, List[str]]] = None
+
+    def _build_module_cn_map(self) -> Dict[str, List[str]]:
+        """构建 中文模块名 → [trunk node_id, ...] 的反向映射。
+
+        数据源：CLI 图 module 节点的 cn_aliases 字段。
+        """
+        if self._module_cn_map is not None:
+            return self._module_cn_map
+        cn_map: Dict[str, List[str]] = {}
+        try:
+            graph_path = _INAGENT_ROOT / "knowledge_base" / "cli_keyword_graph.json"
+            if graph_path.exists():
+                graph = json.loads(graph_path.read_text(encoding="utf-8"))
+                for node in graph.get("nodes", []):
+                    if node.get("type") != "module":
+                        continue
+                    nid = node.get("id", "")
+                    if not nid:
+                        continue
+                    for alias in node.get("cn_aliases", []):
+                        alias_key = alias.strip()
+                        if alias_key:
+                            cn_map.setdefault(alias_key, []).append(nid)
+                    # 也加入英文 label（大写）作为候选
+                    label = node.get("label", "").strip()
+                    if label:
+                        cn_map.setdefault(label, []).append(nid)
+                        cn_map.setdefault(label.lower(), []).append(nid)
+        except Exception as exc:
+            logger.debug("[农民] 构建 cn_map 失败: %s", exc)
+        self._module_cn_map = cn_map
+        return cn_map
+
+    def _match_module_by_name(
+        self, product_module: str, skeleton: Dict[str, Dict],
+    ) -> Optional[str]:
+        """通过中文/英文模块名查找骨架 trunk 节点。"""
+        cn_map = self._build_module_cn_map()
+        candidates = cn_map.get(product_module, [])
+        if not candidates:
+            # 尝试不区分大小写
+            pm_lower = product_module.lower()
+            for key, nids in cn_map.items():
+                if key.lower() == pm_lower:
+                    candidates = nids
+                    break
+        # 优先返回骨架中存在的节点
+        for nid in candidates:
+            if nid in skeleton:
+                return nid
+        return candidates[0] if candidates else None
+
+    def _match_branch_under_module(
+        self,
+        module_node_id: str,
+        section_path: str,
+        skeleton: Dict[str, Dict],
+        index: Optional[Dict[str, str]],
+    ) -> Optional[str]:
+        """尝试用 section_path 在模块下匹配更具体的 branch 节点。
+
+        策略：提取 section_path 中的各段，查找骨架中属于该模块的 branch 节点，
+        通过关键词重叠判断最佳匹配。
+        """
+        if not section_path:
+            return None
+        path_parts = [p.strip() for p in section_path.split(">") if p.strip()]
+        if len(path_parts) <= 1:
+            return None
+
+        # 收集该模块下的 branch 节点
+        module_branches: List[str] = []
+        for nid, node in skeleton.items():
+            m = node.get("metadata", {})
+            tp = m.get("tree_position", {})
+            tl = tp.get("tree_level", "") if isinstance(tp, dict) else ""
+            if tl == "branch" and m.get("product_module") == module_node_id:
+                module_branches.append(nid)
+
+        if not module_branches:
+            return None
+
+        # 对 section_path 各段做关键词匹配
+        best_nid = None
+        best_score = 0
+        for nid in module_branches:
+            node_m = skeleton[nid].get("metadata", {})
+            node_cp = (node_m.get("command_prefix") or nid).lower()
+            node_tokens = set(node_cp.replace("_", " ").split())
+            for part in path_parts:
+                part_lower = part.lower()
+                # 检查 node_cp 是否出现在 section_path 段中
+                overlap = sum(1 for t in node_tokens if t in part_lower)
+                if overlap > best_score:
+                    best_score = overlap
+                    best_nid = nid
+        # 至少需要 1 个 token 重叠才算匹配
+        return best_nid if best_score >= 1 else None
 
     def _detect_cross_refs(
         self, content: str, own_prefix: Optional[str] = None

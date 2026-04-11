@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import shutil
 import sys
 import time
@@ -108,11 +109,17 @@ def _load_json(p: Path) -> list:
 
 
 _kb_tree_level_index: Dict[str, str] = {}
+_kb_doc_cat_index: Dict[str, str] = {}
+
+# cjk-scan 黑名单：这些单 token 前缀语义过于宽泛，匹配到任意开头条目没有意义
+_CJK_SCAN_BLACKLIST = frozenset({
+    "no", "ip", "ipv6", "set", "show", "clear", "get", "do", "of",
+})
 
 
 def _build_kb_tree_level_index():
-    global _kb_tree_level_index
-    if _kb_tree_level_index:
+    global _kb_tree_level_index, _kb_doc_cat_index
+    if _kb_tree_level_index and _kb_doc_cat_index:
         return
     sources = []
     for ref_file in sorted(REFERENCE_DIR.glob("*.json")):
@@ -130,18 +137,26 @@ def _build_kb_tree_level_index():
         m = chunk.get("metadata", {})
         tp = m.get("tree_position", {})
         tl = tp.get("tree_level", "") if isinstance(tp, dict) else ""
-        if not tl:
-            continue
+        dc = m.get("document_category", "")
         bid = m.get("block_id") or m.get("chunk_id") or m.get("node_id") or ""
-        if bid:
-            _kb_tree_level_index[bid] = tl
         title = m.get("section_title", "").strip()
         src = m.get("source_file", "")
-        if title and src:
-            _kb_tree_level_index[f"{src}::{title}"] = tl
-        if title:
-            _kb_tree_level_index.setdefault(f"title::{title}", tl)
-    logger.info("KB tree_level index: %d entries", len(_kb_tree_level_index))
+        if tl:
+            if bid:
+                _kb_tree_level_index[bid] = tl
+            if title and src:
+                _kb_tree_level_index[f"{src}::{title}"] = tl
+            if title:
+                _kb_tree_level_index.setdefault(f"title::{title}", tl)
+        if dc:
+            if bid:
+                _kb_doc_cat_index[bid] = dc
+            if title and src:
+                _kb_doc_cat_index[f"{src}::{title}"] = dc
+            if title:
+                _kb_doc_cat_index.setdefault(f"title::{title}", dc)
+    logger.info("KB tree_level index: %d entries, doc_cat index: %d entries",
+                len(_kb_tree_level_index), len(_kb_doc_cat_index))
 
 
 def _lookup_tree_level(block_id: str = "", title: str = "",
@@ -159,6 +174,23 @@ def _lookup_tree_level(block_id: str = "", title: str = "",
         if key in _kb_tree_level_index:
             return _kb_tree_level_index[key]
     return "?"
+
+
+def _lookup_doc_cat(block_id: str = "", title: str = "",
+                    source_file: str = "") -> str:
+    if not _kb_doc_cat_index:
+        _build_kb_tree_level_index()
+    if block_id and block_id in _kb_doc_cat_index:
+        return _kb_doc_cat_index[block_id]
+    if title and source_file:
+        key = f"{source_file}::{title}"
+        if key in _kb_doc_cat_index:
+            return _kb_doc_cat_index[key]
+    if title:
+        key = f"title::{title}"
+        if key in _kb_doc_cat_index:
+            return _kb_doc_cat_index[key]
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -232,6 +264,7 @@ async def run_autoconvert_for_missing(missing_stems: List[str]):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def restore_snapshot() -> int:
+    global _kb_tree_level_index, _kb_doc_cat_index
     snapshot = _find_latest_snapshot()
     logger.info("使用快照: %s", snapshot.name)
 
@@ -244,6 +277,17 @@ def restore_snapshot() -> int:
         f.unlink()
     for f in REFERENCE_DIR.glob("*.jsonl"):
         f.unlink()
+
+    # 清理 logs 中的残留缓存（farmer_cache、reject_log、pending_review）
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    for pattern in ("*.farmer_cache.json", "reject_log.jsonl", "pending_review.jsonl"):
+        for f in LOGS_DIR.glob(pattern):
+            f.unlink()
+            logger.debug("清理 log 缓存: %s", f.name)
+
+    # 重置模块级全局索引缓存
+    _kb_tree_level_index.clear()
+    _kb_doc_cat_index.clear()
 
     shutil.copy2(snap_ref, KB_PATH)
     kb_data = json.loads(KB_PATH.read_text(encoding="utf-8"))
@@ -466,13 +510,179 @@ def run_full_pipeline(doc_statuses: Dict[str, bool]):
                              track, len(unclassified), len(classify_reqs))
 
     fill_count = 0
-    if all_farmers:
-        fill_count = run_fill_cycle(all_farmers[0], report)
+    for farmer in all_farmers:
+        fill_count += run_fill_cycle(farmer, report)
 
-    if fill_count > 0:
+    enrich_count = _enrich_cli_from_app(REFERENCE_DIR)
+    logger.info("CLI chunk 内容注入完成: %d 块", enrich_count)
+
+    if fill_count > 0 or enrich_count > 0:
         final_kb_size = merge_to_sapling()
 
     return all_farm_stats, final_kb_size
+
+
+def _enrich_cli_from_app(ref_dir: Path) -> int:
+    """将 app 类文档的描述文本注入到对应 cli/reference chunk 的 page_content。
+
+    匹配规则：cli 块的 command_prefix == app 块的 command_prefix（normalized）。
+    只注入未达到 500 字符、且尚无大量 CJK 内容的 cli 块。
+
+    Returns: 注入的块数。
+    """
+    _HAS_DENSE_CJK = re.compile(r'[\u4e00-\u9fff]{10,}')
+    _INJECTED_MARKER = "<!-- app-enriched -->"
+
+    # 1. 从所有 reference/*.json 收集 app 块，按 normalized command_prefix 建索引
+    # value = 最长的 app 块 page_content
+    app_index: Dict[str, str] = {}
+    for ref_file in sorted(ref_dir.glob("*.json")):
+        if ref_file.name == "commandtree_base.json" or "_bak" in ref_file.stem:
+            continue
+        try:
+            data = json.loads(ref_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+        for chunk in data:
+            m = chunk.get("metadata", {})
+            if m.get("document_category", "").split("/")[0] != "app":
+                continue
+            cp = m.get("command_prefix", "").lower().replace("_", " ").strip()
+            if not cp:
+                continue
+            pc = chunk.get("page_content", "")
+            # 只收集有实质内容的描述块（有中文，长度足够）
+            if len(pc) < 20 or not _HAS_DENSE_CJK.search(pc):
+                continue
+            if cp not in app_index or len(pc) > len(app_index[cp]):
+                app_index[cp] = pc
+
+    if not app_index:
+        logger.info("_enrich_cli_from_app: no app blocks with valid command_prefix found")
+        return 0
+
+    # 2. 遍历 cli/reference 块，注入
+    total_enriched = 0
+    for ref_file in sorted(ref_dir.glob("*.json")):
+        if ref_file.name == "commandtree_base.json" or "_bak" in ref_file.stem:
+            continue
+        try:
+            data = json.loads(ref_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+
+        file_changed = False
+        for chunk in data:
+            m = chunk.get("metadata", {})
+            if m.get("document_category", "").split("/")[0] != "cli":
+                continue
+            pc = chunk.get("page_content", "")
+            # 跳过已注入、已足够长、或已有大量 CJK 的块
+            if _INJECTED_MARKER in pc:
+                continue
+            if len(pc) >= 500:
+                continue
+            if _HAS_DENSE_CJK.search(pc):
+                continue
+            cp = m.get("command_prefix", "").lower().replace("_", " ").strip()
+            if not cp:
+                continue
+            app_desc = app_index.get(cp, "")
+            if not app_desc:
+                # 尝试前缀扫描（app 可能有更精确的子命令前缀）
+                for ak, av in app_index.items():
+                    if ak.startswith(cp + " ") or cp.startswith(ak + " "):
+                        if not app_desc or len(av) > len(app_desc):
+                            app_desc = av
+            if not app_desc:
+                continue
+            # 截取前 300 字
+            inject_text = app_desc[:300].rstrip()
+            chunk["page_content"] = f"{pc}\n\n{inject_text}\n{_INJECTED_MARKER}"
+            file_changed = True
+            total_enriched += 1
+
+        if file_changed:
+            ref_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+    return total_enriched
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2.5: 树节点 MD 导出
+# ══════════════════════════════════════════════════════════════════════════════
+
+def export_tree_nodes_to_md(out_dir: Path):
+    kb_data = _load_json(KB_PATH)
+    if not kb_data:
+        logger.warning("knowledge_base.json 为空，跳过树导出")
+        return
+
+    by_level: Dict[str, list] = {}
+    for chunk in kb_data:
+        m = chunk.get("metadata", {})
+        tp = m.get("tree_position", {})
+        tl = tp.get("tree_level", "unknown") if isinstance(tp, dict) else "unknown"
+        by_level.setdefault(tl, []).append(chunk)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for level, chunks in sorted(by_level.items()):
+        chunks.sort(key=lambda c: (
+            c.get("metadata", {}).get("source_file", ""),
+            c.get("metadata", {}).get("product_module", ""),
+            c.get("metadata", {}).get("command_prefix", ""),
+        ))
+        lines = [
+            f"# tree_level = {level}  ({len(chunks)} nodes)",
+            "",
+            f"| # | source_file | product_module | document_category | command_prefix | section_title | content_len | linked_nodes |",
+            f"|---|-------------|----------------|-------------------|----------------|---------------|-------------|--------------|",
+        ]
+        for i, c in enumerate(chunks, 1):
+            m = c.get("metadata", {})
+            tp = m.get("tree_position", {})
+            linked = tp.get("linked_nodes", []) if isinstance(tp, dict) else []
+            linked_str = ", ".join(str(n) for n in linked[:3])
+            if len(linked) > 3:
+                linked_str += f" +{len(linked)-3}"
+            pc_len = len(c.get("page_content", ""))
+            src = m.get("source_file", "")
+            mod = m.get("product_module", "")
+            cat = m.get("document_category", "")
+            cp = m.get("command_prefix", "")
+            title = m.get("section_title", "")[:40]
+            lines.append(
+                f"| {i} | {src} | {mod} | {cat} | {cp} | {title} | {pc_len} | {linked_str} |"
+            )
+        md_path = out_dir / f"{level}.md"
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("树导出: %s = %d nodes → %s", level, len(chunks), md_path.name)
+
+    summary_lines = [
+        "# 知识树节点汇总",
+        "",
+        f"总节点数: {len(kb_data)}",
+        "",
+        "| tree_level | count |",
+        "|------------|-------|",
+    ]
+    for level in sorted(by_level.keys()):
+        summary_lines.append(f"| {level} | {len(by_level[level])} |")
+    summary_path = out_dir / "summary.md"
+    summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+    logger.info("树汇总: %s", summary_path)
+    tprint()
+    tprint("  树节点导出:")
+    for level in sorted(by_level.keys()):
+        tprint(f"    {level}: {len(by_level[level])} nodes")
+    tprint(f"  总计: {len(kb_data)} nodes → {out_dir}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -508,11 +718,16 @@ def _load_graphrag():
 
 
 def _cjk_overlap(kw: str, text: str, strict: bool = False) -> bool:
+    if kw == text:
+        return True
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in kw)
+    if not has_cjk:
+        return False
     if kw in text:
         return True
     if strict:
         return False
-    if len(kw) >= 3 and any('\u4e00' <= c <= '\u9fff' for c in kw):
+    if len(kw) >= 3:
         for j in range(len(kw) - 1):
             bg = kw[j:j+2]
             if any('\u4e00' <= c <= '\u9fff' for c in bg) and bg in text:
@@ -571,7 +786,8 @@ def _graphrag_search(query: str, keywords: List[str]) -> Dict[str, Any]:
                 continue
         # Pass 2: CJK overlap on COMMAND/MODULE entities only (skip SECTION/DOCUMENT)
         use_strict = len(kw_lower) <= 3
-        if use_strict and not any('\u4e00' <= c <= '\u9fff' for c in kw_lower):
+        has_cjk_kw = any('\u4e00' <= c <= '\u9fff' for c in kw_lower)
+        if not has_cjk_kw and len(kw_lower) <= 5:
             continue
         for i, t in enumerate(titles):
             if types[i] in ("SECTION", "DOCUMENT"):
@@ -751,6 +967,45 @@ def diagnose_commandtree(ct_data: list) -> Dict[str, Any]:
 
 # ── CLI 4-way ─────────────────────────────────────────────────────────────
 
+def _extract_cmd_from_content(content: str) -> str:
+    """从 page_content 第一行提取 CLI 命令前缀（仅 token，不含参数）。
+    找到以小写 ASCII 开头、含 < [ { 的行，提取参数前的 tokens。"""
+    import re
+    _HAS_CJK = re.compile(r'[\u4e00-\u9fff]')
+    _PARAM_RE = re.compile(r'[<\[{]')
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or not line[0].islower() or not line[0].isascii():
+            continue
+        if _HAS_CJK.search(line):
+            continue
+        if not _PARAM_RE.search(line):
+            continue
+        tokens = line.split()
+        cmd_tokens = []
+        for tok in tokens:
+            if _PARAM_RE.match(tok):
+                break
+            if not tok.replace('-', '').replace('_', '').isalnum():
+                break
+            cmd_tokens.append(tok)
+        if len(cmd_tokens) >= 2:
+            return " ".join(cmd_tokens)
+    return ""
+
+
+def _ct_parent_exists(prefix: str, ct_data: list) -> bool:
+    """Return True if CT has any entry whose command_prefix exactly matches prefix."""
+    prefix_norm = prefix.lower().replace("_", " ").strip()
+    if not prefix_norm:
+        return False
+    for entry in ct_data:
+        cp = entry.get("metadata", {}).get("command_prefix", "").lower().replace("_", " ")
+        if cp == prefix_norm:
+            return True
+    return False
+
+
 def _ct_lookup_fuzzy(section_title: str, ct_data: list) -> Dict[str, Any]:
     import re
     cleaned = re.sub(r"\{[^}]*\}", "", section_title).strip()
@@ -758,7 +1013,7 @@ def _ct_lookup_fuzzy(section_title: str, ct_data: list) -> Dict[str, Any]:
     title_norm = title_lower.replace("_", " ")
     title_words = title_norm.split()
     if not title_words:
-        return {"found": False, "content_len": 0, "module": "", "snippet": ""}
+        return {"found": False, "content_len": 0, "module": "", "snippet": "", "match_type": "none"}
     for entry in ct_data:
         m = entry.get("metadata", {})
         prefix = m.get("command_prefix", "").lower()
@@ -766,35 +1021,52 @@ def _ct_lookup_fuzzy(section_title: str, ct_data: list) -> Dict[str, Any]:
         if prefix_norm == title_norm or prefix == title_lower:
             pc = entry.get("page_content", "")
             return {"found": True, "content_len": len(pc),
-                    "module": m.get("product_module", ""), "snippet": pc[:120]}
+                    "module": m.get("product_module", ""), "snippet": pc[:120],
+                    "match_type": "exact"}
     if len(title_words) < 2:
-        return {"found": False, "content_len": 0, "module": "", "snippet": ""}
+        return {"found": False, "content_len": 0, "module": "", "snippet": "", "match_type": "none"}
     best = None
     best_score = 0
+    best_is_prefix_fallback = False
     for entry in ct_data:
         m = entry.get("metadata", {})
         prefix = m.get("command_prefix", "").lower().replace("_", " ")
         prefix_words = prefix.split()
         if not prefix_words:
             continue
-        if title_norm.startswith(prefix + " ") or prefix.startswith(title_norm + " "):
-            pc = entry.get("page_content", "")
-            score = min(len(prefix_words), len(title_words)) / max(len(prefix_words), len(title_words))
+        # title 比 CT 更长（title 以 CT prefix 开头）→ 子命令，parent-match
+        if title_norm.startswith(prefix + " "):
+            score = len(prefix_words) / len(title_words)
             if score > best_score:
                 best = entry
                 best_score = score
+                best_is_prefix_fallback = True
+            continue
+        # CT 比 title 更长（CT 以 title 开头）→ title 是前缀，也是 prefix-fallback
+        if prefix.startswith(title_norm + " "):
+            score = len(title_words) / len(prefix_words)
+            if score > best_score:
+                best = entry
+                best_score = score
+                best_is_prefix_fallback = True
             continue
         common = sum(1 for w in title_words if w in prefix_words)
         score = common / max(len(title_words), len(prefix_words))
         if score > best_score and score >= 0.7:
             best = entry
             best_score = score
+            best_is_prefix_fallback = False
     if best:
         m = best.get("metadata", {})
         pc = best.get("page_content", "")
-        return {"found": True, "content_len": len(pc),
-                "module": m.get("product_module", ""), "snippet": pc[:120]}
-    return {"found": False, "content_len": 0, "module": "", "snippet": ""}
+        match_type = "prefix-fallback" if best_is_prefix_fallback else "token-match"
+        ct_cmd = m.get("command_prefix", "")
+        snippet = f"[parent-match] {ct_cmd}" if best_is_prefix_fallback else pc[:120]
+        content_len = 0 if best_is_prefix_fallback else len(pc)
+        return {"found": True, "content_len": content_len,
+                "module": m.get("product_module", ""), "snippet": snippet,
+                "match_type": match_type}
+    return {"found": False, "content_len": 0, "module": "", "snippet": "", "match_type": "none"}
 
 
 def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
@@ -832,9 +1104,54 @@ def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
         s1 = {"found": len(_pc) >= 80,
               "content_len": len(_pc), "snippet": _pc[:120]}
         cmd_prefix = m.get("command_prefix", "")
+        # Resolve tree_level early (needed for new_leaf S2 check below)
+        bid = m.get("block_id") or m.get("chunk_id") or ""
+        src = m.get("source_file", "")
+        tree_level = _lookup_tree_level(block_id=bid, title=section, source_file=src)
+        if tree_level == "?":
+            tp = m.get("tree_position", {})
+            tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
         s2 = _ct_lookup_fuzzy(section, ct_data)
         if not s2["found"] and cmd_prefix and cmd_prefix.lower() != section.lower():
             s2 = _ct_lookup_fuzzy(cmd_prefix, ct_data)
+        # CJK title fallback: extract CLI command from page_content
+        if not s2["found"] and any('\u4e00' <= c <= '\u9fff' for c in section):
+            _extracted = _extract_cmd_from_content(_pc)
+            if _extracted:
+                s2 = _ct_lookup_fuzzy(_extracted, ct_data)
+                if not s2["found"]:
+                    # try parent prefixes of extracted command
+                    _ext_tokens = _extracted.split()
+                    for _end in range(len(_ext_tokens) - 1, 0, -1):
+                        _parent = " ".join(_ext_tokens[:_end])
+                        if _ct_parent_exists(_parent, ct_data):
+                            s2 = {"found": True, "content_len": 0, "module": "",
+                                  "snippet": f"[cjk-fallback] parent in CT: {_parent}"}
+                            break
+            # single-token ASCII cmd_prefix: scan CT for any entry starting with it
+            # 只允许有语义的前缀（3+ chars），并排除高频无意义前缀
+            if not s2["found"] and cmd_prefix and cmd_prefix.replace(' ', '').isascii():
+                _cp_lower = cmd_prefix.lower().strip()
+                if (_cp_lower and ' ' not in _cp_lower
+                        and len(_cp_lower) >= 3
+                        and _cp_lower not in _CJK_SCAN_BLACKLIST):
+                    for _ct_entry in ct_data:
+                        _ct_cp = _ct_entry.get("metadata", {}).get("command_prefix", "").lower()
+                        if _ct_cp == _cp_lower or _ct_cp.startswith(_cp_lower + " "):
+                            s2 = {"found": True, "content_len": 0,
+                                  "module": _ct_entry.get("metadata", {}).get("product_module", ""),
+                                  "snippet": f"[cjk-scan] prefix match: {_ct_cp}",
+                                  "match_type": "cjk-scan"}
+                            break
+        # new_leaf S2: command not in CT but parent is — verify parent exists
+        if not s2["found"] and tree_level == "new_leaf":
+            _cp_tokens = cmd_prefix.strip().split() if cmd_prefix else []
+            for _end in range(len(_cp_tokens) - 1, 0, -1):
+                _parent = " ".join(_cp_tokens[:_end])
+                if _ct_parent_exists(_parent, ct_data):
+                    s2 = {"found": True, "content_len": 0, "module": "",
+                          "snippet": f"[new_leaf] parent in CT: {_parent}"}
+                    break
         s3 = _vector_search(query, top_k=10)
         _top1_cp = s3.get("top1_command_prefix", "").lower().replace("_", " ")
         _top1_title = s3.get("top1_section_title", "").lower()
@@ -854,15 +1171,8 @@ def run_cli_4way(ct_data: list, cli_blocks: list, count: int, seed: int):
             elif _target_words:
                 matched_words = sum(1 for w in _target_words if w in top_text)
                 s3["relevant"] = matched_words >= max(1, len(_target_words) * 0.5)
-        kws = section.split()[:3] + ([module] if module else [])
+        kws = [section] + section.split()[:3] + ([module] if module else [])
         s4 = _graphrag_search(query, kws)
-
-        bid = m.get("block_id") or m.get("chunk_id") or ""
-        src = m.get("source_file", "")
-        tree_level = _lookup_tree_level(block_id=bid, title=section, source_file=src)
-        if tree_level == "?":
-            tp = m.get("tree_position", {})
-            tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
 
         results.append({
             "cmd": section, "module": module, "tree_level": tree_level,
@@ -946,7 +1256,9 @@ def run_app_4way(app_blocks: list, ct_data: list, count: int, seed: int,
         if tree_level == "?":
             tp = m.get("tree_position", {})
             tree_level = tp.get("tree_level", "?") if isinstance(tp, dict) else "?"
-        doc_cat = m.get("document_category", "?")
+        doc_cat = (m.get("document_category")
+                   or _lookup_doc_cat(block_id=bid, title=section, source_file=src)
+                   or "?")
 
         s2_tree = {"valid": tree_level != "?", "tree_level": tree_level,
                     "doc_category": doc_cat}
@@ -1026,17 +1338,21 @@ def print_track_report(track_name: str, results: list, s2_label: str = "参照�
         s1_ok = r.get("s1_pdf", r.get("s1_src", {})).get("found", False)
         if "s2_ct" in r:
             s2_ok = r["s2_ct"]["found"]
+            s2_parent_match = (r["s2_ct"].get("match_type") == "prefix-fallback")
         elif "s2_tree" in r:
             s2_ok = r["s2_tree"]["valid"]
+            s2_parent_match = False
         else:
             s2_ok = False
+            s2_parent_match = False
 
         s3_hit = r["s3_vec"]["hit"]
         s3_rel = r["s3_vec"].get("relevant", False)
         s4_hit = r["s4_gr"]["hit"]
 
         s1 = PASS if s1_ok else FAIL
-        s2 = PASS if s2_ok else FAIL
+        # parent-match: 父节点在 CT，是正确的 new_leaf 状态，计入总分但标注 △
+        s2 = WARN if (s2_ok and s2_parent_match) else (PASS if s2_ok else FAIL)
         s3 = PASS if s3_rel else (WARN if s3_hit else FAIL)
         s4 = PASS if s4_hit else FAIL
 
@@ -1062,6 +1378,9 @@ def print_track_report(track_name: str, results: list, s2_label: str = "参照�
 
         tprint(f"  {i+1:2d}. [{label:28s}] mod={module:10s} tl={tl:8s}")
         tprint(f"      S1:{s1} S2({s2_label}):{s2} S3:{s3}{vec_note} S4:{s4}{gr_note}")
+
+        if s2_ok and s2_parent_match:
+            tprint(f"      [△] S2 parent-match: 子命令是 new_leaf，父节点在 CT")
 
         if s3_hit and not s3_rel:
             snippet = r["s3_vec"]["top3_snippets"][0][:60] if r["s3_vec"]["top3_snippets"] else ""
@@ -1127,18 +1446,23 @@ def export_detail_md(all_results: Dict[str, list], md_path: Path):
             if "s2_ct" in r:
                 s2 = r["s2_ct"]
                 s2_ok = s2.get("found", False)
+                s2_parent_match = (s2.get("match_type") == "prefix-fallback")
                 s2_label = "CommandTree"
             elif "s2_tree" in r:
                 s2 = r["s2_tree"]
                 s2_ok = s2.get("valid", False)
+                s2_parent_match = False
                 s2_label = "TreeLevel"
             else:
                 s2 = {}
                 s2_ok = False
+                s2_parent_match = False
                 s2_label = "?"
 
+            s2_icon = (WARN_ICON if (s2_ok and s2_parent_match)
+                       else (PASS_ICON if s2_ok else FAIL_ICON))
             verdict = f"S1:{PASS_ICON if s1_ok else FAIL_ICON} " \
-                       f"S2:{PASS_ICON if s2_ok else FAIL_ICON} " \
+                       f"S2:{s2_icon} " \
                        f"S3:{PASS_ICON if s3_rel else (WARN_ICON if s3_hit else FAIL_ICON)} " \
                        f"S4:{PASS_ICON if s4_hit else FAIL_ICON}"
 
@@ -1167,7 +1491,9 @@ def export_detail_md(all_results: Dict[str, list], md_path: Path):
             w(f"#### S2 {s2_label} 查找")
             w("")
             if s2_label == "CommandTree":
-                w(f"- 命中: {PASS_ICON if s2_ok else FAIL_ICON}")
+                w(f"- 命中: {s2_icon}")
+                if s2_parent_match:
+                    w(f"- 类型: `parent-match`（子命令不在 CT，是 new_leaf）")
                 w(f"- 内容长度: {s2.get('content_len', 0)}")
                 ct_snippet = s2.get("snippet", "")
                 if ct_snippet:
@@ -1248,6 +1574,8 @@ def main():
     ap.add_argument("--haslb-count", type=int, default=5)
     ap.add_argument("--skip-autoconvert", action="store_true",
                     help="跳过 auto_convert（假设 doc_local_reference 已就绪）")
+    ap.add_argument("--clear-autoconvert", action="store_true",
+                    help="删除 doc_local_reference 缓存，强制全部重跑 auto_convert")
     ap.add_argument("--skip-pipeline", action="store_true",
                     help="跳过采购员→农民→农场主（只跑4way诊断）")
     ap.add_argument("--skip-vectors", action="store_true",
@@ -1256,6 +1584,16 @@ def main():
 
     _init_report_log()
 
+    try:
+        _main_inner(args)
+    finally:
+        if _report_file:
+            _report_file.close()
+            logger.info("报告已写入: %s", LOGS_DIR / "4way_report.txt")
+        _cleanup_qdrant()
+
+
+def _main_inner(args):
     from INAGENT.utils.env_utils import load_inagent_env
     load_inagent_env()
 
@@ -1266,27 +1604,53 @@ def main():
 
     # Phase 0: 预检 doc_local_reference
     logger.info("\n>>> Phase 0: 预检 doc_local_reference")
+
+    if args.clear_autoconvert:
+        logger.info("清除 auto_convert 缓存...")
+        if DOC_LOCAL_REF.exists():
+            for f in DOC_LOCAL_REF.glob("*.json"):
+                f.unlink()
+                logger.debug("删除 doc_local_ref: %s", f.name)
+        for f in LOGS_DIR.glob("*.cache.json"):
+            f.unlink()
+            logger.debug("删除 cache: %s", f.name)
+        logger.info("auto_convert 缓存已清除")
+
+    # Phase 1: 恢复快照（必须在 auto_convert 前，使 reference 缓存失效）
+    if not args.skip_pipeline:
+        logger.info("\n>>> Phase 1: 恢复小树苗快照")
+        sapling_size = restore_snapshot()
+
     doc_statuses = check_doc_local_refs()
 
     missing = [stem for stem, exists in doc_statuses.items() if not exists]
     if missing and not args.skip_autoconvert:
         logger.info("需要 auto_convert: %s", missing)
-        asyncio.run(run_autoconvert_for_missing(missing))
+        import INAGENT.data_tools.auto_convert as _ac_mod
+        _ac_mod._project_config_cache = None
+        _saved_cache = _ac_mod._project_config_cache
+        _ac_mod._project_config_cache = {}
+        logger.info("已禁用 auto_convert LLM batch（4-way 不需要 LLM metadata）")
+        try:
+            asyncio.run(run_autoconvert_for_missing(missing))
+        finally:
+            _ac_mod._project_config_cache = None
         doc_statuses = check_doc_local_refs()
 
     missing_after = [stem for stem, exists in doc_statuses.items() if not exists]
     if missing_after:
         logger.warning("仍缺少 doc_local_reference: %s", missing_after)
 
-    # Phase 1: 恢复快照
+    # Phase 2: 采购员→农民→农场主
     if not args.skip_pipeline:
-        logger.info("\n>>> Phase 1: 恢复小树苗快照")
-        sapling_size = restore_snapshot()
-
-        # Phase 2: 采购员→农民→农场主
         logger.info("\n>>> Phase 2: 采购员→农民→合并→农场主")
         farm_stats, final_kb_size = run_full_pipeline(doc_statuses)
         print_pipeline_summary(farm_stats, final_kb_size)
+
+    # Phase 2.5: 导出树节点到 MD
+    logger.info("\n>>> Phase 2.5: 导出树节点到 MD")
+    tree_md_dir = LOGS_DIR / "tree_nodes"
+    export_tree_nodes_to_md(tree_md_dir)
 
     # Phase 3: 重建向量
     if not args.skip_vectors:
@@ -1373,12 +1737,6 @@ def main():
 
     elapsed = time.perf_counter() - start_time
     logger.info("总耗时: %.1f 秒 (%.1f 分钟)", elapsed, elapsed / 60)
-
-    if _report_file:
-        _report_file.close()
-        logger.info("报告已写入: %s", LOGS_DIR / "4way_report.txt")
-
-    _cleanup_qdrant()
 
 
 def _cleanup_qdrant():

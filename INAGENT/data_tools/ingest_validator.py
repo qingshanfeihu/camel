@@ -22,6 +22,17 @@ _MIN_CONTENT_LENGTH = 20
 _SIMHASH_BITS = 64
 _SIMHASH_THRESHOLD = 3
 
+import re
+
+_NON_PRODUCT_TITLE_PATTERNS = re.compile(
+    r"版权|商标|合格声明|免责|关于我们|公司简介"
+    r"|编写目的|适用对象|读者对象"
+    r"|电源要求|防静电|温湿度|温度湿度|空气质量|通风条件"
+    r"|安全措施|安装过程|安装环境|设备上电"
+    r"|内网连接|外线连接|连接电源"
+    r"|命令行介绍|命令行符号含义|命令行快捷键|访问控制的级别"
+)
+
 
 def _simhash(text: str, bits: int = _SIMHASH_BITS) -> int:
     tokens = text.lower().split()
@@ -129,6 +140,17 @@ class IngestValidator:
         if len(content.strip()) < _MIN_CONTENT_LENGTH:
             self._report.rejected_short += 1
             return "reject", "short_content"
+
+        # Rule 1b: HeadingOnly — content 基本上只是 section_title 本身
+        section_title = meta.get("section_title", "")
+        if section_title and len(content.strip()) <= len(section_title.strip()) + 15:
+            self._report.rejected_short += 1
+            return "reject", "heading_only"
+
+        # Rule 1c: NonProductContent — 法律文本/硬件安装/手册前言等非产品知识
+        if section_title and _NON_PRODUCT_TITLE_PATTERNS.search(section_title):
+            self._report.rejected_excluded += 1
+            return "reject", "non_product_content"
 
         # Rule 2: TreePositionCheck — tree_position 必须存在且有效
         tp = meta.get("tree_position")

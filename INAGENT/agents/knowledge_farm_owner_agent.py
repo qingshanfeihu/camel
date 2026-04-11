@@ -179,6 +179,7 @@ class KnowledgeFarmOwnerAgent:
 
         conflict_entries = [entry for entry in entries if entry.gap_type == "conflict"]
         overflow_entries = [entry for entry in entries if entry.gap_type == "overflow"]
+        non_knowledge_entries = [entry for entry in entries if entry.gap_type == "non_knowledge"]
         new_entity_entries = [entry for entry in entries if entry.gap_type == "new_entity"]
         attribute_entries = [
             entry for entry in entries if entry.gap_type == "new_entity_attribute"
@@ -189,6 +190,7 @@ class KnowledgeFarmOwnerAgent:
 
         self._process_conflicts(conflict_entries, report)
         self._process_overflows(overflow_entries, report)
+        self._process_non_knowledge(non_knowledge_entries, report)
         self._process_new_entities(new_entity_entries, report)
         self._process_attribute_gaps(attribute_entries, report)
         self._process_ambiguous_matches(ambiguous_entries, report)
@@ -730,6 +732,51 @@ class KnowledgeFarmOwnerAgent:
             chunk_content=raw.get("chunk_content", ""),
         )
 
+    def _process_non_knowledge(
+        self,
+        entries: List[SchemaGapEntry],
+        report: FarmOwnerReport,
+    ) -> None:
+        if not entries:
+            return
+
+        product_name = (self._product_name or "").lower()
+        _PRODUCT_KEYWORDS = {"slb", "llb", "gslb", "health check", "virtual", "real server",
+                             "负载均衡", "健康检查", "会话保持", "持久化", "集群"}
+        if product_name:
+            _PRODUCT_KEYWORDS.add(product_name)
+
+        discarded = 0
+        rescued = 0
+        for entry in entries:
+            desc_lower = (entry.entity_description or "").lower()
+            has_product_signal = any(kw in desc_lower for kw in _PRODUCT_KEYWORDS)
+
+            if has_product_signal:
+                entry.gap_type = "new_entity"
+                entry.evidence = f"[rescued from non_knowledge] {entry.evidence}"
+                rescued += 1
+                continue
+
+            ctx = TreeContext(entity_title=entry.entity_title or "")
+            patch = self._build_chunk_meta_patch(ctx, gap_type="non_knowledge", action="discard")
+            report.fill_requests.append(FillRequest(
+                entity_title=entry.entity_title,
+                source_evidence=entry.evidence,
+                action="discard",
+                target_block_id=getattr(entry, "chunk_block_id", "") or "",
+                chunk_meta_patch=patch,
+            ))
+            report.log_op("non_knowledge", entry.entity_title, "discard",
+                          entry.evidence, source="rule")
+            discarded += 1
+
+        if rescued:
+            rescued_entries = [e for e in entries if e.gap_type == "new_entity"]
+            self._process_new_entities(rescued_entries, report)
+
+        logger.info("[农场主] non_knowledge: %d 条丢弃, %d 条降级为 new_entity", discarded, rescued)
+
     def _process_new_entities(
         self,
         entries: List[SchemaGapEntry],
@@ -947,6 +994,8 @@ class KnowledgeFarmOwnerAgent:
             except Exception as exc:
                 logger.debug("add_relationships 失败(非致命): %s", exc)
 
+        # 兜底初始化，确保后续代码无论 action 是否进入 if 块都不会 NameError
+        _effective_tree_level = ctx.tree_level
         if action in ("merge_into_existing", "tree_create_leaf", "tree_create_branch",
                       "tree_create_trunk", "tree_create_root"):
             _ACTION_TO_MUTATION = {
@@ -957,11 +1006,15 @@ class KnowledgeFarmOwnerAgent:
                 "merge_into_existing": "update_fields",
             }
             mutation_type = _ACTION_TO_MUTATION.get(action, "update_fields")
+            # new_leaf: CLI 文档中有语法但 CT 中不存在的命令节点
+            _effective_tree_level = ctx.tree_level
+            if action == "tree_create_leaf" and (entry.entity_type or "").upper() == "COMMAND":
+                _effective_tree_level = "new_leaf"
             report.tree_mutations.append(TreeMutation(
                 mutation_type=mutation_type,
                 node_id=entry.entity_title,
                 parent_node_id=ctx.parent_candidate_id,
-                tree_level=ctx.tree_level,
+                tree_level=_effective_tree_level,
                 fields=enrich_fields,
                 source_gap_type="new_entity",
             ))
@@ -980,15 +1033,27 @@ class KnowledgeFarmOwnerAgent:
                 except Exception as exc:
                     logger.debug("skeleton register 失败(非致命): %s", exc)
 
+        # 为 chunk_meta_patch 构建使用 effective tree_level 的上下文副本
+        _patch_ctx = ctx
+        if _effective_tree_level != ctx.tree_level:
+            from dataclasses import replace as _dc_replace
+            _patch_ctx = _dc_replace(ctx, tree_level=_effective_tree_level)
+        _fill_tree_level = _effective_tree_level if action in (
+            "tree_create_leaf", "tree_create_branch",
+            "tree_create_trunk", "tree_create_root", "merge_into_existing",
+        ) else ctx.tree_level
         report.fill_requests.append(FillRequest(
             entity_title=entry.entity_title,
             fill_fields=enrich_fields,
             source_evidence=entry.evidence,
             action=action,
             target_node_id=ctx.matched_node_id or entry.entity_title,
-            tree_level=ctx.tree_level,
+            tree_level=_fill_tree_level,
             enrich_fields=enrich_fields,
-            chunk_meta_patch=self._build_chunk_meta_patch(ctx, gap_type="new_entity", action=action),
+            target_block_id=getattr(entry, "chunk_block_id", "") or "",
+            chunk_meta_patch=self._build_chunk_meta_patch(
+                _patch_ctx, gap_type="new_entity", action=action,
+            ),
         ))
 
     def _llm_decide_new_entity(
@@ -1783,7 +1848,13 @@ class KnowledgeFarmOwnerAgent:
         "overflow": 0.6,
         "ambiguous_match": 0.7,
         "new_entity_attribute": 0.8,
+        "non_knowledge": 0.3,
     }
+
+    _ROOT_GUARD_KEYWORDS = frozenset({
+        "架构", "协议栈", "转发面", "控制面", "平台", "硬件", "系统设计",
+        "architecture", "protocol stack", "forwarding plane", "control plane",
+    })
 
     def _build_chunk_meta_patch(
         self,
@@ -1802,6 +1873,18 @@ class KnowledgeFarmOwnerAgent:
         if ctx.exists_in_tree:
             confidence = max(confidence, 0.9)
 
+        content_len = len((chunk_meta or {}).get("_content_preview", "").strip()) if chunk_meta else 0
+        if content_len <= 50 and content_len > 0:
+            confidence *= 0.5
+
+        if tree_level == "root" and not ctx.exists_in_tree:
+            _check = f"{ctx.entity_title} {(chunk_meta or {}).get('_content_preview', '')}".lower()
+            if not any(kw in _check for kw in self._ROOT_GUARD_KEYWORDS):
+                logger.debug("root guard: '%s' 降级为 trunk (无架构关键词)", ctx.entity_title)
+                tree_level = "trunk"
+                confidence = min(confidence, 0.4)
+                knowledge_role = infer_knowledge_role(tree_level)
+
         linked_nodes = []
         if ctx.matched_node_id:
             linked_nodes.append(ctx.matched_node_id)
@@ -1815,6 +1898,10 @@ class KnowledgeFarmOwnerAgent:
                 knowledge_role=knowledge_role,
             ),
         }
+        # 只在有确定值时同步写入 flat tree_level，避免用 "unknown" 覆盖已有有效值
+        _KNOWN_LEVELS = {"leaf", "new_leaf", "branch", "trunk", "root"}
+        if tree_level in _KNOWN_LEVELS:
+            patch["tree_level"] = tree_level
         if action == "discard":
             patch["owner_excluded"] = True
         return patch
@@ -1921,6 +2008,26 @@ class KnowledgeFarmOwnerAgent:
             except Exception as exc:
                 logger.debug("command_exists 异常: %s", exc)
 
+        # Step 1b: 对未命中的多-token 单纯 ASCII 命令，逐步截短查找父节点
+        # 示例: "ipv6 ospf advertise" -> 试 "ipv6 ospf" -> CT命中 -> parent_candidate
+        if not ctx.exists_in_tree and cli is not None and entity_title:
+            _title_tokens = entity_title.strip().split()
+            _all_ascii = all(t.isascii() for t in _title_tokens)
+            if _all_ascii and len(_title_tokens) >= 3:
+                for _end in range(len(_title_tokens) - 1, 1, -1):
+                    _parent = " ".join(_title_tokens[:_end])
+                    try:
+                        _p_exists, _ = cli.command_exists(_parent)
+                        if _p_exists:
+                            ctx.parent_candidate_id = _parent
+                            logger.debug(
+                                "_query_tree_context: 前缀回退找到父节点 %s -> %s",
+                                entity_title, _parent,
+                            )
+                            break
+                    except Exception:
+                        pass
+
         # Step 2: 若命中，查层级前缀推断 tree_level
         if ctx.exists_in_tree and cli is not None:
             try:
@@ -1993,7 +2100,7 @@ class KnowledgeFarmOwnerAgent:
             ntype = node.get("type", "")
             if ntype == "module":
                 branches = cli.get_branch_ids(node.get("id", entity_title))
-                return "trunk" if branches else "root"
+                return "trunk" if branches else "leaf"
             if ntype in ("command", "operation_command"):
                 return "leaf"
             return "branch"
@@ -2037,6 +2144,22 @@ class KnowledgeFarmOwnerAgent:
         self, ctx: TreeContext, chunk_meta: Optional[Dict[str, Any]] = None,
     ) -> str:
         """LLM 判定 tree_level。失败时兜底 branch + 低置信度标记。"""
+        from INAGENT.rag.knowledge_schema import (
+            NON_KNOWLEDGE_TITLE_PATTERNS,
+            NON_KNOWLEDGE_CONTENT_KEYWORDS,
+        )
+        section_title = (chunk_meta or {}).get("section_title", ctx.entity_title or "")
+        content_preview = (chunk_meta or {}).get("_content_preview", "")
+        _check_text = f"{section_title} {content_preview}".lower()
+        for pat in NON_KNOWLEDGE_TITLE_PATTERNS:
+            if pat.lower() in _check_text:
+                logger.debug("_llm_infer_tree_level: 废料拦截 title_pat=%s", pat)
+                return "branch"
+        for kw in NON_KNOWLEDGE_CONTENT_KEYWORDS:
+            if kw.lower() in _check_text:
+                logger.debug("_llm_infer_tree_level: 废料拦截 content_kw=%s", kw)
+                return "branch"
+
         if self._chat_agent is None:
             return "branch"
 

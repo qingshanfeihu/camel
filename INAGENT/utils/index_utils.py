@@ -48,6 +48,8 @@ def get_step_type_keywords(function_index: Optional[Dict[str, Any]] = None) -> D
     
     step_keywords = {}
     for step_type, stats in step_types.items():
+        if not isinstance(stats, dict):
+            continue
         keywords = stats.get("keywords", [])
         step_keywords[step_type] = keywords
     

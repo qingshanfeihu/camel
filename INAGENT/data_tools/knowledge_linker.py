@@ -96,7 +96,7 @@ def farmer_link(
 
     title = block_meta.get("section_title", "").strip()
     if title:
-        pos = _match_title_as_command(title, cli_graph_store)
+        pos = _match_title_as_command(title, block_text, cli_graph_store)
         if pos:
             return pos
 
@@ -132,12 +132,19 @@ def _match_command_leaf(
 
 
 def _match_title_as_command(
-    section_title: str, cli_graph_store
+    section_title: str, block_text: str, cli_graph_store
 ) -> Optional[TreePosition]:
     """用 section_title 尝试精确命令匹配。
 
     去掉 CLI 语法标记 ({...}, [...], <...>) 后，用 command_exists 做精确匹配。
     仅精确命中才构成结构证据；模糊候选作为 gap 线索留给农场主 LLM 裁决。
+
+    额外校验：去掉 CLI 操作前缀 (show/no/clear/display) 后，title 核心
+    必须与返回 label 核心一致，防止单 token 模糊打分误命中无关命令。
+
+    优先完整 label 匹配：command_exists 内部会去前缀，导致 "show fwd"
+    被简化为 "fwd" 再匹配，可能返回 "clear fwd" 而非 "show fwd"。
+    先尝试不去前缀的完整匹配以避免操作变体串扰。
     """
     import re
     cleaned = re.sub(r"[\{<\[][^\}\]>]*[\}\]>]", "", section_title).strip()
@@ -145,12 +152,36 @@ def _match_title_as_command(
     if not cleaned:
         return None
 
+    exact = getattr(cli_graph_store, "_cmd_label_exact", None) or {}
+    nid_map = getattr(cli_graph_store, "_nodes_by_id", None) or {}
+    full_key = cleaned.lower()
+    full_nid = exact.get(full_key) or exact.get(full_key.replace(" ", "_"))
+    if full_nid:
+        label = nid_map.get(full_nid, {}).get("label", full_nid)
+        return TreePosition(
+            tree_level="leaf",
+            linked_nodes=[label],
+            confidence=0.85,
+            knowledge_role="title_command_match",
+        )
+
     try:
         exists, similar = cli_graph_store.command_exists(cleaned)
     except Exception:
         return None
 
-    if exists:
+    if exists and similar:
+        _CLI_PFX = re.compile(r"^(no|show|clear|display)\s+", re.IGNORECASE)
+        title_has_pfx = bool(_CLI_PFX.match(cleaned))
+        label_str = similar[0].lower().replace("_", " ")
+        label_has_pfx = bool(_CLI_PFX.match(label_str))
+        if not title_has_pfx and label_has_pfx:
+            return None
+        title_core = _CLI_PFX.sub("", cleaned.lower()).strip()
+        label_core = _CLI_PFX.sub("", label_str).strip()
+        if title_core != label_core:
+            return None
+
         return TreePosition(
             tree_level="leaf",
             linked_nodes=similar[:3],
@@ -184,8 +215,17 @@ def _match_hierarchy_branch(
 
     if seeds:
         seeds = list(seeds)
-        module_hits = sum(1 for s in seeds if s in cli_graph_store._module_ids)
-        level = "branch" if module_hits > len(seeds) // 2 else "leaf"
+        _CMD_TYPES = {"command", "operation_command"}
+        cmd_seeds = [
+            s for s in seeds
+            if cli_graph_store._nodes_by_id.get(s, {}).get("type", "") in _CMD_TYPES
+        ]
+        if cmd_seeds:
+            seeds = cmd_seeds
+            level = "leaf"
+        else:
+            module_hits = sum(1 for s in seeds if s in cli_graph_store._module_ids)
+            level = "branch" if module_hits > len(seeds) // 2 else "leaf"
         return TreePosition(
             tree_level=level,
             linked_nodes=seeds[:5],
@@ -256,12 +296,52 @@ def _gather_keyword_candidates(
     return [n for n, _ in counts.most_common(5)]
 
 
+# ── 废料检测 ──────────────────────────────────────────────────────────────
+
+def _detect_non_knowledge(
+    block_text: str, block_meta: Dict[str, Any]
+) -> Tuple[bool, str]:
+    """轻量级非知识块检测。返回 (is_non_knowledge, reason)。
+
+    仅做信号检测并上报，不做丢弃决策（丢弃由农场主负责）。
+    """
+    import re
+    from INAGENT.rag.knowledge_schema import (
+        NON_KNOWLEDGE_TITLE_PATTERNS,
+        NON_KNOWLEDGE_CONTENT_KEYWORDS,
+    )
+
+    title = block_meta.get("section_title", "").strip()
+    title_lower = title.lower()
+    for pat in NON_KNOWLEDGE_TITLE_PATTERNS:
+        if pat.lower() == title_lower or pat.lower() in title_lower:
+            return True, f"title_match:{pat}"
+
+    text = block_text.strip()
+    if len(text) <= 20:
+        return True, f"extremely_short:{len(text)}chars"
+
+    text_lower = text[:500].lower()
+    for kw in NON_KNOWLEDGE_CONTENT_KEYWORDS:
+        if kw.lower() in text_lower:
+            return True, f"content_keyword:{kw}"
+
+    urls = re.findall(r'https?://\S+', text[:1000])
+    words = text[:1000].split()
+    if words and len(urls) > 0 and len(urls) / len(words) > 0.5:
+        return True, f"url_heavy:{len(urls)}_urls_in_{len(words)}_words"
+
+    return False, ""
+
+
 # ── Gap 构建 ─────────────────────────────────────────────────────────────
 
 def _build_gap_entry(
     block: Dict[str, Any],
     block_idx: int,
     cli_graph_store,
+    *,
+    non_knowledge_reason: str = "",
 ):
     """为农民无法结构匹配的块构建 SchemaGapEntry。
 
@@ -274,6 +354,18 @@ def _build_gap_entry(
 
     meta = block.get("metadata", {})
     text = str(block.get("page_content") or block.get("text") or "")
+
+    if non_knowledge_reason:
+        return SchemaGapEntry(
+            gap_type="non_knowledge",
+            entity_title=meta.get("section_title", "") or meta.get("title", ""),
+            entity_description=text[:300],
+            entity_type=meta.get("document_category", ""),
+            evidence=f"non_knowledge detected: {non_knowledge_reason}",
+            source_file=meta.get("source_file", ""),
+            chunk_content=text[:500],
+            chunk_block_id=meta.get("block_id", ""),
+        )
 
     nearest = []
 
@@ -331,7 +423,7 @@ def link_blocks(
         - gap_entries: List[SchemaGapEntry] — 农民无法匹配的块
         - stats: {"total", "farmer_matched", "escalated"}
     """
-    stats = {"total": len(blocks), "farmer_matched": 0, "escalated": 0}
+    stats = {"total": len(blocks), "farmer_matched": 0, "escalated": 0, "non_knowledge": 0}
     gap_entries = []
 
     for idx, block in enumerate(blocks):
@@ -343,12 +435,17 @@ def link_blocks(
             meta["tree_position"] = pos.to_dict()
             stats["farmer_matched"] += 1
         else:
-            gap = _build_gap_entry(block, idx, cli_graph_store)
+            is_nk, nk_reason = _detect_non_knowledge(text, meta)
+            if is_nk:
+                gap = _build_gap_entry(block, idx, cli_graph_store, non_knowledge_reason=nk_reason)
+                stats["non_knowledge"] += 1
+            else:
+                gap = _build_gap_entry(block, idx, cli_graph_store)
             gap_entries.append(gap)
             stats["escalated"] += 1
 
     logger.info(
-        "[linker] farmer match: total=%d, matched=%d, escalated=%d",
-        stats["total"], stats["farmer_matched"], stats["escalated"],
+        "[linker] farmer match: total=%d, matched=%d, escalated=%d (non_knowledge=%d)",
+        stats["total"], stats["farmer_matched"], stats["escalated"], stats["non_knowledge"],
     )
     return blocks, gap_entries, stats

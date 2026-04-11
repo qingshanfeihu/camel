@@ -43,6 +43,10 @@ TREE_ENRICH_KEYS: Dict[str, List[str]] = {
         "keywords", "help_string", "full_syntax", "parameters",
         "operations", "actual_module",
     ],
+    "new_leaf": [
+        "keywords", "parameters", "help_string", "syntax",
+        "full_syntax", "operations",
+    ],
 }
 
 
@@ -175,7 +179,22 @@ SchemaGapKind = Literal[
     "conflict",
     "overflow",
     "ambiguous_match",  # 农民无法区分多个候选节点，交给农场主裁决
+    "non_knowledge",    # 非知识块（版权/商标/前言/附录/URL垃圾），由农场主决定丢弃或降级
 ]
+
+
+NON_KNOWLEDGE_TITLE_PATTERNS = frozenset({
+    "版权声明", "商标声明", "合格声明", "关于我们", "联系我们",
+    "编写目的", "适用对象", "附录", "读者对象", "版本说明",
+    "前言", "修订记录", "文档约定", "免责声明",
+    "about us", "contact us", "disclaimer", "revision history",
+})
+
+NON_KNOWLEDGE_CONTENT_KEYWORDS = frozenset({
+    "版权所有", "商标声明", "保留所有权利", "未经许可", "不得复制",
+    "copyright", "trademark", "all rights reserved",
+    "registered trademark", "注册商标",
+})
 
 
 @dataclass
@@ -196,6 +215,7 @@ class SchemaGapEntry:
     nearest_matches: List[Dict[str, Any]] = field(default_factory=list)
     chunk_content: str = ""
     ambiguous_candidates: List[Dict[str, Any]] = field(default_factory=list)  # ambiguous_match 时的候选节点列表
+    chunk_block_id: str = ""             # 源块 block_id，用于 fill_cycle 精确定位 chunk
 
 
 @dataclass
@@ -296,6 +316,7 @@ def build_tree_position(
 
 _LEVEL_TO_ROLE: Dict[str, str] = {
     "leaf": "command_attribute",
+    "new_leaf": "command_ref",
     "branch": "feature_doc",
     "trunk": "scenario_doc",
     "root": "architecture_doc",
@@ -308,6 +329,7 @@ def infer_knowledge_role(tree_level: str) -> str:
 
 LEVEL_TO_CAT: Dict[str, str] = {
     "leaf": "cli",
+    "new_leaf": "cli/reference",
     "branch": "app",
     "trunk": "spec",
     "root": "architecture",
