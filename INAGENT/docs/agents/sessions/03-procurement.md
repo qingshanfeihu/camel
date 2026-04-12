@@ -15,7 +15,7 @@
 
 | 符号 | 作用 |
 |------|------|
-| `KnowledgeProcurementAgent.evaluate_batch(chunks)` | 筛查（机械 L0+L1 → L2 → L3），返回 `List[ChunkDecision]`；L2 按 `metadata.source_file` 分组，**每文件一次** LLM 调用。 |
+| `KnowledgeProcurementAgent.evaluate_batch(chunks)` | 筛查（机械 L0+L1 → L2 → L3），返回 `List[ChunkDecision]`；L2 按 `metadata.source_file` 分组，**同一文件内按 chunk 子批**（每批至多 `_LLM_BATCH_SIZE`，默认 **50**）各调用一次 LLM，而非整文件单次调用。 |
 | `enrich_chunk_decision_for_farmer(cd)` | 模块级；仅 `accept` 时浅拷贝 chunk，把交接字段写入 `metadata`（见下节「与农民交接」）。 |
 | `agent.enrich_decisions_for_farmer(decisions)` | 对整批 `ChunkDecision` 逐条调用上一函数。 |
 | `agent.filter_accepted(decisions)` | 返回 **仅 accept** 的 chunk **dict 列表**，每条已含交接 metadata（内部调用 `enrich_chunk_decision_for_farmer`）。 |
@@ -36,8 +36,9 @@
 
 与上游/下游分工：**auto_convert** 负责解析阶段（目录树、空块、缓存等）；**采购机械层**负责 chunk 准入规则；**农场主** `classify_uncovered_chunks` 对仍无 `tree_level` 的块用同一套垃圾启发式发 `discard`（不重复采购已拒块）。
 
-### Layer 2（LLM，按 `source_file` 批处理）
+### Layer 2（LLM，按 `source_file` 分组 + 子批）
 
+- 同一 `source_file` 的 chunk 先合并为一批；若超过 `_LLM_BATCH_SIZE`（默认 50），则**拆成多个子批**，每个子批一次 `ChatAgent.step`（避免单次 completion 过长、网关超时）。
 - User prompt 中每段展示：`section_title` + 正文 **前 500 字符**（用于判断；**不得**据此截断入库 chunk 正文）。
 - 期望模型返回 JSON 数组，元素含：`idx`（批内下标）、`action`、`target_kb`、`confidence`、`reason`、`suggested_category`。
 - **后处理**：非法 `action` → `pending_review`；`confidence < 0.6` 且 `action` 为 `accept` 或 `reject` → 改为 `pending_review`。
@@ -97,6 +98,11 @@
 - `INAGENT/scripts/sim_ircookie_farmer.py`
 - `INAGENT/scripts/run_farmer_ircookie_procurement_simulation.py`
 - `INAGENT/scripts/test_ircookie_e2e.py`
+
+## 测试工具与正式入口
+
+- **正式入库编排**：`procurement_ingest.main` / `auto_convert.run_procurement_document_pipeline`（见上文角色定位）。
+- **`scripts/run_procurement_test_harness.py`**：端到端 **筛查模拟器**（自建 PDF/Office/TXT 解析 + `KnowledgeProcurementAgent`），用于回归采购员行为；**不**复现正式管线的全部 MinerU/缓存/批处理保护。运行结束应始终落盘根级 `manifest.json` 与 `summary.json`（含失败摘要、跳过项、0 chunk 文件）。
 
 ## 依赖文档
 

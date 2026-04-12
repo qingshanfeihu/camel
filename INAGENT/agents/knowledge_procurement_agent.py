@@ -23,7 +23,8 @@
   （二者在 ``_layer1_mechanical`` 中顺序执行，统称「机械层」。）
 
 三层（对外说明仍可按 L2/L3 计）
-  L2 LLM：按 metadata.source_file 分组，每文件一次 ChatAgent.step；prompt 内每段仅展示正文前 500 字
+  L2 LLM：按 metadata.source_file 分组；同一文件 chunk 数超过 _LLM_BATCH_SIZE（默认 50）时拆子批，
+          每子批一次 ChatAgent.step。prompt 内每段仅展示正文前 500 字
           （用于判断，不修改入库正文）。JSON 字段 suggested_category → ProcurementDecision.suggested_value。
           confidence < 0.6 且 action 为 accept/reject → 改为 pending_review；非法 action → pending_review。
   L3 元数据：reject/pending_review 直接返回；否则用 suggested_value 或 metadata.document_category
@@ -50,6 +51,8 @@ SchemaGapType 含 new_entity / new_entity_attribute：当前 L3 仅产生 new_ca
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import logging
 import re
@@ -71,6 +74,7 @@ logger = logging.getLogger(__name__)
 _INAGENT_ROOT = Path(__file__).resolve().parent.parent
 _KB_LOGS_DIR = _INAGENT_ROOT / "knowledge_base" / "logs"
 _PROCUREMENT_STEP_TIMEOUT = 180
+_L2_CACHE_SCHEMA_VERSION = 1
 
 ActionType = Literal["accept", "reject", "pending_review", "staging"]
 TargetKB = Literal["product", "test", "unknown"]
@@ -269,6 +273,43 @@ def build_procurement_prompt(source_file: str, chunks: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _safe_callable_signature(func) -> str:
+    try:
+        return inspect.getsource(func)
+    except Exception:
+        return getattr(func, "__qualname__", repr(func))
+
+
+_PROCUREMENT_PROMPT_SOURCE_SIGNATURE = _hash_text(
+    _safe_callable_signature(_build_system_prompt)
+    + "\n"
+    + _safe_callable_signature(build_procurement_prompt)
+)
+
+
+def _infer_model_signature(model: BaseModelBackend) -> str:
+    parts = [f"class={model.__class__.__module__}.{model.__class__.__name__}"]
+    for attr in (
+        "model_type",
+        "model_name",
+        "model",
+        "base_url",
+        "api_base",
+        "model_platform",
+    ):
+        try:
+            value = getattr(model, attr, None)
+        except Exception:
+            value = None
+        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+            parts.append(f"{attr}={value}")
+    return "|".join(parts)
+
+
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class KnowledgeProcurementAgent:
@@ -290,12 +331,25 @@ class KnowledgeProcurementAgent:
         model: BaseModelBackend,
         product_name: str = "NSAE (InfosecOS) 负载均衡器",
         registry_path: Optional[Path] = None,
+        model_signature: Optional[str] = None,
+        llm_cache_dir: Optional[Path] = None,
+        llm_cache_read_only: bool = False,
+        llm_cache_force_refresh: bool = False,
         _chat_agent=None,
     ):
         self._chat_agent = (
             _chat_agent if _chat_agent is not None
             else build_procurement_agent(model, product_name)
         )
+        self._product_name = product_name
+        self._model_signature = model_signature or _infer_model_signature(model)
+        self._llm_cache_dir = Path(llm_cache_dir) if llm_cache_dir else None
+        self._llm_cache_read_only = llm_cache_read_only
+        self._llm_cache_force_refresh = llm_cache_force_refresh
+        self._l2_cache_hits = 0
+        self._l2_cache_misses = 0
+        if self._llm_cache_dir and not self._llm_cache_read_only:
+            self._llm_cache_dir.mkdir(parents=True, exist_ok=True)
         self._registry = self._load_registry(registry_path)
 
     # ── public ────────────────────────────────────────────────────────────────
@@ -417,6 +471,12 @@ class KnowledgeProcurementAgent:
         counts.setdefault("accept", len(buckets.get("accept", [])))
         return counts
 
+    def get_l2_cache_stats(self) -> Dict[str, int]:
+        return {
+            "hits": self._l2_cache_hits,
+            "misses": self._l2_cache_misses,
+        }
+
     # ── layers ────────────────────────────────────────────────────────────────
 
     def _layer1_mechanical(self, chunk: Dict) -> Optional[ProcurementDecision]:
@@ -489,34 +549,53 @@ class KnowledgeProcurementAgent:
         results: Dict[int, ProcurementDecision] = {}
         local_chunks = [chunk for _, chunk in indexed_chunks]
         prompt = build_procurement_prompt(source_file, local_chunks)
+        cache_key = self._build_l2_cache_key(source_file, prompt)
 
-        try:
-            # 每子批仅保留 system，避免多批 step 堆叠触发上下文压缩 / 模型超长
-            self._chat_agent.clear_memory()
-            msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
-            executor = ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(self._chat_agent.step, msg)
+        cached_raw = self._load_l2_cache_raw(cache_key)
+        if cached_raw is not None:
+            self._l2_cache_hits += 1
+            logger.info(
+                "[采购员] L2 cache hit (%s): %d chunks",
+                source_file,
+                len(local_chunks),
+            )
+            parsed = self._parse_llm_json(cached_raw, len(local_chunks))
+        else:
+            self._l2_cache_misses += 1
             try:
-                response = future.result(timeout=_PROCUREMENT_STEP_TIMEOUT)
-            except FutureTimeout as exc:
-                future.cancel()
+                # 每子批仅保留 system，避免多批 step 堆叠触发上下文压缩 / 模型超长
+                self._chat_agent.clear_memory()
+                msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
+                executor = ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(self._chat_agent.step, msg)
+                try:
+                    response = future.result(timeout=_PROCUREMENT_STEP_TIMEOUT)
+                except FutureTimeout as exc:
+                    future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise TimeoutError(
+                        f"采购 L2 调用超时（>{_PROCUREMENT_STEP_TIMEOUT}s）"
+                    ) from exc
                 executor.shutdown(wait=False, cancel_futures=True)
-                raise TimeoutError(
-                    f"采购 L2 调用超时（>{_PROCUREMENT_STEP_TIMEOUT}s）"
-                ) from exc
-            executor.shutdown(wait=False, cancel_futures=True)
-            raw = response.msgs[0].content if response.msgs else ""
-            parsed = self._parse_llm_json(raw, len(local_chunks))
-        except Exception as exc:
-            logger.warning("[采购员] Layer 2 LLM 失败 (%s): %s", source_file, exc)
-            for global_idx, _ in indexed_chunks:
-                results[global_idx] = ProcurementDecision(
-                    action="pending_review",
-                    target_kb="unknown",
-                    confidence=0.0,
-                    reason=f"LLM 调用异常: {exc}",
+                raw = response.msgs[0].content if response.msgs else ""
+                parsed = self._parse_llm_json(raw, len(local_chunks))
+                self._store_l2_cache_raw(
+                    cache_key=cache_key,
+                    source_file=source_file,
+                    prompt=prompt,
+                    raw_response=raw,
+                    expected_count=len(local_chunks),
                 )
-            return results
+            except Exception as exc:
+                logger.warning("[采购员] Layer 2 LLM 失败 (%s): %s", source_file, exc)
+                for global_idx, _ in indexed_chunks:
+                    results[global_idx] = ProcurementDecision(
+                        action="pending_review",
+                        target_kb="unknown",
+                        confidence=0.0,
+                        reason=f"LLM 调用异常: {exc}",
+                    )
+                return results
 
         for local_idx, (global_idx, _) in enumerate(indexed_chunks):
             item = parsed.get(local_idx)
@@ -542,6 +621,67 @@ class KnowledgeProcurementAgent:
                 suggested_value=item.get("suggested_category"),
             )
         return results
+
+    def _build_l2_cache_key(self, source_file: str, prompt: str) -> str:
+        payload = {
+            "schema_version": _L2_CACHE_SCHEMA_VERSION,
+            "source_file": source_file,
+            "product_name": self._product_name,
+            "model_signature": self._model_signature,
+            "prompt_source_signature": _PROCUREMENT_PROMPT_SOURCE_SIGNATURE,
+            "prompt_hash": _hash_text(prompt),
+        }
+        return _hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _load_l2_cache_raw(self, cache_key: str) -> Optional[str]:
+        if self._llm_cache_dir is None or self._llm_cache_force_refresh:
+            return None
+        cache_path = self._llm_cache_dir / f"{cache_key}.json"
+        if not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[采购员] L2 cache 读取失败 %s: %s", cache_path.name, exc)
+            return None
+        if payload.get("schema_version") != _L2_CACHE_SCHEMA_VERSION:
+            return None
+        raw_response = payload.get("raw_response")
+        if not isinstance(raw_response, str) or not raw_response.strip():
+            return None
+        return raw_response
+
+    def _store_l2_cache_raw(
+        self,
+        *,
+        cache_key: str,
+        source_file: str,
+        prompt: str,
+        raw_response: str,
+        expected_count: int,
+    ) -> None:
+        if self._llm_cache_dir is None or self._llm_cache_read_only:
+            return
+        payload = {
+            "schema_version": _L2_CACHE_SCHEMA_VERSION,
+            "cache_key": cache_key,
+            "source_file": source_file,
+            "product_name": self._product_name,
+            "model_signature": self._model_signature,
+            "prompt_source_signature": _PROCUREMENT_PROMPT_SOURCE_SIGNATURE,
+            "prompt_hash": _hash_text(prompt),
+            "expected_count": expected_count,
+            "raw_response": raw_response,
+            "created_at": datetime.now().isoformat(),
+        }
+        cache_path = self._llm_cache_dir / f"{cache_key}.json"
+        try:
+            cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[采购员] L2 cache 写入失败 %s: %s", cache_path.name, exc)
 
     def _layer3_schema(
         self, chunk: Dict, decision: ProcurementDecision

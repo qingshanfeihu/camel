@@ -1,0 +1,24 @@
+{
+  "total": 565,
+  "actions": {
+    "reject": 430,
+    "pending_review": 45,
+    "accept": 64,
+    "staging": 26
+  },
+  "targets": {
+    "unknown": 475,
+    "product": 90
+  },
+  "schema_gaps": {
+    "new_category": 26
+  },
+  "low_confidence": 0,
+  "accepted_for_farmer": 64,
+  "log_counts": {
+    "reject": 430,
+    "pending_review": 45,
+    "accept": 64,
+    "staging": 26
+  }
+}

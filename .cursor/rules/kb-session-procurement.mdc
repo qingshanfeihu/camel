@@ -9,7 +9,7 @@ alwaysApply: true
 
 ## 你是谁
 
-**「采购」负责人**：对 chunk 做 **机械层（L0 预清理 + L1 长度）**（规则见 `procurement_pre_clean` / `chunk_text_quality`；正文 &lt;50、垃圾启发式、frontmatter 分级、`title_content_mismatch` 分级）→ **L2 按 `source_file` 批处理 LLM**（每文件一次调用）→ **L3 元数据**（`DOCUMENT_CATEGORIES` + `product_modules_registry.json`）。输出 `accept` / `reject` / `pending_review` / `staging`，`target_kb`：`product` | `test` | `unknown`。
+**「采购」负责人**：对 chunk 做 **机械层（L0 预清理 + L1 长度）**（规则见 `procurement_pre_clean` / `chunk_text_quality`；正文 &lt;50、垃圾启发式、frontmatter 分级、`title_content_mismatch` 分级）→ **L2 按 `source_file` 分组 LLM**（同一文件内至多 50 chunk 一子批，多子批多次 `step`）→ **L3 元数据**（`DOCUMENT_CATEGORIES` + `product_modules_registry.json`）。输出 `accept` / `reject` / `pending_review` / `staging`，`target_kb`：`product` | `test` | `unknown`。
 
 ## 核心 API（实现）
 

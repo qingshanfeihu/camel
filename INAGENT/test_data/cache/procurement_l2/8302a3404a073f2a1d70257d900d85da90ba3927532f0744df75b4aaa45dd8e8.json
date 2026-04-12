@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cache_key": "8302a3404a073f2a1d70257d900d85da90ba3927532f0744df75b4aaa45dd8e8",
+  "source_file": "APV IPv6应用交付网关.docx",
+  "product_name": "NSAE (InfosecOS) 负载均衡器",
+  "model_signature": "class=camel.models.siliconflow_model.SiliconFlowModel|model_type=qwen-plus",
+  "prompt_source_signature": "ca558619eab40bb130ed1f3be08e1b01c8d519d11fa64dff70daa47a9559d17d",
+  "prompt_hash": "cde6e106fda312fa54b3fba581da1ffc7b52e42fc8518434c0fbd779b85e5221",
+  "expected_count": 5,
+  "raw_response": "[\n  {\n    \"idx\": 0,\n    \"action\": \"reject\",\n    \"target_kb\": \"unknown\",\n    \"confidence\": 1.0,\n    \"reason\": \"纯Logo图像占位符，无实质技术内容\",\n    \"suggested_category\": \"doc\"\n  },\n  {\n    \"idx\": 1,\n    \"action\": \"accept\",\n    \"target_kb\": \"product\",\n    \"confidence\": 0.95,\n    \"reason\": \"说明IPv6过渡背景、APV网关核心价值定位及三大典型部署场景（IPv4资源交付给IPv6客户端、IPv6资源交付给IPv4客户端、纯IPv6网络交付），属于产品功能定位与适用场景描述\",\n    \"suggested_category\": \"spec/func_spec\"\n  },\n  {\n    \"idx\": 2,\n    \"action\": \"accept\",\n    \"target_kb\": \"product\",\n    \"confidence\": 0.98,\n    \"reason\": \"结构化列出双栈支持、IPv6负载均衡、健康检测、IPv4/IPv6转换、SSL加速（含证书位长、双向加密）、性能、高可用性（IPv6连接同步）、软件升级等具体功能模块，含技术细节，直接对应知识库已有模块：slb、ssl、ha、ipv6、health、admin（许可/升级）\",\n    \"suggested_category\": \"spec/func_spec\"\n  },\n  {\n    \"idx\": 3,\n    \"action\": \"accept\",\n    \"target_kb\": \"product\",\n    \"confidence\": 0.97,\n    \"reason\": \"详述IPv4/IPv6互联互通机制，包括反向代理模式、接口双栈配置、链路本地地址自动生成、VLAN/接口复用/端口聚合、OSPFv3支持等，明确涉及interface、ipv6、ospf、slb等已知模块，含部署逻辑和协议能力\",\n    \"suggested_category\": \"architecture/design\"\n  },\n  {\n    \"idx\": 4,\n    \"action\": \"reject\",\n    \"target_kb\": \"unknown\",\n    \"confidence\": 0.99,\n    \"reason\": \"纯市场宣传性总结，无功能说明、配置、命令、测试或架构信息，仅表达厂商承诺与愿景\",\n    \"suggested_category\": \"doc\"\n  }\n]",
+  "created_at": "2026-04-12T20:18:51.884884"
+}

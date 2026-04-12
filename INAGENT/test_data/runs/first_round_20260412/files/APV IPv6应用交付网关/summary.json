@@ -1,0 +1,18 @@
+{
+  "total": 5,
+  "actions": {
+    "reject": 2,
+    "accept": 3
+  },
+  "targets": {
+    "unknown": 2,
+    "product": 3
+  },
+  "schema_gaps": {},
+  "low_confidence": 0,
+  "accepted_for_farmer": 3,
+  "log_counts": {
+    "reject": 2,
+    "accept": 3
+  }
+}

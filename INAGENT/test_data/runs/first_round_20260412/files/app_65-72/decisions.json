@@ -1,0 +1,3534 @@
+[
+  {
+    "chunk_index": 0,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "来启⽤或禁⽤SSF功能。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 0,
+        "mineru_task_id": "app_65-72",
+        "section_title": "",
+        "parent_section": "",
+        "section_path": "",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "来启⽤或禁⽤SSF功能。",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 12 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 1,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "注意：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 2,
+        "mineru_task_id": "app_65-72",
+        "section_title": "",
+        "parent_section": "",
+        "section_path": "",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "注意：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 3 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 2,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.7. HA⽇志",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 4,
+        "mineru_task_id": "app_65-72",
+        "section_title": "HA⽇志",
+        "parent_section": "",
+        "section_path": "HA⽇志",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.7. HA⽇志",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 9 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 3,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "HA提供⽇志功能。默认情况下，系统禁⽤该功能。如果启⽤了HA功能，则⽇志功能同时被启⽤；如果禁⽤了HA功能，则⽇志功能同时被禁⽤。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 5,
+        "mineru_task_id": "app_65-72",
+        "section_title": "HA⽇志",
+        "parent_section": "",
+        "section_path": "HA⽇志",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "HA提供⽇志功能。默认情况下，系统禁⽤该功能。如果启⽤了HA功能，则⽇志功能同时被启⽤；如果禁⽤了HA功能，则⽇志功能同时被禁⽤。",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "accept",
+      "target_kb": "product",
+      "confidence": 0.95,
+      "reason": "说明HA日志功能的启用逻辑（与HA开关联动），属于产品功能行为描述，涉及HA模块",
+      "schema_gap": null,
+      "suggested_value": "app",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 4,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备⽀持⼋个HA⽇志级别：emerg、alert、crit、err、warning、notice、info和debug。管理员可以设置HA⽇志的级别。⼀旦设定了⽇志级别，低于这个级别的HA⽇志消息将被忽略，即系统不记录这些⽇志。默认的HA⽇志级别为info。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 6,
+        "mineru_task_id": "app_65-72",
+        "section_title": "HA⽇志",
+        "parent_section": "",
+        "section_path": "HA⽇志",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备⽀持⼋个HA⽇志级别：emerg、alert、crit、err、warning、notice、info和debug。管理员可以设置HA⽇志的级别。⼀旦设定了⽇志级别，低于这个级别的HA⽇志消息将被忽略，即系统不记录这些⽇志。默认的HA⽇志级别为info。",
+        "product_module": "用户管理"
+      }
+    },
+    "decision": {
+      "action": "accept",
+      "target_kb": "product",
+      "confidence": 0.98,
+      "reason": "明确列出8个HA日志级别、可配置性、过滤机制及默认值，属CLI可配参数说明，直接支撑配置实践，对应HA模块",
+      "schema_gap": null,
+      "suggested_value": "app/reference",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 5,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "HA内部信息计⼊HA⽇志，浮动IP分组和节点变化将被计⼊系统⽇志。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 7,
+        "mineru_task_id": "app_65-72",
+        "section_title": "HA⽇志",
+        "parent_section": "",
+        "section_path": "HA⽇志",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "HA内部信息计⼊HA⽇志，浮动IP分组和节点变化将被计⼊系统⽇志。",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 33 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 6,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8. 配置⽰例",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 8,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8. 配置⽰例",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 9 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 7,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "HA功能可以部署在以下典型场景中：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 9,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "HA功能可以部署在以下典型场景中：",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 17 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 8,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "下列章节将分别介绍三种典型场景的配置⽰例。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 11,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "下列章节将分别介绍三种典型场景的配置⽰例。",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 9,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.1. 场景1：Active/Standby",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 12,
+        "mineru_task_id": "app_65-72",
+        "section_title": "场景1：Active/Standby",
+        "parent_section": "",
+        "section_path": "场景1：Active/Standby",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.1. 场景1：Active/Standby",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 25 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 10,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.1.1. 配置⽬标",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 13,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.1.1. 配置⽬标",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 11,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Active/Standby部署场景可以⽤来实现如下配置⽬标：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 14,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Active/Standby部署场景可以⽤来实现如下配置⽬标："
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 31 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 12,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 0,
+        "block_type": "text",
+        "block_id": 16,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 13,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.1.2. 配置⽰例",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 1,
+        "block_type": "text",
+        "block_id": 18,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.1.2. 配置⽰例",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 14,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备1上的配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 1,
+        "block_type": "text",
+        "block_id": 19,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备1上的配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 8 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 15,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "1. 执⾏如下命令添加SLB配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 1,
+        "block_type": "text",
+        "block_id": 20,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "1. 执⾏如下命令添加SLB配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 17 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 16,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "2. 执⾏如下命令添加HA节点，同步节点和链路配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 1,
+        "block_type": "text",
+        "block_id": 22,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "2. 执⾏如下命令添加HA节点，同步节点和链路配置：",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 26 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 17,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "3. 执⾏如下命令添加浮动IP分组配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 24,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "3. 执⾏如下命令添加浮动IP分组配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 18,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "4.（可选）执⾏如下命令添加健康检查条件。下⾯以⽹关和CPU使⽤率的健康检查配置为例。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 26,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "4.（可选）执⾏如下命令添加健康检查条件。下⾯以⽹关和CPU使⽤率的健康检查配置为例。",
+        "product_module": "SLB"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 43 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 19,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "5.（可选）执⾏如下命令添加失效切换规则：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 28,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "5.（可选）执⾏如下命令添加失效切换规则：",
+        "product_module": "SLB",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 20,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "6.（可选）执⾏如下命令启⽤SSF功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 30,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "6.（可选）执⾏如下命令启⽤SSF功能：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 21,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "7.（可选）执⾏如下命令设置配置同步模式：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 32,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "7.（可选）执⾏如下命令设置配置同步模式：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 22,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "8.（可选）执⾏如下命令启⽤HA⽇志功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 34,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "8.（可选）执⾏如下命令启⽤HA⽇志功能：",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 23,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9. 执⾏如下命令启⽤HA功能并保存HA的相关配置到内存中：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 36,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9. 执⾏如下命令启⽤HA功能并保存HA的相关配置到内存中：",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 30 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 24,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备2上的配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 2,
+        "block_type": "text",
+        "block_id": 38,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备2上的配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 8 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 25,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "在Active/Standby场景中，推荐使⽤FFO链路和主链路从对端节点同步相关配置信息。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 39,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "在Active/Standby场景中，推荐使⽤FFO链路和主链路从对端节点同步相关配置信息。"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 46 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 26,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "1. 执⾏如下命令配置同步节点：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 40,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "1. 执⾏如下命令配置同步节点：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 16 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 27,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "2. 执⾏如下命令启⽤⽹络链路、FFO链路和启动时配置同步模式：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 42,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "2. 执⾏如下命令启⽤⽹络链路、FFO链路和启动时配置同步模式："
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 32 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 28,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "3.（可选）执⾏如下命令启⽤SSF功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 44,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "3.（可选）执⾏如下命令启⽤SSF功能：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 29,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "4. 执⾏如下命令启⽤HA功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 46,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "4. 执⾏如下命令启⽤HA功能：",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 16 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 30,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "⼀旦启⽤HA功能，unit2节点（设备2设备）就加⼊到了HA域中。unit2⾸先通过FFO链路从unit1节点（设备1设备）同步HA节点、FFO链路和⽹络链路的配置信息，然后通过主链路同步其它配置。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 48,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "⼀旦启⽤HA功能，unit2节点（设备2设备）就加⼊到了HA域中。unit2⾸先通过FFO链路从unit1节点（设备1设备）同步HA节点、FFO链路和⽹络链路的配置信息，然后通过主链路同步其它配置。",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "accept",
+      "target_kb": "product",
+      "confidence": 0.97,
+      "reason": "描述HA节点加入域后的两级同步流程（FFO链路→主链路）及同步内容（HA节点/FFO/网络链路配置），属HA架构行为原理，具实操指导价值",
+      "schema_gap": null,
+      "suggested_value": "architecture/design",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 31,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.2. 场景2：Active/Active ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 49,
+        "mineru_task_id": "app_65-72",
+        "section_title": "场景2：Active/Active",
+        "parent_section": "",
+        "section_path": "场景2：Active/Active",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.2. 场景2：Active/Active",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 24 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 32,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.2.1. 配置⽬标",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 50,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.2.1. 配置⽬标",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 33,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Active/Active部署场景可以⽤来实现如下配置⽬标：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 51,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Active/Active部署场景可以⽤来实现如下配置⽬标："
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 30 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 34,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 3,
+        "block_type": "text",
+        "block_id": 53,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 35,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "注意：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 55,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "注意：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 3 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 36,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "在该场景下，如果为节点1和节点2上的后台服务组配置代理IP地址池（通过命令“slb proxyip group”），并且代理IP地址池中含有相同的IP地址，系统会从代理IP地址池中选择⼀个IP与后台服务通信。如果两个节点使⽤了同⼀个IP地址，可能会出现后台服务将响应返回给节点1的SYN、ACK包返回给备机，或者反过来，从而导致系统⽆法正常⼯作。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 56,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "在该场景下，如果为节点1和节点2上的后台服务组配置代理IP地址池（通过命令“slb proxyip group”），并且代理IP地址池中含有相同的IP地址，系统会从代理IP地址池中选择⼀个IP与后台服务通信。如果两个节点使⽤了同⼀个IP地址，可能会出现后台服务将响应返回给节点1的SYN、ACK包返回给备机，或者反过来，从而导致系统⽆法正常⼯作。",
+        "product_module": "SLB"
+      }
+    },
+    "decision": {
+      "action": "accept",
+      "target_kb": "product",
+      "confidence": 0.96,
+      "reason": "指出slb proxyip group配置在HA双节点下若IP池重叠将引发响应错发（SYN-ACK被发往备机），属关键配置约束与故障机理说明，关联slb和HA模块",
+      "schema_gap": null,
+      "suggested_value": "app",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 37,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "建议在该场景下且配置了代理IP地址池时：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 57,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "建议在该场景下且配置了代理IP地址池时：",
+        "product_module": "基础网络",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 38,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.2.2. 配置⽰例",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 59,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.2.2. 配置⽰例",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 39,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备1上的配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 60,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备1上的配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 8 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 40,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "1. 执⾏如下命令添加SLB配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 4,
+        "block_type": "text",
+        "block_id": 61,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "1. 执⾏如下命令添加SLB配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 17 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 41,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb real tcp \"r1\" 192.168.100.20 80 65535 tcp 3 3 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 62,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb real tcp \"r1\" 192.168.100.20 80 65535 tcp 3 3",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 42,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb real ftp \"r2\" 192.168.100.21 21 65535 tcp 3 3 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 63,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb real ftp \"r2\" 192.168.100.21 21 65535 tcp 3 3",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 43,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb group method \"slb_g1\" rr ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 64,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb group method \"slb_g1\" rr"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 41 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 44,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb group method \"slb_g2\" rr ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 65,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb group method \"slb_g2\" rr"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 41 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 45,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb group member \"slb_g1\" \"r1\" 1 0 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 66,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb group member \"slb_g1\" \"r1\" 1 0"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 46,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb group member \"slb_g2\" \"r2\" 1 0 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 67,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb group member \"slb_g2\" \"r2\" 1 0"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 47,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb virtual tcp \"v1\" 192.168.10.2 80 arp 0 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 68,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb virtual tcp \"v1\" 192.168.10.2 80 arp 0",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 48,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb virtual ftp \"v2\" 192.168.10.3 21 0 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 69,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb virtual ftp \"v2\" 192.168.10.3 21 0",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 49,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb policy default \"v1\" \"slb_g1\" ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 70,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb policy default \"v1\" \"slb_g1\""
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 45 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 50,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb policy default \"v2\" \"slb_g2\" ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 71,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb policy default \"v2\" \"slb_g2\""
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 45 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 51,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ip pool p1 192.168.100.2 192.168.100.2 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 72,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ip pool p1 192.168.100.2 192.168.100.2",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 52,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ip pool p2 192.168.100.3 192.168.100.3 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 73,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ip pool p2 192.168.100.3 192.168.100.3",
+        "_quality_flags": [
+          "title_content_mismatch"
+        ]
+      }
+    },
+    "decision": {
+      "action": "pending_review",
+      "target_kb": "unknown",
+      "confidence": 0.7,
+      "reason": "预清理（质量）：标题与正文关联弱，转人工待审",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "title_content_mismatch",
+      "rule_layer": "L0",
+      "rule_confidence": 0.7
+    }
+  },
+  {
+    "chunk_index": 53,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb proxyip group slb_g1 p1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 74,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb proxyip group slb_g1 p1"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 40 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 54,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#slb proxyip group slb_g2 p2",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 75,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#slb proxyip group slb_g2 p2"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 40 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 55,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "2. 执⾏如下命令添加HA节点，同步节点和链路配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 76,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "2. 执⾏如下命令添加HA节点，同步节点和链路配置：",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 26 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 56,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha unit \"unit1\" 192.168.6.1 65521",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 77,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha unit \"unit1\" 192.168.6.1 65521",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 46 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 57,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha unit \"unit2\" 192.168.6.2 65521 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 78,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha unit \"unit2\" 192.168.6.2 65521",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 46 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 58,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#synconfig peer \"unit1\" 192.168.6.1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 79,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#synconfig peer \"unit1\" 192.168.6.1"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 59,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#synconfig peer \"unit2\" 192.168.6.2 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 80,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#synconfig peer \"unit2\" 192.168.6.2"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 60,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha link network on ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 81,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha link network on",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 31 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 61,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha link ffo on",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 82,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha link ffo on",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 27 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 62,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "3. 执⾏如下命令添加浮动IP分组配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 83,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "3. 执⾏如下命令添加浮动IP分组配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 63,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group id 1",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 84,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group id 1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 26 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 64,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group fip 1 192.168.10.2 port1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 85,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group fip 1 192.168.10.2 port1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 46 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 65,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group fip 1 192.168.100.2 port3",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 86,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group fip 1 192.168.100.2 port3",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 66,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group priority unit1 1 10",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 87,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group priority unit1 1 10",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 41 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 67,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group priority unit2 1 5 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 88,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group priority unit2 1 5",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 40 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 68,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group preempt on 1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 89,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group preempt on 1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 34 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 69,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group enable 1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 90,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group enable 1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 30 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 70,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group id 2",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 91,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group id 2",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 26 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 71,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group fip 2 192.168.10.3 port1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 92,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group fip 2 192.168.10.3 port1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 46 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 72,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group fip 2 192.168.100.3 port3",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 93,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group fip 2 192.168.100.3 port3",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 47 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 73,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group priority unit1 2 5",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 94,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group priority unit1 2 5",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 40 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 74,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group priority unit2 2 10 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 95,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group priority unit2 2 10",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 41 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 75,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group preempt on 2 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 96,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group preempt on 2",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 34 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 76,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha group enable 2 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 5,
+        "block_type": "text",
+        "block_id": 97,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha group enable 2",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 30 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 77,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "4.（可选）执⾏如下命令添加健康检查条件。下⾯以⽹关和CPU使⽤率的健康检查配置为例。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 98,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "4.（可选）执⾏如下命令添加健康检查条件。下⾯以⽹关和CPU使⽤率的健康检查配置为例。",
+        "product_module": "SLB"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 43 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 78,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "5.（可选）执⾏如下命令添加失效切换规则：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 100,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "5.（可选）执⾏如下命令添加失效切换规则：",
+        "product_module": "SLB",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 79,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "6.（可选）执⾏如下命令启⽤SSF功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 102,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "6.（可选）执⾏如下命令启⽤SSF功能：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 80,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "7.（可选）执⾏如下命令设置配置同步模式：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 104,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "7.（可选）执⾏如下命令设置配置同步模式：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 81,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "8.（可选）执⾏如下命令启⽤HA⽇志功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 106,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "8.（可选）执⾏如下命令启⽤HA⽇志功能：",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 21 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 82,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9. 执⾏如下命令启⽤HA功能并保存HA的相关配置到内存中：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 108,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9. 执⾏如下命令启⽤HA功能并保存HA的相关配置到内存中：",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 30 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 83,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备2上的配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 110,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备2上的配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 8 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 84,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "在Active/Active场景中，推荐使⽤FFO链路和主链路从对端节点同步相关配置信息。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 111,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "在Active/Active场景中，推荐使⽤FFO链路和主链路从对端节点同步相关配置信息。"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 45 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 85,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "1. 执⾏如下命令配置同步节点：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 112,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "1. 执⾏如下命令配置同步节点：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 16 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 86,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "2. 执⾏如下命令启⽤⽹络链路、FFO链路和启动时配置同步模式：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 6,
+        "block_type": "text",
+        "block_id": 114,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "2. 执⾏如下命令启⽤⽹络链路、FFO链路和启动时配置同步模式："
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 32 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 87,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "3.（可选）执⾏如下命令启⽤SSF功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 116,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "3.（可选）执⾏如下命令启⽤SSF功能：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 88,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha ssf peer 192.168.6.1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 117,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha ssf peer 192.168.6.1",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 36 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 89,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha ssf on",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 118,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha ssf on",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 22 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 90,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "4. 执⾏如下命令启⽤HA功能：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 119,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "4. 执⾏如下命令启⽤HA功能：",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 16 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 91,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "Demo(config)#ha on",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 120,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "Demo(config)#ha on",
+        "product_module": "高可用",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 18 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 92,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "⼀旦启⽤HA功能，unit2节点（设备2设备）就加⼊到了HA域中。unit2⾸先通过FFO链路从unit1节点（设备1设备）同步HA节点、FFO链路和⽹络链路的配置信息，然后通过主链路同步其它配置。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 121,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "⼀旦启⽤HA功能，unit2节点（设备2设备）就加⼊到了HA域中。unit2⾸先通过FFO链路从unit1节点（设备1设备）同步HA节点、FFO链路和⽹络链路的配置信息，然后通过主链路同步其它配置。",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容与idx 2完全重复，无新增信息，违反知识库去重原则",
+      "schema_gap": null,
+      "suggested_value": "doc",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 93,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.3. 场景3：N+1 ",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 122,
+        "mineru_task_id": "app_65-72",
+        "section_title": "场景3：N+1",
+        "parent_section": "",
+        "section_path": "场景3：N+1",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.3. 场景3：N+1",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 14 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 94,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "在N+1部署场景中，HA域包含 $\\mathrm { N } { + } 1$ 个节点，在其中N个节点上，浮动IP分组的状态都为“Active”，在另外⼀个节点上，所有浮动IP分组的状态都为“Standby”。本节将介绍“ $\\because - 1 ^ { \\prime }$ ”部署场景的配置⽬标和配置⽰例。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 123,
+        "mineru_task_id": "app_65-72",
+        "section_title": "场景3：N+1",
+        "parent_section": "",
+        "section_path": "场景3：N+1",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "在N+1部署场景中，HA域包含 $\\mathrm { N } { + } 1$ 个节点，在其中N个节点上，浮动IP分组的状态都为“Active”，在另外⼀个节点上，所有浮动IP分组的状态都为“Standby”。本节将介绍“ $\\because - 1 ^ { \\prime }$ ”部署场景的配置⽬标和配置⽰例。",
+        "product_module": "高可用"
+      }
+    },
+    "decision": {
+      "action": "accept",
+      "target_kb": "product",
+      "confidence": 0.94,
+      "reason": "定义N+1 HA部署场景中浮动IP分组的Active/Standby状态分布规则，属HA高可用拓扑模式的核心规格说明，支撑方案设计与验证",
+      "schema_gap": null,
+      "suggested_value": "spec/func_spec",
+      "reason_code": null,
+      "rule_layer": null,
+      "rule_confidence": null
+    }
+  },
+  {
+    "chunk_index": 95,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.3.1. 配置⽬标",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 124,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.3.1. 配置⽬标",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 96,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "“ $3 { + } 1$ ”部署场景可以⽤来实现如下配置⽬标：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 125,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "“ $3 { + } 1$ ”部署场景可以⽤来实现如下配置⽬标："
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 32 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 97,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 127,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽬标",
+        "parent_section": "",
+        "section_path": "配置⽬标",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "实现如上配置⽬标的⽹络拓扑图如下图所⽰。",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 20 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 98,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "9.8.3.2. 配置⽰例",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 129,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "9.8.3.2. 配置⽰例",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 13 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 99,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "设备1上的配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 130,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "设备1上的配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 8 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  },
+  {
+    "chunk_index": 100,
+    "source_file": "app_65-72.pdf",
+    "chunk": {
+      "page_content": "1. 执⾏如下命令添加SLB配置：",
+      "metadata": {
+        "source_pdf": "C:\\SynologyDrive\\INFOAGEN\\INAGENT\\knowledge_base\\input\\app_65-72.pdf",
+        "source_file": "app_65-72.pdf",
+        "page_idx": 7,
+        "block_type": "text",
+        "block_id": 131,
+        "mineru_task_id": "app_65-72",
+        "section_title": "配置⽰例",
+        "parent_section": "",
+        "section_path": "配置⽰例",
+        "document_category": "app/reference",
+        "is_frontmatter": false,
+        "frontmatter_confidence": 0.0,
+        "clean_text": "1. 执⾏如下命令添加SLB配置：",
+        "_quality_flags": [
+          "extremely_short"
+        ]
+      }
+    },
+    "decision": {
+      "action": "reject",
+      "target_kb": "unknown",
+      "confidence": 1.0,
+      "reason": "内容长度 17 字符，低于 50 字符最低门槛",
+      "schema_gap": null,
+      "suggested_value": null,
+      "reason_code": "too_short",
+      "rule_layer": "L1",
+      "rule_confidence": 1.0
+    }
+  }
+]

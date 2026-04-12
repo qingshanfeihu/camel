@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cache_key": "6342915af1350e16dee8e6a3016f28492757354d7ddf044e573c71e0e9442592",
+  "source_file": "app_65-72.pdf",
+  "product_name": "NSAE (InfosecOS) 负载均衡器",
+  "model_signature": "class=camel.models.siliconflow_model.SiliconFlowModel|model_type=qwen-plus",
+  "prompt_source_signature": "ca558619eab40bb130ed1f3be08e1b01c8d519d11fa64dff70daa47a9559d17d",
+  "prompt_hash": "430f570878a574b81bb499229d7da66967f191aefc500b972c44a2447e115b04",
+  "expected_count": 6,
+  "raw_response": "[\n  {\"idx\": 0, \"action\": \"accept\", \"target_kb\": \"product\", \"confidence\": 0.95, \"reason\": \"说明HA日志功能的启用逻辑（与HA开关联动），属于产品功能行为描述，涉及HA模块\", \"suggested_category\": \"app\"},\n  {\"idx\": 1, \"action\": \"accept\", \"target_kb\": \"product\", \"confidence\": 0.98, \"reason\": \"明确列出8个HA日志级别、可配置性、过滤机制及默认值，属CLI可配参数说明，直接支撑配置实践，对应HA模块\", \"suggested_category\": \"app/reference\"},\n  {\"idx\": 2, \"action\": \"accept\", \"target_kb\": \"product\", \"confidence\": 0.97, \"reason\": \"描述HA节点加入域后的两级同步流程（FFO链路→主链路）及同步内容（HA节点/FFO/网络链路配置），属HA架构行为原理，具实操指导价值\", \"suggested_category\": \"architecture/design\"},\n  {\"idx\": 3, \"action\": \"accept\", \"target_kb\": \"product\", \"confidence\": 0.96, \"reason\": \"指出slb proxyip group配置在HA双节点下若IP池重叠将引发响应错发（SYN-ACK被发往备机），属关键配置约束与故障机理说明，关联slb和HA模块\", \"suggested_category\": \"app\"},\n  {\"idx\": 4, \"action\": \"reject\", \"target_kb\": \"unknown\", \"confidence\": 1.0, \"reason\": \"内容与idx 2完全重复，无新增信息，违反知识库去重原则\", \"suggested_category\": \"doc\"},\n  {\"idx\": 5, \"action\": \"accept\", \"target_kb\": \"product\", \"confidence\": 0.94, \"reason\": \"定义N+1 HA部署场景中浮动IP分组的Active/Standby状态分布规则，属HA高可用拓扑模式的核心规格说明，支撑方案设计与验证\", \"suggested_category\": \"spec/func_spec\"}\n]",
+  "created_at": "2026-04-12T20:18:39.247367"
+}
