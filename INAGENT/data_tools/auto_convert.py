@@ -715,6 +715,9 @@ def _iter_text_files() -> List[Path]:
     return _iter_files_by_ext(TEXT_EXTENSIONS)
 
 
+def convert_office_file(file_path: Path) -> None:
+    """处理单个 Office 文档（doc/docx/xls/xlsx），写入 reference/{stem}.json。"""
+    stem = _output_stem_for_file(file_path)
     source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
     cache_path = LOG_DIR / f"{stem}.cache.json"
@@ -808,6 +811,7 @@ def _iter_text_files() -> List[Path]:
     cache_payload = {
         "source_file": str(file_path),
         "source_file_fingerprint": _compute_file_fingerprint(file_path),
+        "config_fingerprint": _compute_config_fingerprint(),
         "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
         "doc_type": doc_type,
         "link_stats": link_stats,
@@ -1048,6 +1052,7 @@ def convert_text_file(file_path: Path) -> None:
     cache_payload = {
         "source_file": str(file_path),
         "source_file_fingerprint": _compute_file_fingerprint(file_path),
+        "config_fingerprint": _compute_config_fingerprint(),
         "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
         "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
@@ -1231,6 +1236,53 @@ def _compute_pdf_fingerprint(pdf: Path) -> Dict[str, object]:
         "mtime": stat.st_mtime,
         "sha256": sha256.hexdigest(),
     }
+
+
+def _compute_file_fingerprint(src: Path) -> Dict[str, object]:
+    """任意源文件（Office/TXT 等）的 size/mtime/sha256，用于缓存跳过判定。"""
+    stat = src.stat()
+    sha256 = hashlib.sha256()
+    with src.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            sha256.update(chunk)
+    return {
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "sha256": sha256.hexdigest(),
+    }
+
+
+def _can_skip_office_cached(
+    src: Path,
+    json_path: Path,
+    cache_path: Path,
+) -> bool:
+    """Office/TXT 与 PDF 共用跳过逻辑：缓存 fingerprint + config fingerprint。"""
+    if not (json_path.exists() and cache_path.exists()):
+        return False
+    try:
+        meta = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    cached_config = meta.get("config_fingerprint")
+    if cached_config and cached_config != _compute_config_fingerprint():
+        logger.info("[cache] config changed for %s, re-processing.", src.name)
+        return False
+    cached_fp = meta.get("source_file_fingerprint") or meta.get("source_pdf_fingerprint")
+    if not isinstance(cached_fp, dict):
+        return False
+    current = _compute_file_fingerprint(src)
+    if (
+        cached_fp.get("size") == current.get("size")
+        and cached_fp.get("mtime") == current.get("mtime")
+    ):
+        return True
+    logger.info("[cache] mtime/size changed for %s, verifying content...", src.name)
+    cached_hash = cached_fp.get("sha256")
+    if cached_hash and cached_hash == current.get("sha256"):
+        return True
+    logger.info("[cache] content changed for %s, re-processing.", src.name)
+    return False
 
 
 def _compute_config_fingerprint() -> str:
@@ -2383,7 +2435,15 @@ def _assign_fallback_tree_position(knowledge_blocks: List[Dict[str, Any]]) -> in
             continue
         doc_cat = meta.get("document_category", "")
         if doc_cat.startswith("cli"):
-            continue  # CLI 块由 farmer_link 负责
+            # 农民/ linker 未挂上树时仍缺 tree_position：给 merge/ingest 可消费的弱兜底
+            meta["tree_position"] = {
+                "tree_level": "leaf",
+                "linked_nodes": [],
+                "confidence": 0.35,
+                "knowledge_role": "fallback_cli_unlinked",
+            }
+            assigned += 1
+            continue
         sp = meta.get("section_path", "")
         depth = len([p for p in sp.replace(">", "/").split("/") if p.strip()]) if sp else 0
         if depth <= 1:
@@ -2908,6 +2968,8 @@ async def run_procurement_document_pipeline() -> None:
                             if _needs_relink(b):
                                 (b.get("metadata") or {}).pop("tree_position", None)
                         blocks, _link_stats = _run_knowledge_linking(blocks, json_file)
+
+                    _assign_fallback_tree_position(blocks)
 
                     json_file.write_text(
                         json.dumps(blocks, ensure_ascii=False, indent=2),

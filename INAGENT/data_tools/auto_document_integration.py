@@ -478,7 +478,7 @@ def load_function_structure_index(index_path: Optional[Path] = None) -> Dict[str
         index_path = Path(__file__).parent / "knowledge_base" / "function_structure_index.json"
     
     if not index_path.exists():
-        logger.warning("功能结构索引不存在，返回空索引")
+        logger.debug("功能结构索引不存在，返回空索引")
         return {}
     
     try:

@@ -107,9 +107,10 @@ class KnowledgeFarmOwnerAgent:
         self._skeleton_index_override = skeleton_index
         self._tree_context_cache: Dict[str, TreeContext] = {}
         self._decision_cache: Dict[str, Dict[str, Any]] = {}
+        load_inagent_env()
+        self._product_name = product_name or get_product_name()
         if self._chat_agent is None and model is not None:
-            load_inagent_env()
-            owner_product_name = product_name or get_product_name()
+            owner_product_name = self._product_name
             self._chat_agent = ChatAgent(
                 system_message=BaseMessage.make_assistant_message(
                     role_name="Knowledge Farm Owner",
