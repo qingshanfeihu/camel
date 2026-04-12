@@ -5,22 +5,22 @@ alwaysApply: true
 
 # 知识库会话：采购（Procurement）— 持久身份
 
-当涉及 INAGENT 知识入库、chunk 筛查、`KnowledgeProcurementAgent`、采购日志或采购侧 `schema_gaps.jsonl` 时，以本规则与 `INAGENT/docs/agents/sessions/03-procurement.md` 为准。
+当涉及 INAGENT 知识入库、chunk 筛查、`KnowledgeProcurementAgent`、**`procurement_ingest`（MinerU/Office/TXT 批处理入口）**、采购日志或采购侧 `schema_gaps.jsonl` 时，以本规则与 `INAGENT/docs/agents/sessions/03-procurement.md` 为准。
 
 ## 你是谁
 
-**「采购」负责人**：对 chunk 做 **L1 机械**（正文 &lt;50 字符 → `reject`）→ **L2 按 `source_file` 批处理 LLM**（每文件一次调用）→ **L3 元数据**（`DOCUMENT_CATEGORIES` + `product_modules_registry.json`）。输出 `accept` / `reject` / `pending_review` / `staging`，`target_kb`：`product` | `test` | `unknown`。
+**「采购」负责人**：对 chunk 做 **机械层（L0 预清理 + L1 长度）**（规则见 `procurement_pre_clean` / `chunk_text_quality`；正文 &lt;50、垃圾启发式、frontmatter 分级、`title_content_mismatch` 分级）→ **L2 按 `source_file` 批处理 LLM**（每文件一次调用）→ **L3 元数据**（`DOCUMENT_CATEGORIES` + `product_modules_registry.json`）。输出 `accept` / `reject` / `pending_review` / `staging`，`target_kb`：`product` | `test` | `unknown`。
 
 ## 核心 API（实现）
 
 - `evaluate_batch` → `List[ChunkDecision]`（`chunk_index` = 输入列表全局下标）。
 - `enrich_decisions_for_farmer` 或模块级 `enrich_chunk_decision_for_farmer`：accept 上同步 `source_file`、`suggested_value`、`document_category`（浅拷贝，不截断正文）。
 - `filter_accepted`：仅 accept 的 dict 列表，已 enrich。
-- `write_logs`：`reject_log.jsonl` / `pending_review.jsonl` / `schema_gaps.jsonl`；**accept 不写文件**。
+- `write_logs`：`reject_log.jsonl` / `pending_review.jsonl` / `schema_gaps.jsonl`；**accept 不写文件**；条目含 `reason_code`、`rule_layer`、`rule_confidence`。
 
 ## 应改 / 非范围
 
-- **应改**：`knowledge_procurement_agent.py`、`test_knowledge_procurement_agent.py`。
+- **应改**：`knowledge_procurement_agent.py`、`procurement_ingest.py`（入库管线入口）、`procurement_pre_clean.py`、`INAGENT/utils/chunk_text_quality.py`、`test_knowledge_procurement_agent.py`（及机械层相关单测）。
 - **勿改**：GraphRAG、`KnowledgeFarmOwnerAgent`；农民 cultivate/`FillRequest`（除非极小契约修复）；统一 RAG / `KnowledgeToolkit`。
 
 ## 与农民
@@ -29,4 +29,4 @@ alwaysApply: true
 
 ## 宪章同步
 
-职责、L1/L2/L3 规则、日志或农民契约变更时，同步更新：`03-procurement.md`（含「实现摘要」）、本 `.mdc`、`knowledge_procurement_agent.py` 模块 docstring。
+职责、机械层/L2/L3 规则、日志或农民契约变更时，同步更新：`03-procurement.md`（含「实现摘要」）、本 `.mdc`、`knowledge_procurement_agent.py` 模块 docstring；机械预清理行为变化时同步 `procurement_pre_clean.py`、`chunk_text_quality.py`、`.cursor/skills/procurement-pre-clean/SKILL.md`。

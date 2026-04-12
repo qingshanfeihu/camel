@@ -400,19 +400,19 @@ def _run_initialize_pipeline() -> int:
 
 
 def _run_auto_convert_incremental(new_files: List[Path], modified_files: List[Path]) -> int:
-    """运行增量auto_convert处理"""
+    """运行增量文档入库（采购管线 ``procurement_ingest``，实现见 auto_convert）。"""
     try:
         import asyncio
-        from INAGENT.data_tools.auto_convert import main as auto_convert_main
+        from INAGENT.data_tools.procurement_ingest import main as procurement_ingest_main
         
-        # auto_convert会自动检测文件变化并处理
+        # procurement_ingest / auto_convert 会自动检测文件变化并处理
         # 这里我们只是触发它运行
-        asyncio.run(auto_convert_main())
+        asyncio.run(procurement_ingest_main())
         return 0
     except SystemExit as e:
         return int(getattr(e, "code", 1) or 0)
     except Exception as e:
-        print(f"[错误] auto_convert 执行失败: {e}")
+        print(f"[错误] procurement_ingest 执行失败: {e}")
         import traceback
         traceback.print_exc()
         return 1
@@ -536,9 +536,8 @@ def action_update() -> int:
         print(f"[info] 发现 {len(new_files)} 个新文件和 {len(modified_files)} 个修改的文件")
         print(f"       PDF: {n_pdf} / Office: {n_office} / 合计: {total_changed}")
         
-        # 运行auto_convert进行增量处理
-        # auto_convert内部已经处理PDF和Office文件（含自动分类）
-        print("[info] 执行增量更新（auto_convert 自动处理并分类所有文件类型）...")
+        # 运行采购文档管线进行增量处理（PDF/Office/TXT）
+        print("[info] 执行增量更新（procurement_ingest：MinerU 等与规则/合并）...")
         rc = _run_auto_convert_incremental(new_files, modified_files)
         
         if rc == 0:

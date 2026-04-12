@@ -14,10 +14,15 @@
 """
 采购员 Agent (Knowledge Procurement Agent)
 
-对 auto_convert 等产出的 chunk 做三层筛查，输出四类 action 与 target_kb。
+对 **采购管线**（``procurement_ingest`` / ``auto_convert.run_procurement_document_pipeline``）
+落盘产出的 chunk 做筛查，输出四类 action 与 target_kb。
 
-三层
-  L1 机械：page_content/text strip 后长度 < 50 → reject，否则进 L2。
+机械层（L0+L1，实现见 ``procurement_pre_clean`` + ``chunk_text_quality``）
+  L0 预清理：与全库一致的垃圾/版式启发式（纯标点行、版权声明单行等）→ reject，不进 LLM。
+  L1 长度：page_content/text strip 后长度 < 50 → reject，否则进 L2。
+  （二者在 ``_layer1_mechanical`` 中顺序执行，统称「机械层」。）
+
+三层（对外说明仍可按 L2/L3 计）
   L2 LLM：按 metadata.source_file 分组，每文件一次 ChatAgent.step；prompt 内每段仅展示正文前 500 字
           （用于判断，不修改入库正文）。JSON 字段 suggested_category → ProcurementDecision.suggested_value。
           confidence < 0.6 且 action 为 accept/reject → 改为 pending_review；非法 action → pending_review。
@@ -34,19 +39,21 @@
 
 农民交接：enrich_chunk_decision_for_farmer / enrich_decisions_for_farmer / filter_accepted
   浅拷贝 chunk；非空 suggested_value → metadata.suggested_value；在 DOCUMENT_CATEGORIES 内则写 document_category；
-  source_file 与 ChunkDecision 对齐。不截断正文、不删 auto_convert 元数据。
+  source_file 与 ChunkDecision 对齐。不截断正文、不删入库元数据（含 MinerU/规则阶段字段）。
 
 SchemaGapType 含 new_entity / new_entity_attribute：当前 L3 仅产生 new_category、new_module。
 
 职责或实现变更时同步更新：
   INAGENT/docs/agents/sessions/03-procurement.md（含「实现摘要」）
   .cursor/rules/kb-session-procurement.mdc
+  procurement_pre_clean.py、chunk_text_quality.py、.cursor/skills/procurement-pre-clean/SKILL.md（机械预清理相关）
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -56,7 +63,6 @@ from typing import Dict, List, Literal, Optional, Tuple
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
 from camel.models import BaseModelBackend
-
 from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
 from INAGENT.utils.env_utils import load_inagent_env
 
@@ -64,6 +70,7 @@ logger = logging.getLogger(__name__)
 
 _INAGENT_ROOT = Path(__file__).resolve().parent.parent
 _KB_LOGS_DIR = _INAGENT_ROOT / "knowledge_base" / "logs"
+_PROCUREMENT_STEP_TIMEOUT = 180
 
 ActionType = Literal["accept", "reject", "pending_review", "staging"]
 TargetKB = Literal["product", "test", "unknown"]
@@ -80,6 +87,9 @@ class ProcurementDecision:
     reason: str
     schema_gap: Optional[SchemaGapType] = None
     suggested_value: Optional[str] = None
+    reason_code: Optional[str] = None
+    rule_layer: Optional[str] = None
+    rule_confidence: Optional[float] = None
 
 
 @dataclass
@@ -224,7 +234,12 @@ def build_procurement_agent(model: BaseModelBackend, product_name: str) -> ChatA
             content=_build_system_prompt(product_name, known_modules),
         ),
         model=model,
-        step_timeout=None,
+        step_timeout=_PROCUREMENT_STEP_TIMEOUT,
+        # L2 按批独立评估，无需跨批对话；默认 summarize_threshold=50 会在累积上下文后
+        # 触发 CAMEL「Summarize the conversation」额外 LLM 调用，极慢且与采购任务无关。
+        summarize_threshold=None,
+        # 采购无工具，每步一次模型调用即可；避免异常路径下多轮迭代拉长单次 step。
+        max_iteration=1,
     )
 
 
@@ -373,6 +388,9 @@ class KnowledgeProcurementAgent:
                 "target_kb": cd.decision.target_kb,
                 "confidence": cd.decision.confidence,
                 "reason": cd.decision.reason,
+                "reason_code": cd.decision.reason_code,
+                "rule_layer": cd.decision.rule_layer,
+                "rule_confidence": cd.decision.rule_confidence,
                 "schema_gap": cd.decision.schema_gap,
                 "suggested_value": cd.decision.suggested_value,
                 "timestamp": datetime.now().isoformat(),
@@ -402,18 +420,42 @@ class KnowledgeProcurementAgent:
     # ── layers ────────────────────────────────────────────────────────────────
 
     def _layer1_mechanical(self, chunk: Dict) -> Optional[ProcurementDecision]:
-        """Document-level verdict first, then fallback length check."""
-        content = (chunk.get("page_content") or chunk.get("text") or "").strip()
-        if len(content) < 50:
-            return ProcurementDecision(
-                action="reject",
-                target_kb="unknown",
-                confidence=1.0,
-                reason=f"内容长度 {len(content)} 字符，低于 50 字符最低门槛",
-            )
-        return None
+        """L0 预清理 + L1 长度；通过则返回 None 进入 L2。"""
+        from INAGENT.agents.procurement_pre_clean import (
+            mechanical_pre_clean_chunk,
+        )
 
-    _LLM_BATCH_SIZE = 100
+        screen = mechanical_pre_clean_chunk(chunk)
+        if screen.quality_flags:
+            meta = chunk.setdefault("metadata", {})
+            if isinstance(meta, dict):
+                merged = set(meta.get("_quality_flags", []))
+                merged.update(screen.quality_flags)
+                meta["_quality_flags"] = sorted(merged)
+        if screen.continue_to_layer2:
+            return None
+        if screen.decision_hint == "pending_review":
+            return ProcurementDecision(
+                action="pending_review",
+                target_kb="unknown",
+                confidence=screen.confidence,
+                reason=screen.reason,
+                reason_code=screen.reason_code,
+                rule_layer=screen.rule_layer,
+                rule_confidence=screen.confidence,
+            )
+        return ProcurementDecision(
+            action="reject",
+            target_kb="unknown",
+            confidence=screen.confidence or 1.0,
+            reason=screen.reason,
+            reason_code=screen.reason_code,
+            rule_layer=screen.rule_layer,
+            rule_confidence=screen.confidence,
+        )
+
+    # 单批过大会导致单次 completion 极长（每段一条 JSON），网关/模型耗时陡增，表现为某批（如 cli_1-82 后半批）「卡住」。
+    _LLM_BATCH_SIZE = 50
 
     def _layer2_llm_batch(
         self,
@@ -449,8 +491,20 @@ class KnowledgeProcurementAgent:
         prompt = build_procurement_prompt(source_file, local_chunks)
 
         try:
+            # 每子批仅保留 system，避免多批 step 堆叠触发上下文压缩 / 模型超长
+            self._chat_agent.clear_memory()
             msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
-            response = self._chat_agent.step(msg)
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(self._chat_agent.step, msg)
+            try:
+                response = future.result(timeout=_PROCUREMENT_STEP_TIMEOUT)
+            except FutureTimeout as exc:
+                future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise TimeoutError(
+                    f"采购 L2 调用超时（>{_PROCUREMENT_STEP_TIMEOUT}s）"
+                ) from exc
+            executor.shutdown(wait=False, cancel_futures=True)
             raw = response.msgs[0].content if response.msgs else ""
             parsed = self._parse_llm_json(raw, len(local_chunks))
         except Exception as exc:

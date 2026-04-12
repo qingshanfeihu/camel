@@ -10,28 +10,20 @@ import shutil
 import time
 import urllib.error
 import urllib.request
-import concurrent.futures
-import threading
+
 try:
     import json_repair
 except ImportError:
     json_repair = None
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-
-import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from camel.loaders.local_mineru_reader import LocalMinerUReader
 from camel.logger import set_log_file, set_log_level
-
-from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
-from INAGENT.data_tools.mineru_cloud_client import (
-    DEFAULT_API_BASE as MINERU_CLOUD_DEFAULT_API_BASE,
-    mineru_cloud_parse_one_pdf,
-    validate_content_list,
-)
+from INAGENT.config.project_config import cfg_float, cfg_int, cfg_str
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
@@ -50,6 +42,18 @@ LOG_FILE = LOG_DIR / "auto_convert.log"
 
 logger = logging.getLogger("auto_convert")
 
+# ---------------------------------------------------------------------------
+# 模块职责（架构边界）
+#
+# - **农民工具（本模块对外 API）**：供 ``KnowledgeFarmerAgent`` 等调用的结构化函数，例如
+#   ``_extract_chunk_metadata``、``_extract_text_from_block``、``_clean_chunk_text``、
+#   ``_run_knowledge_linking``。这些函数**不**绑定 MinerU 子进程；只处理已有块/文本。
+#
+# - **采购管线（原始文档 → reference）**：MinerU（``mineru_procurement.convert_one``）/
+#   Office / TXT 批处理、前置页标记、规则与批量 LLM 元数据、初挂树与落盘，由 **采购**
+#   会话编排。对外权威入口为 ``INAGENT.data_tools.procurement_ingest.main``；实现函数名为
+#   ``run_procurement_document_pipeline``。历史别名 ``main`` 仍指向同一协程。
+#
 # Bump this when auto_convert logic changes in a way that should invalidate cache
 # (e.g., text extraction, metadata extraction, block selection).
 AUTO_CONVERT_SCHEMA_VERSION = "2026-06-30.1"
@@ -388,105 +392,21 @@ def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
         return blocks
 
 
-# MinerU 输出统一放到 knowledge_base/mineru_output，避免散落到外面
-MINERU_OUTPUT_DIR = DOC_LOCAL_DIR / "mineru_output"
-# 备份目录：大文件移到这里而非删除，MinerU 重新生成代价很高
-MINERU_BACKUP_DIR = DOC_LOCAL_DIR / "mineru_backup"
-
-
-# vLLM Docker Configuration (optional MinerU hybrid-http-client backend)
-# Docs: https://opendatalab.github.io/MinerU/zh/quick_start/docker_deployment/
-# Default False: MinerU 云端 API 或纯本地引擎不需要本地 vLLM；避免误报「vLLM 不可用」。
-# 需要本地 OpenAI 兼容 vLLM 时：project.yaml 设 auto_convert.vllm.enable: true
-# 或环境变量 AUTO_CONVERT_USE_MINERU_VLLM=1。
-USE_DOCKER_VLLM: bool = False
-DOCKER_VLLM_URL = (
-    cfg_str("auto_convert.vllm.url", "", env="MINERU_VLLM_URL")
-    or cfg_str("auto_convert.vllm.url", "", env="VLLM_URL")
-    or "http://127.0.0.1:8000"
+# MinerU PDF 阶段（convert_one、输出目录、云端/vLLM 配置）见 ``mineru_procurement``。
+from INAGENT.data_tools import mineru_procurement as _mp
+from INAGENT.data_tools.mineru_procurement import (
+    MINERU_BACKUP_DIR,
+    MINERU_OUTPUT_DIR,
+    convert_one,
+)
+from INAGENT.data_tools.mineru_procurement import (
+    refresh_mineru_vllm_settings as _refresh_mineru_vllm_settings,
+)
+from INAGENT.data_tools.mineru_procurement import (
+    setup_mineru_config as _setup_mineru_config,
 )
 
-
-def _refresh_mineru_vllm_settings() -> None:
-    """Reload vLLM flags after load_inagent_env() so .env / project.yaml apply."""
-    global USE_DOCKER_VLLM, DOCKER_VLLM_URL
-    USE_DOCKER_VLLM = cfg_bool(
-        "auto_convert.vllm.enable",
-        False,
-        env="AUTO_CONVERT_USE_MINERU_VLLM",
-    )
-    DOCKER_VLLM_URL = (
-        cfg_str("auto_convert.vllm.url", "", env="MINERU_VLLM_URL")
-        or cfg_str("auto_convert.vllm.url", "", env="VLLM_URL")
-        or "http://127.0.0.1:8000"
-    )
-
-
-def _mineru_cloud_token() -> str:
-    return (
-        os.environ.get("MINERU_API_TOKEN", "").strip()
-        or os.environ.get("MINERU_API_KEY", "").strip()
-    )
-
-
-def _use_mineru_cloud() -> bool:
-    """Prefer cloud when credentials exist unless explicitly disabled."""
-    env_raw = os.environ.get("AUTO_CONVERT_MINERU_CLOUD")
-    if env_raw is not None:
-        return str(env_raw).strip().lower() in {"1", "true", "yes", "on"}
-    raw_cfg = _load_project_config()
-    if isinstance(raw_cfg, dict):
-        ac = raw_cfg.get("auto_convert")
-        if isinstance(ac, dict):
-            mineru = ac.get("mineru")
-            if isinstance(mineru, dict):
-                cloud = mineru.get("cloud")
-                if isinstance(cloud, dict) and "enable" in cloud:
-                    v = cloud["enable"]
-                    if isinstance(v, bool):
-                        return v
-                    return str(v).strip().lower() in {"1", "true", "yes", "on"}
-    return bool(_mineru_cloud_token())
-
-
-def _mineru_cloud_api_base() -> str:
-    u = cfg_str(
-        "auto_convert.mineru.cloud.api_base",
-        MINERU_CLOUD_DEFAULT_API_BASE,
-        env="MINERU_CLOUD_API_BASE",
-    ).strip()
-    return u or MINERU_CLOUD_DEFAULT_API_BASE
-
-
-def _mineru_cloud_poll_timeout() -> float:
-    return float(
-        cfg_int(
-            "auto_convert.mineru.cloud.poll_timeout_seconds",
-            3600,
-            env="MINERU_CLOUD_POLL_TIMEOUT",
-        )
-    )
-
-
-def _mineru_cloud_model_version() -> str:
-    return cfg_str(
-        "auto_convert.mineru.cloud.model_version", "vlm",
-        env="MINERU_CLOUD_MODEL_VERSION",
-    ).strip() or "vlm"
-
-
-def _mineru_cloud_is_ocr() -> bool:
-    v = os.environ.get("MINERU_CLOUD_IS_OCR", "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-
-def _mineru_cloud_no_cache() -> bool:
-    v = os.environ.get("MINERU_CLOUD_NO_CACHE", "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-
 # Cached availability checks
-_VLLM_AVAILABLE: Optional[bool] = None
 _LLM_METADATA_AVAILABLE: Optional[bool] = None
 _LLM_GATEWAY_AVAILABLE: Optional[bool] = None
 
@@ -583,7 +503,6 @@ def _call_llm_with_retry_and_fallback(
     fallback_config: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """LLM Gateway API 调用，含指数退避重试。allow_fallback/fallback_config 保留签名兼容性但已忽略。"""
-    import random
 
     num_retries = 0
     delay = initial_delay
@@ -683,7 +602,7 @@ def _probe_llm_gateway_chat(
             err_body = ""
         return False, f"LLM Gateway HTTP {exc.code}: {err_body or str(exc)}"
     except Exception as exc:
-        return False, f"LLM Gateway 预检失败: {str(exc)}"
+        return False, f"LLM Gateway 预检失败: {exc!s}"
 
 
 _probe_siliconflow_chat = _probe_llm_gateway_chat  # compat alias
@@ -793,45 +712,6 @@ def _iter_text_files() -> List[Path]:
     return _iter_files_by_ext(TEXT_EXTENSIONS)
 
 
-def _compute_file_fingerprint(file_path: Path) -> str:
-    """计算文件 MD5 指纹"""
-    h = hashlib.md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _can_skip_office_cached(file_path: Path, json_path: Path, cache_path: Path) -> bool:
-    """检查 Office 文档是否可以跳过（缓存命中）"""
-    if not json_path.exists() or not cache_path.exists():
-        return False
-    try:
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        cached_fp = cache.get("source_file_fingerprint", "")
-        cached_schema = cache.get("schema_version", "")
-        if cached_schema != AUTO_CONVERT_SCHEMA_VERSION:
-            return False
-        current_fp = _compute_file_fingerprint(file_path)
-        return cached_fp == current_fp
-    except Exception:
-        return False
-
-
-def convert_office_file(file_path: Path) -> None:
-    """
-    处理单个 Office 文档（docx/xlsx/doc/xls），生成知识块 JSON。
-
-    流程:
-    1. 用 document_classifier 分类文档
-    2. 根据类别调用 spec_parser 或 testlist_parser
-    3. 对生成的知识块运行 metadata 增强（规则 + LLM）
-    4. 写入 reference/ 目录，与 PDF 流水线输出合并
-    """
-    from INAGENT.data_tools.spec_parser import parse_spec_document
-    from INAGENT.data_tools.testlist_parser import parse_test_list
-
-    stem = _output_stem_for_file(file_path)
     source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
     cache_path = LOG_DIR / f"{stem}.cache.json"
@@ -1810,8 +1690,8 @@ def _auto_promote_dense_leaves(knowledge_blocks: List[Dict[str, Any]]) -> int:
     规则：同一 (product_module, parent_section) 下 leaf 数量 >= _LEAF_PROMOTE_THRESHOLD
     → 取该组 function_hierarchy 深度最浅的块，最多晋升 ceil(group_size/4) 个。
     """
-    from collections import defaultdict
     import math
+    from collections import defaultdict
 
     def _fh_depth(b):
         fh = b.get("metadata", {}).get("function_hierarchy", "")
@@ -2470,6 +2350,15 @@ def _filter_frontmatter_blocks(blocks: List[Dict]) -> Tuple[List[Dict], List[int
     if not frontmatter_pages:
         return blocks, []
 
+    # Default to tag-only handoff to procurement, which applies reject/pending policy.
+    # Keep drop-mode configurable for backward compatibility.
+    drop_in_autoconvert = bool(frontmatter_cfg.get("drop_in_autoconvert", False))
+    if not drop_in_autoconvert:
+        logger.info(
+            "Frontmatter filter: keeping flagged pages for procurement handoff (tag-only mode)."
+        )
+        return blocks, frontmatter_pages
+
     filtered = [
         block
         for block in blocks
@@ -2511,502 +2400,6 @@ def _assign_fallback_tree_position(knowledge_blocks: List[Dict[str, Any]]) -> in
         logger.info("[fallback-tree] assigned tree_position to %d non-CLI blocks", assigned)
     return assigned
 
-
-def _infer_pdf_document_category(pdf: Path) -> str:
-    """Infer document_category from PDF filename heuristics.
-
-    Convention (based on project naming):
-      - cli*.pdf / *命令*.pdf          → "cli/reference"
-      - app*.pdf / *应用*.pdf          → "app/reference"
-      - *架构* / *设计* / *design*       → "architecture/design"
-      - *spec* / *需求* / *prd*          → "spec/design"
-      - default                         → "spec/design"
-    """
-    name_lower = pdf.stem.lower()
-    # CLI pattern: starts with "cli" or contains CLI-specific keywords
-    if re.match(r"^cli", name_lower) or any(k in name_lower for k in ("命令参考", "cli_ref", "cliref")):
-        return "cli/reference"
-    # App/feature guide pattern
-    if re.match(r"^app", name_lower) or any(k in name_lower for k in ("应用配置", "app_guide", "feature")):
-        return "app/reference"
-    # Architecture/design pattern
-    if any(k in name_lower for k in ("架构", "design", "arch", "architecture", "设计")):
-        return "architecture/design"
-    # Spec/requirement pattern
-    if any(k in name_lower for k in ("spec", "需求", "prd", "requirement")):
-        return "spec/design"
-    return "spec/design"
-
-
-async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[int] = None) -> None:
-    json_path, cache_path = _target_paths(pdf)
-
-    if _can_skip_cached(pdf, json_path, cache_path):
-        logger.info("[cache] skip %s, content unchanged.", pdf.name)
-        return
-
-    start_time = time.perf_counter()
-    if max_pages:
-        logger.info("[mineru] processing %s (limited to first %d pages for testing)...", pdf, max_pages)
-    else:
-        logger.info("[mineru] processing %s ...", pdf)
-    
-    # Local MinerU CLI extras (optional hybrid-http-client + vLLM)
-    local_extra_args: List[str] = []
-    use_vllm_backend = USE_DOCKER_VLLM
-    if use_vllm_backend:
-        global _VLLM_AVAILABLE
-        if _VLLM_AVAILABLE is None:
-            _VLLM_AVAILABLE = _ensure_urls_reachable(
-                [_build_models_url(DOCKER_VLLM_URL)],
-                attempts=NET_RETRY_ATTEMPTS,
-                delay=NET_RETRY_DELAY,
-                timeout=NET_TIMEOUT,
-                label="mineru-vllm",
-            )
-        if not _VLLM_AVAILABLE:
-            use_vllm_backend = False
-            logger.warning(
-                "[mineru] vLLM server not reachable; falling back to local backend."
-            )
-
-    if use_vllm_backend:
-        # hybrid-http-client: Local Layout + Remote VLM
-        # Check docs: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#clientopenai-hybrid-http-client
-        local_extra_args = ["-b", "hybrid-http-client", "-u", DOCKER_VLLM_URL]
-        logger.info("[mineru] Using Docker vLLM backend: %s", DOCKER_VLLM_URL)
-
-    # Skip network check for MinerU because modelscope handles connectivity internally
-    # and we want to avoid blocking on HuggingFace timeouts.
-    # if not _ensure_urls_reachable(
-    #     urls_to_check,
-    #     attempts=NET_RETRY_ATTEMPTS,
-    #     delay=NET_RETRY_DELAY,
-    #     timeout=NET_TIMEOUT,
-    #     label="mineru",
-    # ):
-    #     raise RuntimeError("Network check failed for MinerU dependencies.")
-
-    # Stream MinerU CLI logs to terminal in real time (with retry)
-    # NOTE: task_id equals the input filename stem in LocalMinerUReader.
-    task_id = pdf.stem
-    existing_output = _find_existing_mineru_output(task_id)
-    if existing_output and _can_reuse_mineru_output(pdf, existing_output):
-        logger.info(
-            "[mineru] reuse existing output for task_id=%s (%s)",
-            task_id,
-            existing_output,
-        )
-    else:
-        task_id = ""
-        cloud_attempted = False
-        # 1) MinerU 云端 API（有凭证且未限制 max_pages 时优先）
-        if max_pages is None and _use_mineru_cloud():
-            tok = _mineru_cloud_token()
-            if tok:
-                cloud_attempted = True
-                logger.info("[mineru-cloud] trying cloud API for %s ...", pdf.name)
-                cloud_json = await asyncio.to_thread(
-                    mineru_cloud_parse_one_pdf,
-                    pdf,
-                    output_root=MINERU_OUTPUT_DIR,
-                    token=tok,
-                    api_base=_mineru_cloud_api_base(),
-                    model_version=_mineru_cloud_model_version(),
-                    is_ocr=_mineru_cloud_is_ocr(),
-                    no_cache=_mineru_cloud_no_cache(),
-                    poll_timeout=_mineru_cloud_poll_timeout(),
-                    logger=logger,
-                )
-                if cloud_json and validate_content_list(cloud_json):
-                    task_id = pdf.stem
-                    logger.info(
-                        "[mineru-cloud] done -> %s",
-                        cloud_json,
-                    )
-                else:
-                    logger.warning(
-                        "[mineru-cloud] unavailable or empty output; "
-                        "falling back to local MinerU CLI (non-vLLM / default backend)."
-                    )
-
-        # 2) 本地 MinerU CLI；若已尝试云端失败，强制不用 vLLM 额外参数
-        if not task_id:
-            extra_args = [] if cloud_attempted else local_extra_args
-            last_error: Optional[Exception] = None
-            for attempt in range(1, NET_RETRY_ATTEMPTS + 1):
-                try:
-                    task_id = await reader.submit_task(
-                        str(pdf),
-                        extra_args=extra_args,
-                        cwd=str(MINERU_OUTPUT_DIR),
-                    )
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    logger.warning(
-                        "[mineru] submit failed (attempt %d/%d): %s",
-                        attempt,
-                        NET_RETRY_ATTEMPTS,
-                        exc,
-                    )
-                    if attempt < NET_RETRY_ATTEMPTS:
-                        await asyncio.sleep(NET_RETRY_DELAY * attempt)
-            if not task_id:
-                raise RuntimeError(
-                    f"MinerU submit failed after retries: {last_error}"
-                )
-    mineru_elapsed_s = time.perf_counter() - start_time
-    logger.info(
-        "[mineru] finished task_id=%s in %.2fs",
-        task_id,
-        mineru_elapsed_s,
-    )
-
-    # 1) 读取结构化 JSON（如果没有就跳过，保持 blocks 为空）
-    blocks: Dict | List[Dict] | List = []
-    try:
-        raw_json = await reader.get_task_output(task_id)
-        blocks = json.loads(raw_json)
-    except FileNotFoundError:
-        logger.warning(
-            "[warn] no *_content_list.json found for task %s, "
-            "metadata blocks will be empty.",
-            task_id,
-        )
-    except json.JSONDecodeError as e:
-        logger.warning(
-            "[warn] failed to parse JSON output for %s: %s",
-            task_id,
-            e,
-        )
-
-    frontmatter_pages: List[int] = []
-    if isinstance(blocks, list) and blocks and isinstance(blocks[0], dict):
-        # Run synchronous frontmatter filter in thread to avoid blocking loop
-        blocks, frontmatter_pages = await asyncio.to_thread(_filter_frontmatter_blocks, blocks)
-
-    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 文档分类已移至 knowledge_linker（农民匹配+农场主决策）
-    # 此处不再调用 classify_document
-
-    knowledge_blocks: List[Dict[str, object]] = []
-    if isinstance(blocks, list):
-        section_context_map = _build_section_context_map(blocks)
-        # 1. 预处理：收集所有有效的 Block 和基础元数据
-        valid_items = []
-        for idx, block in enumerate(blocks):
-            if not isinstance(block, dict):
-                continue
-            
-            # Apply page limit for testing (if max_pages is set)
-            if max_pages is not None:
-                page_idx = block.get("page_idx")
-                if page_idx is not None and page_idx >= max_pages:
-                    continue
-            
-            text = _extract_text_from_block(block)
-            if not text.strip():
-                continue
-
-            section_context = section_context_map.get(idx, {})
-            # Preserve image path reference if the block has one
-            img_path = block.get("img_path", "")
-            base_meta = {
-                "source_pdf": str(pdf),
-                "source_file": json_path.name,
-                "page_idx": block.get("page_idx"),
-                "block_type": block.get("type"),
-                "block_id": idx,
-                "mineru_task_id": task_id,
-                "section_title": section_context.get("section_title", ""),
-                "parent_section": section_context.get("parent_section", ""),
-                "section_path": section_context.get("section_path", ""),
-                "product_module": "unknown",
-                "document_category": _infer_pdf_document_category(pdf),
-            }
-            if img_path:
-                base_meta["img_path"] = img_path
-            valid_items.append((text, base_meta))
-
-        # 2. 并行处理：使用线程池并发调用 _extract_chunk_metadata
-        default_workers = 16
-        max_workers = cfg_int(
-            "auto_convert.parallel.max_workers",
-            default_workers,
-            env="AUTO_CONVERT_MAX_WORKERS",
-        )
-        if valid_items:
-            total = len(valid_items)
-            processed = 0
-            start_time = time.perf_counter()
-            
-            # Helper to run blocking processing in a thread with progress tracking
-            # Phase 1: rule-based extraction (fast, no LLM)
-            # Phase 2: batch LLM extraction (N chunks per API call)
-            def _process_batch_sync(items):
-                nonlocal processed
-                config = _load_project_config()
-                meta_rules = config.get("metadata_rules", {})
-                llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
-                llm_enabled = llm_config.get("enable", False)
-
-                # Phase 1: rule-based extraction for all items (fast)
-                rule_results = []
-                for text, base in items:
-                    clean_text = _clean_chunk_text(text)
-                    meta_out: Dict[str, object] = {"clean_text": clean_text}
-                    section_title = str(base.get("section_title") or "").strip()
-                    parent_section = str(base.get("parent_section") or "").strip()
-                    if section_title:
-                        meta_out["section_title"] = section_title
-                    if parent_section:
-                        meta_out["parent_section"] = parent_section
-                    section_path = base.get("section_path")
-                    if section_path:
-                        meta_out["section_path"] = section_path
-                    lower_text = clean_text.lower()
-                    lower_section = f"{section_title} {parent_section}".lower()
-                    for intent, keywords in meta_rules.get("intents", {}).items():
-                        if any(k.lower() in lower_text for k in keywords):
-                            meta_out["intent"] = intent
-                            break
-                    product_modules_map = _merge_product_modules_map(meta_rules.get("product_modules", {}))
-                    for module, keywords in product_modules_map.items():
-                        if any(k.lower() in lower_text for k in keywords) or any(k.lower() in lower_section for k in keywords):
-                            meta_out["product_module"] = module
-                            break
-                    for proto in _match_protocols_word_boundary(
-                        meta_rules.get("protocol_types", {}), lower_text
-                    ):
-                        meta_out.setdefault("protocol_type", [])
-                        meta_out["protocol_type"].append(proto)
-                    for prefix, keywords in meta_rules.get("command_prefixes", {}).items():
-                        if any(k.lower() in lower_text for k in keywords):
-                            meta_out["command_prefix"] = prefix
-                            break
-                    for mode, keywords in meta_rules.get("config_modes", {}).items():
-                        if any(k.lower() in lower_text for k in keywords):
-                            meta_out["config_mode"] = mode
-                            break
-                    rule_results.append((clean_text, meta_out))
-
-                processed += len(items)
-                elapsed = time.perf_counter() - start_time
-                rate = processed / elapsed if elapsed > 0 else 0
-                remaining = total - processed
-                eta = remaining / rate if rate > 0 else 0
-                logger.info(
-                    "[parallel] 规则提取完成: %d/%d (%.1f%%) | %.1f 块/秒 | 剩余: %.1f秒",
-                    processed, total, 100.0 * processed / total, rate, eta,
-                )
-
-                # Phase 2: batch LLM extraction (if enabled)
-                # Skip blocks where rule-based extraction already filled key fields
-                if llm_enabled:
-                    _KEY_FIELDS = {"product_module", "protocol_type", "intent", "config_mode"}
-                    needs_llm = []
-                    for ct, m in rule_results:
-                        filled = sum(1 for f in _KEY_FIELDS if m.get(f))
-                        if filled < 3:  # need LLM if <3 of 4 key fields filled
-                            needs_llm.append((ct, m))
-                    skipped = len(rule_results) - len(needs_llm)
-                    if skipped:
-                        logger.info(
-                            "[batch-llm] 跳过 %d/%d 块 (规则已覆盖), LLM处理 %d 块",
-                            skipped, len(rule_results), len(needs_llm),
-                        )
-                    batch_size = _BATCH_LLM_SIZE
-                    llm_batches = []
-                    for i in range(0, len(needs_llm), batch_size):
-                        llm_batches.append(needs_llm[i:i + batch_size])
-
-                    llm_done = 0
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, 32)) as executor:
-                        def _do_batch(batch):
-                            _apply_llm_metadata_extraction_batch(
-                                [(ct, m) for ct, m in batch], llm_config
-                            )
-                        futures = {executor.submit(_do_batch, b): b for b in llm_batches}
-                        for future in concurrent.futures.as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception as e:
-                                logger.warning("[batch-llm] batch failed: %s", e)
-                            llm_done += len(futures[future])
-                            llm_total = len(needs_llm)
-                            if llm_done % max(1, min(500, llm_total // 5)) < batch_size or llm_done >= llm_total:
-                                logger.info(
-                                    "[batch-llm] LLM进度: %d/%d (%.1f%%)",
-                                    llm_done, llm_total,
-                                    100.0 * llm_done / llm_total if llm_total else 100.0,
-                                )
-
-                return [meta_out for _, meta_out in rule_results]
-
-            logger.info(
-                "[parallel] 开始提取 metadata: %d 个块 (线程数=%d)...",
-                total,
-                max_workers,
-            )
-            
-            # Run the batch processing in a separate thread to unblock the event loop
-            results = await asyncio.to_thread(_process_batch_sync, valid_items)
-            
-            elapsed = time.perf_counter() - start_time
-            logger.info(
-                "[parallel] metadata 提取完成: %d 个块，耗时 %.2f 秒 (平均 %.1f 块/秒)",
-                total, elapsed, total / elapsed if elapsed > 0 else 0
-            )
-            
-            # 3. 合并结果
-            for (text, base_meta), extracted_meta in zip(valid_items, results):
-                base_meta.update(extracted_meta)
-                knowledge_blocks.append(
-                    {
-                        "page_content": text,
-                        "metadata": base_meta,
-                    }
-                )
-    
-    # 3.5 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
-    DOC_LOCAL_REF_DIR.mkdir(parents=True, exist_ok=True)
-    doc_ref_path = DOC_LOCAL_REF_DIR / f"{_output_stem_for_file(pdf)}.json"
-    doc_ref_path.write_text(
-        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info("[doc_ref] passthrough -> %s (%d blocks)", doc_ref_path.name, len(knowledge_blocks))
-
-    # 4. 增强 metadata：基于功能结构索引添加 scenario_id 和 step_type
-    logger.info("[metadata] 开始增强 metadata...")
-    _enhance_metadata_with_function_index(knowledge_blocks)
-    logger.info("[metadata] metadata 增强完成，共处理 %d 个块", len(knowledge_blocks))
-    
-    # 5. 自动识别文档模块和功能（新增）
-    logger.info("[auto-identify] 开始自动识别文档模块和功能...")
-    try:
-        from INAGENT.data_tools.auto_document_integration import auto_identify_document_module, load_function_structure_index
-        
-        existing_index = load_function_structure_index()
-        document_metadata = auto_identify_document_module(
-            pdf_path=pdf,
-            content_blocks=knowledge_blocks,
-            existing_index=existing_index
-        )
-        
-        logger.info(
-            "[auto-identify] 文档识别完成: 模块=%s, 协议=%s, 类型=%s, 置信度=%.2f",
-            document_metadata.get("product_modules", []),
-            document_metadata.get("protocol_types", []),
-            document_metadata.get("document_type", "unknown"),
-            document_metadata.get("confidence", 0.0)
-        )
-        
-        if document_metadata.get("new_modules_discovered"):
-            logger.info(
-                "[auto-identify] 发现新模块: %s",
-                document_metadata["new_modules_discovered"]
-            )
-    except Exception as e:
-        logger.warning("[auto-identify] 自动识别失败: %s", e)
-        document_metadata = {}
-
-    # 农民匹配 + 农场主决策：将知识块挂载到命令树
-    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
-
-    # Fallback tree_position：为没有 tree_position 的非 CLI 块按 section_path 深度赋予默认层级
-    _assign_fallback_tree_position(knowledge_blocks)
-
-    # 自然树生长：branch 过密时自动晋升为 trunk
-    _auto_promote_branches(knowledge_blocks)
-
-    # 叶子密集晋升：同模块下 leaf 过多时晋升为 branch/trunk
-    _auto_promote_dense_leaves(knowledge_blocks)
-
-    json_path.write_text(
-        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    cache_payload: Dict[str, object] = {
-        "source_pdf": str(pdf),
-        "source_pdf_fingerprint": _compute_pdf_fingerprint(pdf),
-        "config_fingerprint": _compute_config_fingerprint(),
-        "mineru_task_id": task_id,
-        "mineru_output_dir": str(MINERU_OUTPUT_DIR),
-        "frontmatter_pages": frontmatter_pages,
-        "record_count": len(knowledge_blocks),
-        "output_json": str(json_path),
-        "link_stats": link_stats,
-        "document_metadata": document_metadata,
-    }
-    cache_path.write_text(
-        json.dumps(cache_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    logger.info("[ok] saved knowledge blocks -> %s", json_path)
-    logger.info("[ok] saved cache -> %s", cache_path)
-
-    # Cleanup large MinerU intermediate files to save disk space
-    task_dir = MINERU_OUTPUT_DIR / task_id
-    if task_dir.exists():
-        _cleanup_mineru_intermediate(task_dir)
-
-
-
-def _setup_mineru_config() -> None:
-    """Check and deploy optimized MinerU configuration from current project."""
-    try:
-        # PSScriptRoot equivalents logic
-        project_root = BASE_DIR.parent
-        src_config = project_root / "mineru.json"
-        
-        # Ensure output directory exists before writing config
-        MINERU_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        
-        # Target: mineru.json in output directory (will be CWD for subprocess)
-        dest_config = MINERU_OUTPUT_DIR / "mineru.json"
-        
-        if src_config.exists():
-            # Load and resolve ENV placeholders before writing to destination
-            try:
-                content = src_config.read_text(encoding="utf-8")
-                config_data = json.loads(content)
-                
-                def recursive_resolve(data):
-                    if isinstance(data, dict):
-                        return {k: recursive_resolve(v) for k, v in data.items()}
-                    elif isinstance(data, list):
-                        return [recursive_resolve(v) for v in data]
-                    elif isinstance(data, str):
-                        return resolve_env_placeholder(data)
-                    return data
-
-                resolved_config = recursive_resolve(config_data)
-                
-                logger.info("[config] writing resolved config to %s", dest_config)
-                # print(json.dumps(resolved_config, indent=4))
-                dest_config.write_text(
-                    json.dumps(resolved_config, ensure_ascii=False, indent=4),
-                    encoding="utf-8"
-                )
-            except Exception as e:
-                logger.error("[config] Failed to process config file: %s", e)
-                # Fallback to copy if parsing fails
-                shutil.copy(src_config, dest_config)
-        else:
-            logger.warning(
-                "[config] Warning: Local config %s not found. "
-                "Using system defaults.",
-                src_config,
-            )
-            
-    except Exception as e:
-        logger.exception("[config] Failed to setup MinerU config: %s", e)
 
 
 def _cleanup_old_logs(max_age_days: int = 30) -> None:
@@ -3077,39 +2470,6 @@ def _setup_logging() -> None:
         root_logger.addHandler(console_handler)
 
 
-def _cleanup_mineru_intermediate(task_dir: Path) -> None:
-    """Backup large MinerU intermediate files to mineru_backup/ after conversion.
-
-    Keeps in-place: content_list*.json, images/, *.md (actively used by downstream)
-    Moves to backup: *_layout.pdf, *_origin.pdf, *_middle.json, *_model.json
-    These files consume ~820 MB per conversion and MinerU regeneration is expensive,
-    so we back them up instead of deleting.
-    """
-    backup_patterns = ["*_layout.pdf", "*_origin.pdf", "*_middle.json", "*_model.json"]
-    moved_bytes = 0
-    # Mirror the relative structure: mineru_backup/{task_id}/hybrid_auto/...
-    rel = task_dir.relative_to(MINERU_OUTPUT_DIR)
-    backup_task_dir = MINERU_BACKUP_DIR / rel
-    for pattern in backup_patterns:
-        for f in task_dir.rglob(pattern):
-            try:
-                f_rel = f.relative_to(task_dir)
-                dest = backup_task_dir / f_rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                size = f.stat().st_size
-                shutil.move(str(f), str(dest))
-                moved_bytes += size
-                logger.debug("[backup] moved intermediate: %s -> %s (%.1f MB)", f.name, dest, size / 1048576)
-            except Exception as e:
-                logger.warning("[backup] failed to move %s: %s", f.name, e)
-    if moved_bytes > 0:
-        logger.info(
-            "[backup] moved %.1f MB of intermediate files from %s to backup",
-            moved_bytes / 1048576,
-            task_dir.name,
-        )
-
-
 def _cleanup_orphan_files(pdfs: List[Path], office_files: Optional[List[Path]] = None) -> None:
     """Delete JSON/cache files in reference/logs that have no corresponding source file.
 
@@ -3164,7 +2524,7 @@ def _cleanup_orphan_files(pdfs: List[Path], office_files: Optional[List[Path]] =
                     logger.warning("[backup] failed to move %s: %s", task_dir.name, e)
 
 
-async def main() -> None:
+async def run_procurement_document_pipeline() -> None:
     load_inagent_env()
     _refresh_mineru_vllm_settings()
     _setup_logging()
@@ -3206,11 +2566,9 @@ async def main() -> None:
     # 0) 自动同步配置
     _setup_mineru_config()
 
-    global USE_DOCKER_VLLM
-    if USE_DOCKER_VLLM:
-        global DOCKER_VLLM_URL
-        candidate_urls = [DOCKER_VLLM_URL]
-        if DOCKER_VLLM_URL.endswith(":8000"):
+    if _mp.USE_DOCKER_VLLM:
+        candidate_urls = [_mp.DOCKER_VLLM_URL]
+        if _mp.DOCKER_VLLM_URL.endswith(":8000"):
             candidate_urls.append("http://127.0.0.1:30000")
 
         logger.info(
@@ -3242,9 +2600,9 @@ async def main() -> None:
                 logger.warning(
                     "[vllm] 推理探针未通过(可能是冷启动/多模态模型限制)，但 /v1/models 可达；继续使用该地址。"
                 )
-            DOCKER_VLLM_URL = candidate
+            _mp.DOCKER_VLLM_URL = candidate
             os.environ["MINERU_VLM_MODEL"] = model_name
-            logger.info("[vllm] 使用可用地址: %s, 模型: %s", DOCKER_VLLM_URL, model_name)
+            logger.info("[vllm] 使用可用地址: %s, 模型: %s", _mp.DOCKER_VLLM_URL, model_name)
             ok = True
             break
         if not ok:
@@ -3255,7 +2613,7 @@ async def main() -> None:
             if not _prompt_continue_without_vllm():
                 logger.info("用户取消操作。")
                 sys.exit(0)
-            USE_DOCKER_VLLM = False
+            _mp.USE_DOCKER_VLLM = False
     else:
         logger.info(
             "[mineru] 未启用本地 vLLM（auto_convert.vllm.enable / AUTO_CONVERT_USE_MINERU_VLLM）；"
@@ -3548,7 +2906,9 @@ async def main() -> None:
     logger.info("=" * 80)
     logger.info("[merge] 开始合并 knowledge_base.json...")
     try:
-        from INAGENT.data_tools.merge_knowledge_base import merge_knowledge_base
+        from INAGENT.data_tools.merge_knowledge_base import (
+            merge_knowledge_base,
+        )
 
         reference_dir = REFERENCE_DIR
         output_file = reference_dir / "knowledge_base.json"
@@ -3564,10 +2924,13 @@ async def main() -> None:
     gaps_file = REFERENCE_DIR / "schema_gaps.jsonl"
     try:
         if gaps_file.exists() and gaps_file.stat().st_size > 0:
-            from INAGENT.rag.knowledge_schema import SchemaGapEntry
-            from INAGENT.rag.graphrag_integration import GraphRAGRetriever
-            from INAGENT.agents.knowledge_farm_owner_agent import KnowledgeFarmOwnerAgent
             from dataclasses import fields as dc_fields
+
+            from INAGENT.agents.knowledge_farm_owner_agent import (
+                KnowledgeFarmOwnerAgent,
+            )
+            from INAGENT.rag.graphrag_integration import GraphRAGRetriever
+            from INAGENT.rag.knowledge_schema import SchemaGapEntry
 
             gap_entries = []
             field_names = {f.name for f in dc_fields(SchemaGapEntry)}
@@ -3609,7 +2972,9 @@ async def main() -> None:
     logger.info("=" * 80)
     logger.info("[index-update] 开始增量更新功能结构索引...")
     try:
-        from INAGENT.data_tools.auto_document_integration import incrementally_update_function_index, load_function_structure_index
+        from INAGENT.data_tools.auto_document_integration import (
+            incrementally_update_function_index,
+        )
         
         # 收集所有新文档信息
         new_documents = []
@@ -3705,7 +3070,6 @@ async def main() -> None:
                 logger.info("[rag-reindex] 开始重新索引到 RAG...")
                 # 延迟导入，避免循环依赖
                 import sys
-                import importlib
                 
                 # 尝试导入 workforce_config_ops
                 try:
@@ -3729,9 +3093,14 @@ async def main() -> None:
     logger.info("=" * 80)
 
 
+# 历史兼容：``main`` 即采购文档管线（MinerU 批处理等），新代码请优先
+# ``from INAGENT.data_tools.procurement_ingest import main``。
+main = run_procurement_document_pipeline
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(run_procurement_document_pipeline())
     except KeyboardInterrupt:
         try:
             _setup_logging()

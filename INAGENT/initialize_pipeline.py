@@ -3,7 +3,7 @@
 初始化Pipeline - 完整的workflow基础流程
 
 包含以下步骤：
-1. PDF 文件识别和导入 (auto_convert.py)
+1. PDF 文件识别和导入 (procurement_ingest.py — 采购管线)
 2. MinerU 提取内容
 3. LLM 提取 metadata (product_module, protocol_type, step_type)
 4. 基于功能结构索引增强 metadata (scenario_id, step_type)
@@ -38,10 +38,9 @@ async def main():
     logger.info("开始初始化Pipeline - 完整的workflow基础流程")
     logger.info("=" * 80)
     
-    # 步骤1-7: 运行 auto_convert.py（包含PDF识别、MinerU提取、LLM提取metadata、
-    #           自动识别模块、增量更新索引、合并知识库）
+    # 步骤1-7: 运行采购文档管线 procurement_ingest（实现位于 auto_convert.run_procurement_document_pipeline）
     logger.info("")
-    logger.info("步骤1-7: 运行 auto_convert.py")
+    logger.info("步骤1-7: 运行 procurement_ingest（采购：MinerU/Office/TXT → reference）")
     logger.info("  - PDF识别和导入")
     logger.info("  - MinerU提取内容")
     logger.info("  - LLM提取metadata (product_module, protocol_type, step_type)")
@@ -52,8 +51,8 @@ async def main():
     logger.info("")
     
     try:
-        from INAGENT.data_tools.auto_convert import main as auto_convert_main
-        await auto_convert_main()
+        from INAGENT.data_tools.procurement_ingest import main as procurement_ingest_main
+        await procurement_ingest_main()
         logger.info("[成功] 步骤1-7完成")
     except Exception as e:
         logger.error(f"[错误] 步骤1-7失败: {e}", exc_info=True)

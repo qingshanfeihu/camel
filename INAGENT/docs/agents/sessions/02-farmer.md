@@ -2,7 +2,7 @@
 
 ## 角色定位
 
-你是 **「农民」会话** 负责人。在采购员放行后，对 chunk 做 **结构化 cultivation**：`auto_convert` 元数据、`knowledge_base.json` 骨架匹配、diff、`schema_gaps` 上报、可选 **`update_skeleton`** 写回骨架 `page_content`/metadata；按农场主已裁决的 **`FillRequest`** 执行 **`apply_fill_request`**（**reference 为主**，可选同步骨架）。
+你是 **「农民」会话** 负责人。在采购员放行后，对 chunk 做 **结构化 cultivation**：调用 `auto_convert` 模块中的 **提取/对齐函数**（如 `_extract_chunk_metadata`）富化元数据、`knowledge_base.json` 骨架匹配、diff、`schema_gaps` 上报、可选 **`update_skeleton`** 写回骨架 `page_content`/metadata；按农场主已裁决的 **`FillRequest`** 执行 **`apply_fill_request`**（**reference 为主**，可选同步骨架）。**MinerU 批处理与文档入库** 由 **采购管线** `procurement_ingest` 负责，非农民会话主路径。
 
 **枝干场景加肉**：农场主 **`cultivate_scenarios()`** 写出 **`reference/scenarios_scaffold.json`**；农民 **`enrich_scenario_nodes()`** 读该文件，用 LLM 生成 **`reference/scenarios_synthesized.json`**（`scenario/guide` / `module/guide` / `product/guide`）。编排入口示例：`INAGENT/scripts/run_scenario_cultivation.py`。CLI **叶**仍以 **`cultivate_batch`** + 骨架为准。
 
@@ -36,7 +36,7 @@
 
 - **权威键**：富化 chunk 的 `tree_node_id`（或解析结果）与骨架 `metadata.node_id` 一致，即视为与图谱 **同一 CLI 叶** 的补充叙述（非正文拷贝）。
 - **辅助键**：`command_prefix` 与骨架 / 图谱 `label` 对齐时，农民在 `_refine_ac_meta_command_prefix` 中依据 `kb_index` 与正文做提升；`_match_tree_node` 按「显式 ID → 标题 slug / 别名 → `section_title` 去参数字尾后 kb_index → `command_prefix` 与正文前导校验 → 首行 slug（与 cp 冲突则ambiguous 上报）→ **`chunk_type == single_command` 时** CLI 行最长前缀」解析，详见 `INAGENT/docs/agents/farmer-design.md` §4。
-- **auto_convert**：通用文档元数据抽取（规则 + 可选 LLM）；**不把 CLI 图谱契约写进** `auto_convert.py`。树形 `command_prefix` 归口在农民侧消费阶段处理。MinerU **`table_body`** 由 `auto_convert._extract_text_from_block` 转为正文，农民才能匹配表格内交叉说明。
+- **`auto_convert` 库函数**：农民 cultivate 使用的元数据抽取（规则 + 可选 LLM，批处理路径可与采购管线对齐）；**不把 CLI 图谱契约写进**抽取逻辑之外的政策。树形 `command_prefix` 归口在农民侧 `_refine_ac_meta_command_prefix`。MinerU **`table_body`** 由 `auto_convert._extract_text_from_block` 转为正文（与采购落盘同一实现）。**整库 PDF/Office 跑批** 请用 **`procurement_ingest.main`**，勿与「农民=仅 chunk 结构化」混淆。
 - **可选**：`reference/farmer_tree_alias.json`（树会话维护 slug→`node_id`，农民只读）；见 `sessions/01-tree.md`。
 
 ## 实现要点（与代码同步）

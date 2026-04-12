@@ -27,7 +27,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from camel.models import BaseModelBackend
-
 from INAGENT.agents.knowledge_procurement_agent import (
     ChunkDecision,
     KnowledgeProcurementAgent,
@@ -117,10 +116,36 @@ class TestLayer1Mechanical:
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "accept"
 
+    def test_rejects_garbage_mechanical_pre_clean(self, agent_with_mock_llm):
+        """50+ chars after strip, but no alphanumeric → L0 reject (no LLM)."""
+        chunk = _make_chunk("(" * 50)
+        decisions = agent_with_mock_llm.evaluate_batch([chunk])
+        assert decisions[0].decision.action == "reject"
+        assert "预清理" in decisions[0].decision.reason
+
     def test_49_chars_rejected(self, agent_with_mock_llm):
         chunk = _make_chunk("x" * 49)
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "reject"
+
+    def test_frontmatter_medium_confidence_pending(self, agent_with_mock_llm):
+        chunk = _make_chunk(
+            "这是一个长度足够但应被前置页规则标注为待审的片段。" * 2
+        )
+        chunk["metadata"]["is_frontmatter"] = True
+        chunk["metadata"]["frontmatter_confidence"] = 0.7
+        decisions = agent_with_mock_llm.evaluate_batch([chunk])
+        assert decisions[0].decision.action == "pending_review"
+        assert decisions[0].decision.reason_code == "frontmatter_medium_confidence"
+
+    def test_title_content_mismatch_pending(self, agent_with_mock_llm):
+        chunk = _make_chunk(
+            "slb virtual server command syntax and options list with examples." * 2,
+            section_title="版权声明",
+        )
+        decisions = agent_with_mock_llm.evaluate_batch([chunk])
+        assert decisions[0].decision.action == "pending_review"
+        assert decisions[0].decision.reason_code == "title_content_mismatch"
 
 
 # ── Layer 2: LLM 判断 ─────────────────────────────────────────────────────────
@@ -318,6 +343,9 @@ class TestWriteLogs:
             assert log_file.exists()
             line = json.loads(log_file.read_text(encoding="utf-8").strip())
             assert line["action"] == "reject"
+            assert "reason_code" in line
+            assert "rule_layer" in line
+            assert "rule_confidence" in line
 
     def test_accept_not_written_to_log(self, agent_with_mock_llm):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -458,7 +486,6 @@ class TestBuildProcurementAgent:
     @pytest.fixture
     def real_mock_model(self):
         """spec=BaseModelBackend 让 isinstance 通过，同时配置必要属性。"""
-        from camel.models import BaseModelBackend
         m = MagicMock(spec=BaseModelBackend)
         m.model_type = MagicMock()
         m.token_limit = 4096
@@ -469,6 +496,16 @@ class TestBuildProcurementAgent:
 
         agent = build_procurement_agent(real_mock_model, "NSAE 负载均衡器")
         assert isinstance(agent, ChatAgent)
+
+    def test_summarize_threshold_disabled(self, real_mock_model):
+        """采购 L2 按批无状态；关闭 CAMEL 默认 50% 触发的对话摘要，避免额外 LLM 往返。"""
+        agent = build_procurement_agent(real_mock_model, "NSAE 负载均衡器")
+        assert agent.summarize_threshold is None
+
+    def test_max_iteration_single_step(self, real_mock_model):
+        """采购无工具链，每批 step 只需一轮模型调用。"""
+        agent = build_procurement_agent(real_mock_model, "NSAE 负载均衡器")
+        assert agent.max_iteration == 1
 
     def test_system_message_contains_product_name(self, real_mock_model):
         agent = build_procurement_agent(real_mock_model, "NSAE 测试产品")

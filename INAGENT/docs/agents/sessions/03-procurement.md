@@ -2,7 +2,7 @@
 
 ## 角色定位
 
-你是 **「采购」会话** 负责人。对 `auto_convert` 等流程产出的 chunk 执行 **三层筛查**（机械 → LLM 价值判断 → 元数据合法性），输出 `accept` / `reject` / `pending_review` / `staging`，并标注 `target_kb`（`product` / `test` / `unknown`）。**不**写入 GraphRAG parquet；**不**做农民侧结构化；`staging` 只产出 gap 线索，结构裁决交给 **农场主**。
+你是 **「采购」会话** 负责人。**文档入库（MinerU / Office / TXT → reference）** 的编排入口为 **`INAGENT.data_tools.procurement_ingest.main`**（实现：`auto_convert.run_procurement_document_pipeline`）。对管线产出的 chunk 执行 **三层筛查**（机械 → LLM 价值判断 → 元数据合法性），输出 `accept` / `reject` / `pending_review` / `staging`，并标注 `target_kb`（`product` / `test` / `unknown`）。**不**写入 GraphRAG parquet；**不**做农民侧 cultivate；`staging` 只产出 gap 线索，结构裁决交给 **农场主**。
 
 ## 实现摘要（与 `knowledge_procurement_agent.py` 同步）
 
@@ -15,18 +15,26 @@
 
 | 符号 | 作用 |
 |------|------|
-| `KnowledgeProcurementAgent.evaluate_batch(chunks)` | 三层筛查，返回 `List[ChunkDecision]`；L2 按 `metadata.source_file` 分组，**每文件一次** LLM 调用。 |
+| `KnowledgeProcurementAgent.evaluate_batch(chunks)` | 筛查（机械 L0+L1 → L2 → L3），返回 `List[ChunkDecision]`；L2 按 `metadata.source_file` 分组，**每文件一次** LLM 调用。 |
 | `enrich_chunk_decision_for_farmer(cd)` | 模块级；仅 `accept` 时浅拷贝 chunk，把交接字段写入 `metadata`（见下节「与农民交接」）。 |
 | `agent.enrich_decisions_for_farmer(decisions)` | 对整批 `ChunkDecision` 逐条调用上一函数。 |
 | `agent.filter_accepted(decisions)` | 返回 **仅 accept** 的 chunk **dict 列表**，每条已含交接 metadata（内部调用 `enrich_chunk_decision_for_farmer`）。 |
-| `agent.write_logs(decisions, log_dir?)` | 追加写 JSONL；**accept 不写文件**，仅计入返回 counts。 |
+| `agent.write_logs(decisions, log_dir?)` | 追加写 JSONL；**accept 不写文件**，仅计入返回 counts；日志含 `reason_code` / `rule_layer` / `rule_confidence`。 |
 | `build_procurement_agent` / `build_procurement_prompt` | 构造 ChatAgent 与按文件批处理的 user prompt。 |
 
-### Layer 1（机械）
+### 机械层（L0 预清理 + L1 长度，实现：`procurement_pre_clean` + `chunk_text_quality`）
 
 - 取正文：`page_content` 或 `text`（strip 后计长）。
-- **长度 &lt; 50 字符** → `reject`（`confidence=1.0`），**不**调用 LLM。
-- 否则进入 L2。
+- **L0 预清理（reject/pending/pass）**：
+  - 垃圾/版式启发式（`is_garbage_page_content`）→ `reject`；
+  - frontmatter 透传命中（`metadata.is_frontmatter`）：
+    - 高置信（`frontmatter_confidence>=0.95`）→ `reject`
+    - 其余命中 → `pending_review`
+  - 质量信号（`detect_quality_flags`）命中 `title_content_mismatch` → `pending_review`。
+- **L1 长度**：**长度 &lt; 50 字符** → `reject`（`confidence=1.0`）。
+- 机械层结果为 `pass` 时进入 L2。
+
+与上游/下游分工：**auto_convert** 负责解析阶段（目录树、空块、缓存等）；**采购机械层**负责 chunk 准入规则；**农场主** `classify_uncovered_chunks` 对仍无 `tree_level` 的块用同一套垃圾启发式发 `discard`（不重复采购已拒块）。
 
 ### Layer 2（LLM，按 `source_file` 批处理）
 
@@ -57,11 +65,12 @@
 | staging | `schema_gaps.jsonl` |
 | accept | （无独立文件，仅 `write_logs` 返回计数） |
 
-每条含：`chunk_index`、`source_file`、`section_title`、`content_preview`（正文前 200 字）、`action`、`target_kb`、`confidence`、`reason`、`schema_gap`、`suggested_value`、`timestamp`。
+每条含：`chunk_index`、`source_file`、`section_title`、`content_preview`（正文前 200 字）、`action`、`target_kb`、`confidence`、`reason`、`reason_code`、`rule_layer`、`rule_confidence`、`schema_gap`、`suggested_value`、`timestamp`。
 
 ## 范围（应改）
 
 - `INAGENT/agents/knowledge_procurement_agent.py`
+- `INAGENT/data_tools/procurement_ingest.py`（采购文档入库管线入口；实现委托 `auto_convert.run_procurement_document_pipeline`）
 - `INAGENT/unit_tests/test_knowledge_procurement_agent.py`（存在则维护，职责扩展则新增用例）
 
 ## 非范围（勿改）
@@ -96,12 +105,13 @@
 
 ## 开场白（可复制）
 
-你是「采购」会话负责人。专注 `KnowledgeProcurementAgent`：L1 机械（&lt;50 字拒绝）、L2 按文件批处理 LLM、L3 分类白名单与模块注册表；四类 action 与 `target_kb`。交给农民前用 `enrich_decisions_for_farmer` / `filter_accepted` 同步 metadata。不实现 GraphRAG 结构写入；`staging` 仅产出 gap 线索，结构裁决交给农场主会话。
+你是「采购」会话负责人。专注 `KnowledgeProcurementAgent`：机械层 L0 预清理（垃圾启发式 + frontmatter 分级 + 质量信号）+ L1 长度（<50 字拒绝），机械层输出 `reject/pending/pass`；`pass` 才进入 L2（按文件批处理 LLM）；L3 处理分类白名单与模块注册表。交给农民前用 `enrich_decisions_for_farmer` / `filter_accepted` 同步 metadata。不实现 GraphRAG 结构写入；`staging` 仅产出 gap 线索，结构裁决交给农场主会话。
 
 ## 持久化与宪章维护（给 Agent / 维护者）
 
 - **Cursor 规则**：`.cursor/rules/kb-session-procurement.mdc` 设为 `alwaysApply: true`，用于在上下文压缩后仍加载采购身份与边界。
-- **职责或实现有增删改时**，须在同一变更中 **同步更新** 以下三处，避免宪章与代码漂移：
+- **职责或实现有增删改时**，须在同一变更中 **同步更新** 以下各处，避免宪章与代码漂移：
   1. 本文档 `03-procurement.md`（权威条文，含本节「实现摘要」）
   2. `.cursor/rules/kb-session-procurement.mdc`（摘要）
   3. `INAGENT/agents/knowledge_procurement_agent.py` 模块顶部 docstring（与实现一致）
+  4. 机械预清理实现：`procurement_pre_clean.py`、`chunk_text_quality.py` 与 `.cursor/skills/procurement-pre-clean/SKILL.md`（若行为或分工变化）

@@ -1906,34 +1906,11 @@ class KnowledgeFarmOwnerAgent:
             patch["owner_excluded"] = True
         return patch
 
-    _GARBAGE_PATTERNS_RE = None
-
-    @classmethod
-    def _get_garbage_patterns(cls):
-        import re
-        if cls._GARBAGE_PATTERNS_RE is None:
-            cls._GARBAGE_PATTERNS_RE = [
-                re.compile(r"^[\s\d.。、\-—─=_*#|+/\\,，\u3000]+$"),
-                re.compile(
-                    r"(?i)^(table\s+of\s+contents|目录|contents|copyright|版权"
-                    r"|all\s+rights?\s+reserved|confidential|机密|保密"
-                    r"|page\s*\d|第\s*\d+\s*页|图\s*\d|表\s*\d|figure\s*\d|table\s*\d)$"
-                ),
-                re.compile(r"(?i)^\s*(\.{3,}|…{2,}|\d+\s*\.{3,}\s*\d+)\s*$"),
-            ]
-        return cls._GARBAGE_PATTERNS_RE
-
     @staticmethod
     def _is_garbage_block(page_content: str) -> bool:
-        text = page_content.strip()
-        if not text or len(text) < 10:
-            return True
-        if all(not c.isalnum() for c in text):
-            return True
-        for pat in KnowledgeFarmOwnerAgent._get_garbage_patterns():
-            if pat.search(text):
-                return True
-        return False
+        from INAGENT.utils.chunk_text_quality import is_garbage_page_content
+
+        return is_garbage_page_content(page_content)
 
     def classify_uncovered_chunks(
         self,

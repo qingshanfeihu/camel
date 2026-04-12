@@ -15,13 +15,13 @@
 农民 Agent (Knowledge Farmer Agent)
 
 职责：
-  1. cultivate_batch：对采购员 accept 的裸 chunk 做结构化；元数据经 `_extract_chunk_metadata(..., skip_llm=True)`（批处理不调 LLM）；MinerU table_body 经 auto_convert 进正文
+  1. cultivate_batch：对采购员 accept 的裸 chunk 做结构化；元数据经 `_extract_chunk_metadata(..., skip_llm=True)`（批处理不调 LLM）；MinerU table_body 经 `auto_convert._extract_text_from_block` 与采购管线一致进正文
   2. _match_tree_node 匹配骨架（knowledge_base.json）叶节点；歧义多候选 → ambiguous_match gap；_diff_with_skeleton 逐字段 diff
   3. 冲突/溢出/无匹配 → SchemaGapEntry → 农场主裁决；可选 update_skeleton 写回骨架 page_content/metadata（说明/参数/语法/相关操作）
   4. 执行农场主已产出的 FillRequest：apply_fill_request 批量合并到 reference/*.json（及 kb_path 存在时的骨架 node_id 命中项），不自动 merge、不刷向量
   5. enrich_scenario_nodes：读农场主产出的 scenarios_scaffold，LLM 写 scenarios_synthesized（与 cultivate_batch 批处理路径分离）
 
-auto_convert 是农民的通用工具（PDF/DOCX/XLSX/TXT → 统一 metadata），农民不关心原始格式。
+`auto_convert` 模块中的 **提取函数**（如 `_extract_chunk_metadata`）是农民结构化工具；**原始文档批处理（MinerU 等）** 属采购，入口为 `procurement_ingest.main`。
 
 持久化：
   reference/{stem}.json         —— 新 chunk 按 block_id 去重追加；FillRequest 主要落点
@@ -46,7 +46,6 @@ from typing import Dict, List, Optional, Tuple
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
 from camel.models import BaseModelBackend
-
 from INAGENT.agents.knowledge_procurement_agent import ChunkDecision
 from INAGENT.rag.knowledge_schema import (
     FillRequest,
@@ -54,7 +53,7 @@ from INAGENT.rag.knowledge_schema import (
     build_tree_position,
     infer_knowledge_role,
 )
-from INAGENT.utils.env_utils import load_inagent_env, get_product_name
+from INAGENT.utils.env_utils import get_product_name, load_inagent_env
 
 logger = logging.getLogger(__name__)
 
@@ -348,16 +347,8 @@ class KnowledgeFarmerAgent:
 
             content = (chunk.get("page_content") or chunk.get("text") or "")
 
-            _qflags = []
-            if len(content.strip()) <= 25:
-                _qflags.append("extremely_short")
-            else:
-                _st = meta.get("section_title", "").strip()
-                if _st and content.strip():
-                    _st_chars = set(_st)
-                    _content_head = set(content[:100])
-                    if not (_st_chars & _content_head - {" ", "\n", "\t"}):
-                        _qflags.append("title_content_mismatch")
+            from INAGENT.utils.chunk_text_quality import detect_quality_flags
+            _qflags = detect_quality_flags(content, str(meta.get("section_title", "")))
             if _qflags:
                 meta["_quality_flags"] = _qflags
 
@@ -512,7 +503,6 @@ class KnowledgeFarmerAgent:
                         chunk_block_id=str(meta.get("block_id", "")),
                     ))
                 elif cmd_prefix:
-                    from datetime import datetime as _dt
                     _block_id = meta.get("block_id", "")
                     _full_cmd = _extract_cli_command_from_content(content)
                     if (
@@ -707,12 +697,16 @@ class KnowledgeFarmerAgent:
 
         if refresh_hybrid_vectors and (new_docs or summary["skipped"] > 0):
             try:
-                from INAGENT.data_tools.merge_knowledge_base import merge_knowledge_base
+                from INAGENT.data_tools.merge_knowledge_base import (
+                    merge_knowledge_base,
+                )
                 merge_knowledge_base(_ref_dir, _ref_dir / "knowledge_base.json")
             except Exception as exc:
                 summary["errors"].append(f"merge_knowledge_base 失败: {exc}")
             try:
-                from INAGENT.workflow_config_generator import refresh_hybrid_vector_index
+                from INAGENT.workflow_config_generator import (
+                    refresh_hybrid_vector_index,
+                )
                 refresh_hybrid_vector_index(force=hybrid_vectors_force)
             except Exception as exc:
                 summary["errors"].append(f"向量索引刷新失败: {exc}")
@@ -2051,11 +2045,11 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-    from INAGENT.utils.env_utils import load_inagent_env
     from INAGENT.agents.knowledge_procurement_agent import (
         ChunkDecision,
         ProcurementDecision,
     )
+    from INAGENT.utils.env_utils import load_inagent_env
 
     load_inagent_env()
 
