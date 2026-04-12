@@ -27,6 +27,7 @@ from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
 from INAGENT.data_tools.spec_parser import parse_spec_document
 from INAGENT.data_tools.testlist_parser import parse_test_list
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
+from INAGENT.utils.libreoffice_convert import convert_doc_to_docx
 
 try:
     from openai import OpenAI
@@ -733,39 +734,59 @@ def convert_office_file(file_path: Path) -> None:
     start_time = time.perf_counter()
     logger.info("[office] 开始处理: %s", file_path.name)
 
-    # 1. 分类
-    # 先尝试读取少量内容作为预览（用于内容匹配）；.doc 非 OOXML，MarkItDown 不支持，跳过预览以免重复告警
-    content_preview = ""
-    if file_path.suffix.lower() != ".doc":
+    # 旧版 .doc → LibreOffice 无头转临时 .docx，再走与 docx 相同管线
+    work_path = file_path
+    _lo_cleanup: Optional[Path] = None
+    if file_path.suffix.lower() == ".doc":
+        _conv = convert_doc_to_docx(file_path)
+        if _conv is None:
+            logger.info(
+                "[office] 无法转换 %s（未安装 LibreOffice 或转换失败）。"
+                "请安装 LibreOffice，或手动另存为 .docx / PDF。",
+                file_path.name,
+            )
+            return
+        work_path = _conv.docx_path
+        _lo_cleanup = _conv.temp_root
+        logger.info("[office] LibreOffice 已转换: %s -> %s", file_path.name, work_path.name)
+
+    knowledge_blocks: List[Dict[str, Any]] = []
+    doc_type = "spec/design"
+    try:
+        # 1. 预览（转换后 work_path 已为 docx，可用 MarkItDown）
+        content_preview = ""
         try:
             from camel.loaders.markitdown import MarkItDownLoader
             loader = MarkItDownLoader()
-            full_text = loader.convert_file(str(file_path))
+            full_text = loader.convert_file(str(work_path))
             content_preview = full_text[:2000] if full_text else ""
         except Exception as e:
-            logger.warning("[office] 预览读取失败 %s: %s", file_path.name, e)
+            logger.warning("[office] 预览读取失败 %s: %s", work_path.name, e)
 
-    # 路由：按文件扩展名选择解析器（不再用 classify_document）
-    suffix = file_path.suffix.lower()
-    doc_type = "spec/design"  # 默认
-    if suffix in {".xlsx", ".xls"}:
-        doc_type = "test/test_list"
-    logger.info("[office] 解析路由: %s -> %s", file_path.name, doc_type)
+        # 路由：按**实际解析文件**扩展名（.doc 已转为 .docx）
+        suffix = work_path.suffix.lower()
+        if suffix in {".xlsx", ".xls"}:
+            doc_type = "test/test_list"
+        logger.info("[office] 解析路由: %s -> %s", file_path.name, doc_type)
 
-    knowledge_blocks: List[Dict[str, Any]] = []
-
-    if doc_type == "test/test_list":
-        knowledge_blocks = parse_test_list(
-            file_path,
-            product_module="",
-            document_category=doc_type,
-        )
-    else:
-        knowledge_blocks = parse_spec_document(
-            file_path,
-            document_category=doc_type,
-            product_module="",
-        )
+        if doc_type == "test/test_list":
+            knowledge_blocks = parse_test_list(
+                work_path,
+                product_module="",
+                document_category=doc_type,
+            )
+        else:
+            knowledge_blocks = parse_spec_document(
+                work_path,
+                document_category=doc_type,
+                product_module="",
+            )
+    except Exception as exc:
+        logger.warning("[office] 解析失败 %s: %s", file_path.name, exc)
+        knowledge_blocks = []
+    finally:
+        if _lo_cleanup is not None:
+            shutil.rmtree(_lo_cleanup, ignore_errors=True)
 
     if not knowledge_blocks:
         logger.warning("[office] 未生成任何知识块: %s", file_path.name)

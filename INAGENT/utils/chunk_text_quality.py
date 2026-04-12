@@ -45,6 +45,31 @@ def is_garbage_page_content(page_content: str, *, min_len: int = 10) -> bool:
     return False
 
 
+# 首行像「设备配置命令」时，中文章节标题与英文命令字面无交集属正常，不误判 mismatch。
+# 不用宽泛的 ``(?i)[a-z]+...``，避免把 “BGP autonomous system …” 等说明性英文段当成 CLI。
+_CLI_OR_CONFIG_HEAD = re.compile(
+    r"(?is)^[\s]*(?:"
+    r"(?:slb|no\s|show\s|clear\s|vlan|nat|interface|router|ntp|dns|acl|ha|route)\s+\S|"
+    r"ip\s+(?:route|addr|address|neighbor|link|oif)\b|"
+    r"[a-z][a-z0-9_-]{0,48}\s+<[^>\n]{1,120}>"
+    r")",
+)
+
+
+def _first_line_looks_cli_or_config(content: str) -> bool:
+    if not content:
+        return False
+    first = content.strip().split("\n", 1)[0].strip()
+    if len(first) < 8:
+        return False
+    return bool(_CLI_OR_CONFIG_HEAD.match(first))
+
+
+def looks_like_cli_first_line(content: str) -> bool:
+    """Public alias: first line looks like CLI/config (exempt from title-content mismatch)."""
+    return _first_line_looks_cli_or_config(content)
+
+
 def detect_quality_flags(page_content: str, section_title: str = "") -> List[str]:
     """Return lightweight quality flags used by procurement/farmer.
 
@@ -62,8 +87,11 @@ def detect_quality_flags(page_content: str, section_title: str = "") -> List[str
     if not st:
         return flags
 
+    if _first_line_looks_cli_or_config(content):
+        return flags
+
     st_chars = set(st)
-    content_head = set(content[:100])
+    content_head = set(content[:200])
     if not (st_chars & content_head - {" ", "\n", "\t"}):
         flags.append("title_content_mismatch")
     return flags

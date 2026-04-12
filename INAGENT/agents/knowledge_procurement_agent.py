@@ -39,6 +39,7 @@
 
 日志（默认 knowledge_base/logs/，accept 不写 jsonl）
   reject → reject_log.jsonl；pending_review → pending_review.jsonl；staging → schema_gaps.jsonl
+  write_logs(..., append=False) 每次运行默认**覆盖**上述三文件，避免多次运行 jsonl 重复累加；需追加时 append=True。
 
 农民交接：enrich_chunk_decision_for_farmer / enrich_decisions_for_farmer / filter_accepted
   浅拷贝 chunk；非空 suggested_value → metadata.suggested_value；在 DOCUMENT_CATEGORIES 内则写 document_category；
@@ -70,8 +71,40 @@ from camel.messages import BaseMessage
 from camel.models import BaseModelBackend
 from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
 from INAGENT.utils.env_utils import load_inagent_env
+from INAGENT.utils.chunk_text_quality import looks_like_cli_first_line
 
 logger = logging.getLogger(__name__)
+
+# LLM 常把 product_module  slug 填进 suggested_category；须映射回 DOCUMENT_CATEGORIES
+_LLM_MODULE_SLUGS = frozenset({
+    "slb", "llb", "gslb", "nat", "vlan", "vpn", "aaa", "ssl", "ospf", "bgp",
+    "rip", "vrrp", "ntp", "dns", "acl", "ha", "icookie", "ircookie", "waf",
+})
+
+
+def _normalize_llm_suggested_category(
+    suggested: Optional[str],
+    chunk: Dict,
+) -> Optional[str]:
+    """Map mistaken module tokens to a valid document_category when possible."""
+    s = (suggested or "").strip()
+    if not s:
+        return None
+    if s in DOCUMENT_CATEGORIES:
+        return s
+    low = s.lower().replace(" ", "")
+    if "/" in s:
+        return s
+    meta = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    dc = (meta.get("document_category") or "").strip()
+    if low not in _LLM_MODULE_SLUGS:
+        return s
+    if dc in DOCUMENT_CATEGORIES:
+        return dc
+    body = (chunk.get("page_content") or chunk.get("text") or "")[:2000]
+    if looks_like_cli_first_line(body):
+        return "cli/reference"
+    return "spec/design"
 
 _INAGENT_ROOT = Path(__file__).resolve().parent.parent
 _KB_LOGS_DIR = _INAGENT_ROOT / "knowledge_base" / "logs"
@@ -112,10 +145,17 @@ def enrich_chunk_decision_for_farmer(cd: ChunkDecision) -> ChunkDecision:
     Farmers read metadata.suggested_value when document_category is empty
     (_step1_rules). They expect source_file aligned with ChunkDecision.source_file.
     Does not drop keys from chunk or metadata; shallow-copies chunk and metadata.
+    Normalizes ``page_content`` / ``text`` so MinerU(PDF) 与 Office 解析路径字段一致。
     """
     if cd.decision.action != "accept":
         return cd
     chunk = {**cd.chunk}
+    pc = chunk.get("page_content")
+    tx = chunk.get("text")
+    if not pc and tx:
+        chunk["page_content"] = tx
+    elif not tx and pc:
+        chunk["text"] = pc
     meta = {**chunk.get("metadata", {})}
     sug = (cd.decision.suggested_value or "").strip()
     if sug:
@@ -214,12 +254,14 @@ def _build_system_prompt(
   "target_kb": "product" | "test" | "unknown",
   "confidence": 0.0~1.0,
   "reason": "一句话说明原因",
-  "suggested_category": "建议的分类（来自已知分类体系；若为 staging 则填建议的新分类名）"
+  "suggested_category": "必须是上方【已知文档分类体系】中的**确切一项**（如 cli/reference、test/test_list）"
 }}
 
-规则：
+重要：
+- suggested_category **只能**填文档类型路径（含斜杠），**禁止**填功能模块名（如 slb、nat、vlan）；
+  模块归属请写在 reason 中，或依赖 chunk 已有 metadata.product_module。
 - confidence < 0.6 时使用 "pending_review"，不武断判定
-- "staging" 仅用于内容有价值但分类不在已知体系中的情况
+- "staging" 仅用于内容有价值但确实需要**新文档类型**时；若只是模块不确定，仍选最接近的已知分类。
 - 返回 JSON 数组，按 idx 顺序排列，不输出其他文字
 """
 
@@ -426,8 +468,14 @@ class KnowledgeProcurementAgent:
         self,
         decisions: List[ChunkDecision],
         log_dir: Optional[Path] = None,
+        *,
+        append: bool = False,
     ) -> Dict[str, int]:
-        """Write per-action JSONL logs. Returns counts per action."""
+        """Write per-action JSONL logs. Returns counts per action.
+
+        默认 ``append=False``：每次调用前清空（删除）三个非 accept 日志文件再写入，
+        避免多次跑管线时同一条目在 jsonl 中重复累加。需保留历史时传 ``append=True``。
+        """
         log_dir = log_dir or _KB_LOGS_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -458,6 +506,15 @@ class KnowledgeProcurementAgent:
             "pending_review": "pending_review.jsonl",
             "staging": "schema_gaps.jsonl",
         }
+        if not append:
+            for fname in file_map.values():
+                p = log_dir / fname
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError as exc:
+                        logger.warning("[采购员] 无法清空日志 %s: %s", fname, exc)
+
         counts: Dict[str, int] = {}
         for action, entries in buckets.items():
             counts[action] = len(entries)
@@ -465,10 +522,11 @@ class KnowledgeProcurementAgent:
                 continue
             fname = file_map.get(action, f"{action}.jsonl")
             out_path = log_dir / fname
-            with out_path.open("a", encoding="utf-8") as fh:
+            mode = "a" if append else "w"
+            with out_path.open(mode, encoding="utf-8") as fh:
                 for entry in entries:
                     fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            logger.info("[采购员] 写入日志 %s: %d 条", fname, len(entries))
+            logger.info("[采购员] 写入日志 %s: %d 条 (append=%s)", fname, len(entries), append)
 
         counts.setdefault("accept", len(buckets.get("accept", [])))
         return counts
@@ -615,12 +673,18 @@ class KnowledgeProcurementAgent:
                 action = "pending_review"
             if confidence < 0.6 and action in ("accept", "reject"):
                 action = "pending_review"
+            _, ch = indexed_chunks[local_idx]
+            raw_cat = item.get("suggested_category")
+            norm_cat = _normalize_llm_suggested_category(
+                raw_cat if isinstance(raw_cat, str) else None,
+                ch,
+            )
             results[global_idx] = ProcurementDecision(
                 action=action,
                 target_kb=item.get("target_kb", "unknown"),
                 confidence=confidence,
                 reason=item.get("reason", ""),
-                suggested_value=item.get("suggested_category"),
+                suggested_value=norm_cat,
             )
         return results
 

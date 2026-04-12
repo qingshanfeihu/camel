@@ -554,7 +554,17 @@ async def convert_one(
                         "metadata": base_meta,
                     }
                 )
-    
+
+    if not knowledge_blocks:
+        logger.error(
+            "[mineru] PDF 未产生任何有效知识块: file=%s task_id=%s — "
+            "可能原因：厂商加密或扫描件、版式特殊（如华为部分 PDF）、MinerU 输出为空、"
+            "或全文块被前置页/空文本过滤。请检查 %s 下该 task 目录与 MinerU 日志。",
+            pdf.name,
+            task_id,
+            MINERU_OUTPUT_DIR,
+        )
+
     # 3.5 doc_local_reference passthrough: MinerU 原始块快照（用于4way诊断）
     ac.DOC_LOCAL_REF_DIR.mkdir(parents=True, exist_ok=True)
     doc_ref_path = ac.DOC_LOCAL_REF_DIR / f"{ac._output_stem_for_file(pdf)}.json"
@@ -644,17 +654,27 @@ async def convert_one(
         _cleanup_mineru_intermediate(task_dir)
 
 
+def _resolve_mineru_json_src() -> Optional[Path]:
+    """仓库内 mineru.json 常见位置：INAGENT/ 或 仓库根（与 auto_convert 候选一致）。"""
+    candidates = (
+        _INAGENT_ROOT / "mineru.json",
+        _INAGENT_ROOT.parent / "mineru.json",
+    )
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 def setup_mineru_config() -> None:
     """Check and deploy optimized MinerU configuration from current project."""
     try:
-        project_root = _INAGENT_ROOT
-        src_config = project_root / "mineru.json"
-
         MINERU_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
         dest_config = MINERU_OUTPUT_DIR / "mineru.json"
+        src_config = _resolve_mineru_json_src()
 
-        if src_config.exists():
+        if src_config is not None:
             try:
                 content = src_config.read_text(encoding="utf-8")
                 config_data = json.loads(content)
@@ -679,10 +699,11 @@ def setup_mineru_config() -> None:
                 logger.error("[config] Failed to process config file: %s", e)
                 shutil.copy(src_config, dest_config)
         else:
-            logger.warning(
-                "[config] Warning: Local config %s not found. "
-                "Using system defaults.",
-                src_config,
+            logger.info(
+                "[config] 未找到 mineru.json（已查 INAGENT 与仓库根），使用 MinerU 默认配置。"
+                "可选：在 %s 或 %s 放置配置文件。",
+                _INAGENT_ROOT / "mineru.json",
+                _INAGENT_ROOT.parent / "mineru.json",
             )
 
     except Exception as e:

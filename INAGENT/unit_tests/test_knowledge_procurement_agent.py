@@ -139,9 +139,10 @@ class TestLayer1Mechanical:
         assert decisions[0].decision.reason_code == "frontmatter_medium_confidence"
 
     def test_title_content_mismatch_pending(self, agent_with_mock_llm):
+        # 首行非 CLI 形态，标题与正文无字符重叠 → 仍应 pending（title_content_mismatch）
         chunk = _make_chunk(
-            "slb virtual server command syntax and options list with examples." * 2,
-            section_title="版权声明",
+            "BGP autonomous system path attributes for inter-domain routing policies." * 3,
+            section_title="快照与卷管理",
         )
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "pending_review"
@@ -151,6 +152,38 @@ class TestLayer1Mechanical:
 # ── Layer 2: LLM 判断 ─────────────────────────────────────────────────────────
 
 class TestLayer2LLM:
+    def test_llm_suggested_module_slug_normalized_to_document_category(self):
+        """LLM 误填 nat/slb 等模块名时映射回 DOCUMENT_CATEGORIES。"""
+
+        def fake_step(msg):
+            r = MagicMock()
+            r.msgs = [
+                MagicMock(
+                    content=json.dumps(
+                        [
+                            {
+                                "idx": 0,
+                                "action": "accept",
+                                "target_kb": "product",
+                                "confidence": 0.9,
+                                "reason": "ok",
+                                "suggested_category": "nat",
+                            }
+                        ]
+                    )
+                )
+            ]
+            return r
+
+        agent = _make_agent_with_step(fake_step)
+        chunk = _make_chunk(
+            "slb virtual http <name> <vip> <port> 配置虚拟服务与监听端口说明。" * 2,
+            category="cli/reference",
+        )
+        decisions = agent.evaluate_batch([chunk])
+        assert decisions[0].decision.action == "accept"
+        assert decisions[0].decision.suggested_value == "cli/reference"
+
     def test_llm_reject_propagated(self):
         def fake_step(msg):
             result = [

@@ -101,10 +101,11 @@ def parse_spec_document(
     Returns:
         List[Dict] 兼容 knowledge_base.json 的块列表
     """
-    # MarkItDown 仅稳定支持 OOXML（.docx）；旧版二进制 .doc 需先转 .docx 或走 PDF/MinerU
+    # 直接传入 .doc 时无法解析；采购管线中应经 convert_office_file（LibreOffice 转临时 docx）
     if file_path.suffix.lower() == ".doc":
         logger.info(
-            "[spec_parser] %s 为 .doc（非 OOXML），MarkItDown 不支持；请转为 .docx 或使用 PDF。已跳过。",
+            "[spec_parser] %s 为 .doc，请使用 auto_convert.convert_office_file（将调 LibreOffice 转 docx），"
+            "或先手动另存为 .docx。",
             file_path.name,
         )
         return []

@@ -39,5 +39,13 @@ def test_detect_quality_flags_short():
 
 
 def test_detect_quality_flags_title_mismatch():
-    flags = detect_quality_flags("slb virtual command syntax and examples." * 3, "版权声明")
+    # 正文与标题无字符重叠，且正文首行不像 CLI（纯说明性中文）
+    body = "存储卷的日常维护包括快照创建与回滚步骤说明。" * 3
+    flags = detect_quality_flags(body, "BGP路由策略")
     assert "title_content_mismatch" in flags
+
+
+def test_detect_quality_flags_cli_exempt_from_title_mismatch():
+    body = ("slb virtual http <name> <vip> <port>\n配置说明与参数表。" * 2)
+    flags = detect_quality_flags(body, "版权声明")
+    assert "title_content_mismatch" not in flags
