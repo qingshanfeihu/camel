@@ -68,6 +68,11 @@ python INAGENT/scripts/snapshot_retrieval_baseline.py restore INAGENT/knowledge_
 
 **与农场主**：`KnowledgeFarmOwnerAgent` 写入前的 `snapshot_backup` 仍保留，作为 **GraphRAG 增量写入前** 的保险；**检索基线**是更广的运维操作，由树会话维护脚本，农民/农场主在高风险操作前可手动执行 `create`。
 
+### 与质检员
+
+- **质检员**（[`07-quality-inspector.md`](07-quality-inspector.md)）可对 `kb_index`、骨架与农民侧树匹配 **消费契约** 做只读校验与契约测试；**不**修改 `cli_keyword_graph.json`、骨架拓扑或 `node_id`。
+- CLI **结构真相源**与数据变更仍由 **树** 会话负责；质检不替代树会话交付。
+
 ## 依赖文档
 
 - `INAGENT/docs/DATA_FLOW.md` — L1 CLI 关键词图谱

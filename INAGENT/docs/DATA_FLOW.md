@@ -15,6 +15,7 @@
 5. [L4 — 输出与后处理](#l4--输出与后处理)
 6. [全局数据流图](#全局数据流图)
 7. [已知断点与 Bug](#已知断点与-bug)
+8. [质量与回归（质检员）](#质量与回归质检员)
 
 ---
 
@@ -776,6 +777,15 @@ jobs/test_review/{Bug ID}/output_{version}/{Bug ID}_review/
 │   debug_events.json                                          │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 质量与回归（质检员）
+
+入库与评审主链路以外，**质检员**会话（[`docs/agents/sessions/07-quality-inspector.md`](agents/sessions/07-quality-inspector.md)）负责 **可回归性与导出契约**，不替代采购/农民/农场主实现。代码入口：`INAGENT/agents/knowledge_quality_inspector_agent.py` 中的 **`KnowledgeQualityInspectorAgent`**（如 `validate_procurement_export`）。
+
+- **test_data 导出**：`accepted_for_farmer.json` 等产物应对齐 `KnowledgeProcurementAgent.filter_accepted`（含 `enrich_chunk_decision_for_farmer`）的语义；保留采购侧 **`chunk_index`**（全局下标），避免仅用 accept 子列表的 0..N-1 冒充全量批次（除非 harness 显式约定）。
+- **全链路顺序**：农民 `write_to_reference` → `merge_knowledge_base`（若需要）→ 农场主 `process_gap_entries` 等与向量刷新顺序，以 [`04-farm-owner.md`](agents/sessions/04-farm-owner.md) 与 E2E 脚本注释为准；质检推动检查项与文档一致。
 
 ---
 

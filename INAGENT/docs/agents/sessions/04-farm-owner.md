@@ -90,6 +90,7 @@
 
 - 读 **农民/采购** 的 gap；向 **农民** 下发 `FillRequest`
 - 与 **树** 会话协调：若 gap 源于 CLI 实体与图结构不一致，优先明确数据归属再改代码
+- **质检员**：可度量 `schema_gaps` / `FillRequest` **闭环**与 `FarmOwnerReport` 字段（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；**GraphRAG 结构裁决与写入**仍属 **农场主**，质检不替代 `process_gap_entries` 等实现。
 
 ### 产品知识本体与树（移交说明）
 

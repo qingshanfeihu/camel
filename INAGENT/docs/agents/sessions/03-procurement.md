@@ -94,6 +94,12 @@
 - 向 **农民** 输送已准入 chunk；`staging` 与采购侧 `schema_gaps.jsonl` 线索供 **农场主** 消费；与 `knowledge_schema` 对齐由全链路约定保证。
 - 不直接写入 GraphRAG parquet；结构类问题交给 **农场主**。
 
+### 与质检员
+
+- **契约义务**（供回归与导出对齐）：`evaluate_batch` 返回的 **`chunk_index`** 为输入列表全局下标且稳定；`filter_accepted` / `enrich_chunk_decision_for_farmer` 语义稳定；`write_logs` 条目字段完整（含 `reason_code` / `rule_layer` / `rule_confidence` 等，见上文日志表）。
+- **质检员**（[`07-quality-inspector.md`](07-quality-inspector.md)）可对 `decisions.json` vs `accepted_for_farmer.json`、采购日志与摘要做一致性校验；**金标标注与抽检流程**不归入 `KnowledgeProcurementAgent` 代码，由质检会话与编排约定。
+- L2/L3 **业务策略与 prompt** 的修改仍属 **采购** 会话；质检可提回归对比报告，不抢占代码归属。
+
 ### 与农民交接（`cultivate_batch` 前）
 
 - **正文**：保持 `page_content` / `text` **完整**（含 MinerU 表格转写）；采购实现**不修改**正文，仅浅拷贝；调用方勿在交接前截断。勿清除 auto_convert 已写入的元数据（如 `command_prefix`、`chunk_type`、`tree_node_id` 等）。

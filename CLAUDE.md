@@ -43,6 +43,7 @@ llm_gateway/                # LLM Gateway (多模型路由, :9000/v1)
 - `INAGENT/pipeline_runner.py` — 端到端测试流水线
 - `INAGENT/workforce_pipeline.py` — Workforce multi-agent pipeline
 - `llm_gateway/start.py` — 启动 LLM Gateway
+- 知识库会话宪章（含 **质检员**）：`INAGENT/docs/agents/sessions/07-quality-inspector.md`；实现：`INAGENT/agents/knowledge_quality_inspector_agent.py`；Cursor：`.cursor/rules/kb-session-quality-inspector.mdc`
 
 ## Development
 

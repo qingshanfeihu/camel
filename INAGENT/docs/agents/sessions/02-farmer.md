@@ -25,6 +25,7 @@
 - **树**：消费 `kb_index`、skeleton；匹配失败或 **歧义**（`ambiguous_match`）时产出 gap 供农场主裁决；可选只读 `reference/farmer_tree_alias.json`
 - **采购**：只处理已决策 **`accept`** 的 `ChunkDecision`；交接前须 **`enrich_decisions_for_farmer` / `filter_accepted`**，保证 `metadata` 含分类与来源（见 `03-procurement.md` § 与农民交接）
 - **农场主**：产出 **`FillRequest`**；农民 **执行** `apply_fill_request` 写 **reference**（及可选骨架），**不做** GraphRAG 结构写入与裁决
+- **质检员**：可对 `reference/*.json` 导出做 **diff、抽样与回归**（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；`cultivate_batch` / `apply_fill_request` **实现归属仍属农民**，质检不修改核心算法。
 
 ### 知识本体塑形 vs 树（移交自树宪章）
 
