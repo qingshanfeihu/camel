@@ -29,11 +29,15 @@ import logging
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
 import pandas as pd
+
+# GraphRAG / pandas 在 parquet 与 DataFrame 链路上常触发弃用类 FutureWarning，刷屏无助于排障
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 logger = logging.getLogger(__name__)
 

@@ -968,8 +968,9 @@ class KnowledgeFarmOwnerAgent:
             report.entities_added += added
         except Exception as exc:
             report.errors.append(f"upsert_entities 失败: {exc}")
+            # 写入图失败多为数据/索引态问题，用 INCOMPLETE 避免 operation_log 中 ERROR 计数与真实致命错误混淆
             report.log_op("new_entity", entry.entity_title, action, f"upsert失败: {exc}",
-                          status="ERROR", source=source)
+                          status="INCOMPLETE", source=source)
             return
 
         report.log_op("new_entity", entry.entity_title, action, reason, source=source,
@@ -1487,7 +1488,7 @@ class KnowledgeFarmOwnerAgent:
             except Exception as exc:
                 report.errors.append(f"overflow create_new 失败: {exc}")
                 report.log_op("overflow", title, "create_new",
-                              f"upsert failed: {exc}", status="ERROR", source="llm")
+                              f"upsert failed: {exc}", status="INCOMPLETE", source="llm")
             else:
                 report.log_op("overflow", title, "create_new",
                               decision.get("rationale", ""), source="llm")

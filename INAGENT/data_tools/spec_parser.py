@@ -101,13 +101,21 @@ def parse_spec_document(
     Returns:
         List[Dict] 兼容 knowledge_base.json 的块列表
     """
+    # MarkItDown 仅稳定支持 OOXML（.docx）；旧版二进制 .doc 需先转 .docx 或走 PDF/MinerU
+    if file_path.suffix.lower() == ".doc":
+        logger.info(
+            "[spec_parser] %s 为 .doc（非 OOXML），MarkItDown 不支持；请转为 .docx 或使用 PDF。已跳过。",
+            file_path.name,
+        )
+        return []
+
     from camel.loaders.markitdown import MarkItDownLoader
 
     loader = MarkItDownLoader()
     try:
         markdown_text = loader.convert_file(str(file_path))
     except Exception as e:
-        logger.error("[spec_parser] MarkItDown 转换失败 %s: %s", file_path.name, e)
+        logger.warning("[spec_parser] MarkItDown 转换失败 %s: %s", file_path.name, e)
         return []
 
     if not markdown_text or not markdown_text.strip():

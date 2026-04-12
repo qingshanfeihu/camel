@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from camel.loaders.local_mineru_reader import LocalMinerUReader
 from camel.logger import set_log_file, set_log_level
 from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
+from INAGENT.data_tools.spec_parser import parse_spec_document
+from INAGENT.data_tools.testlist_parser import parse_test_list
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
@@ -732,15 +734,16 @@ def convert_office_file(file_path: Path) -> None:
     logger.info("[office] 开始处理: %s", file_path.name)
 
     # 1. 分类
-    # 先尝试读取少量内容作为预览（用于内容匹配）
+    # 先尝试读取少量内容作为预览（用于内容匹配）；.doc 非 OOXML，MarkItDown 不支持，跳过预览以免重复告警
     content_preview = ""
-    try:
-        from camel.loaders.markitdown import MarkItDownLoader
-        loader = MarkItDownLoader()
-        full_text = loader.convert_file(str(file_path))
-        content_preview = full_text[:2000] if full_text else ""
-    except Exception as e:
-        logger.warning("[office] 预览读取失败 %s: %s", file_path.name, e)
+    if file_path.suffix.lower() != ".doc":
+        try:
+            from camel.loaders.markitdown import MarkItDownLoader
+            loader = MarkItDownLoader()
+            full_text = loader.convert_file(str(file_path))
+            content_preview = full_text[:2000] if full_text else ""
+        except Exception as e:
+            logger.warning("[office] 预览读取失败 %s: %s", file_path.name, e)
 
     # 路由：按文件扩展名选择解析器（不再用 classify_document）
     suffix = file_path.suffix.lower()
@@ -3031,13 +3034,25 @@ async def run_procurement_document_pipeline() -> None:
                     owner = KnowledgeFarmOwnerAgent(graphrag)
                     logger.info("[farm-owner] 处理 %d 条 gap entries...", len(gap_entries))
                     report = owner.process_gap_entries(gap_entries)
+                    _n_err = len(report.errors)
+                    _distinct_err = len(set(report.errors)) if report.errors else 0
                     logger.info(
-                        "[farm-owner] 完成: entities_added=%d, discarded=%d, errors=%d",
+                        "[farm-owner] 完成: entities_added=%d, discarded=%d, errors=%d (distinct=%d)",
                         report.entities_added,
                         report.discarded_count,
-                        len(report.errors),
+                        _n_err,
+                        _distinct_err,
                     )
-                    gaps_file.rename(gaps_file.with_suffix(".jsonl.processed"))
+                    # Windows：目标已存在时 Path.rename 会 WinError 183；os.replace 可覆盖
+                    _processed = gaps_file.with_suffix(".jsonl.processed")
+                    try:
+                        os.replace(gaps_file, _processed)
+                    except OSError as exc:
+                        logger.warning(
+                            "[farm-owner] 无法将 %s 标为已处理: %s",
+                            gaps_file.name,
+                            exc,
+                        )
                 else:
                     logger.warning("[farm-owner] GraphRAG 不可用，跳过")
             else:
