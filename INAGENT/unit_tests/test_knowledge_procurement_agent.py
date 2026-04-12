@@ -120,20 +120,24 @@ class TestLayer1Mechanical:
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "accept"
 
-    def test_exactly_50_chars_passes(self, agent_with_mock_llm):
-        chunk = _make_chunk("x" * 50)
+    def test_exactly_min_length_chars_passes(self, agent_with_mock_llm):
+        from INAGENT.agents.procurement_pre_clean import MIN_CHUNK_CHARS
+
+        chunk = _make_chunk("x" * MIN_CHUNK_CHARS)
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "accept"
 
     def test_rejects_garbage_mechanical_pre_clean(self, agent_with_mock_llm):
-        """50+ chars after strip, but no alphanumeric → L0 reject (no LLM)."""
+        """达到最短长度但无字母数字 → L0 reject（无 LLM）。"""
         chunk = _make_chunk("(" * 50)
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "reject"
         assert "预清理" in decisions[0].decision.reason
 
-    def test_49_chars_rejected(self, agent_with_mock_llm):
-        chunk = _make_chunk("x" * 49)
+    def test_below_min_length_rejected(self, agent_with_mock_llm):
+        from INAGENT.agents.procurement_pre_clean import MIN_CHUNK_CHARS
+
+        chunk = _make_chunk("x" * (MIN_CHUNK_CHARS - 1))
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
         assert decisions[0].decision.action == "reject"
 
@@ -147,15 +151,16 @@ class TestLayer1Mechanical:
         assert decisions[0].decision.action == "pending_review"
         assert decisions[0].decision.reason_code == "frontmatter_medium_confidence"
 
-    def test_title_content_mismatch_pending(self, agent_with_mock_llm):
-        # 首行非 CLI 形态，标题与正文无字符重叠 → 仍应 pending（title_content_mismatch）
+    def test_title_content_mismatch_passes_mechanical_goes_to_llm(self, agent_with_mock_llm):
+        # 标题与正文无字符重叠：不再 L0 pending，交 L2；mock LLM 接受
         chunk = _make_chunk(
             "BGP autonomous system path attributes for inter-domain routing policies." * 3,
             section_title="快照与卷管理",
         )
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
-        assert decisions[0].decision.action == "pending_review"
-        assert decisions[0].decision.reason_code == "title_content_mismatch"
+        assert decisions[0].decision.action == "accept"
+        qf = chunk.get("metadata", {}).get("_quality_flags") or []
+        assert "title_content_mismatch" in qf
 
 
 # ── Layer 2: LLM 判断 ─────────────────────────────────────────────────────────

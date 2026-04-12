@@ -2614,6 +2614,13 @@ def _cleanup_orphan_files(pdfs: List[Path], office_files: Optional[List[Path]] =
 async def run_procurement_document_pipeline() -> None:
     load_inagent_env()
     _refresh_mineru_vllm_settings()
+    # 每次完整跑管线重置主日志，避免 FileHandler 默认 append 导致多轮运行后
+    # 「[完成]」等行累积（procurement_quality_diagnostic 以计数=1 为健康基线）。
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        LOG_FILE.write_text("", encoding="utf-8")
+    except OSError:
+        pass
     _setup_logging()
     
     # 调试：输出关键环境变量

@@ -21,7 +21,7 @@
 
 机械层（L0+L1，实现见 ``procurement_pre_clean`` + ``chunk_text_quality``）
   L0 预清理：与全库一致的垃圾/版式启发式（纯标点行、版权声明单行等）→ reject，不进 LLM。
-  L1 长度：page_content/text strip 后长度 < 50 → reject，否则进 L2。
+  L1 长度：page_content/text strip 后长度 < MIN_CHUNK_CHARS（默认 40）→ reject，否则进 L2。
   （二者在 ``_layer1_mechanical`` 中顺序执行，统称「机械层」。）
 
 三层（对外说明仍可按 L2/L3 计）

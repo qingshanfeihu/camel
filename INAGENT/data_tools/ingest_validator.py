@@ -1,7 +1,7 @@
 """Knowledge base ingestion validator — 4-rule quality gate.
 
 Rules:
-1. MinLength — reject chunks with <20 chars of content
+1. MinLength — reject chunks with <18 chars of content
 2. TreePositionCheck — quarantine chunks without tree_position
 3. SimHashDedup — cross-source near-duplicate detection (64-bit SimHash)
 4. HierarchyEnrich — backfill function_hierarchy + product_module from CLI graph
@@ -18,7 +18,7 @@ from INAGENT.rag.knowledge_schema import CAT_TO_LEVEL
 
 logger = logging.getLogger(__name__)
 
-_MIN_CONTENT_LENGTH = 20
+_MIN_CONTENT_LENGTH = 18
 _SIMHASH_BITS = 64
 _SIMHASH_THRESHOLD = 3
 
@@ -143,7 +143,7 @@ class IngestValidator:
 
         # Rule 1b: HeadingOnly — content 基本上只是 section_title 本身
         section_title = meta.get("section_title", "")
-        if section_title and len(content.strip()) <= len(section_title.strip()) + 15:
+        if section_title and len(content.strip()) <= len(section_title.strip()) + 22:
             self._report.rejected_short += 1
             return "reject", "heading_only"
 

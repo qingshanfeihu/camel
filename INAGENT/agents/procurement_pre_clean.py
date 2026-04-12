@@ -22,8 +22,8 @@ from INAGENT.utils.chunk_text_quality import (
     is_garbage_page_content,
 )
 
-# 与 ``KnowledgeProcurementAgent`` 历史行为一致：strip 后长度门槛
-MIN_CHUNK_CHARS = 50
+# strip 后长度门槛（略放宽以降低机械误杀；极短噪声仍由 is_garbage 与 L2 兜底）
+MIN_CHUNK_CHARS = 40
 FRONTMATTER_REJECT_CONFIDENCE = 0.95
 FRONTMATTER_PENDING_CONFIDENCE = 0.75
 
@@ -99,16 +99,8 @@ def mechanical_pre_clean_chunk(chunk: Dict[str, Any]) -> MechanicalPreCleanResul
             quality_flags=quality_flags,
         )
 
-    if "title_content_mismatch" in quality_flags:
-        return MechanicalPreCleanResult(
-            decision_hint="pending_review",
-            reason="预清理（质量）：标题与正文关联弱，转人工待审",
-            reason_code="title_content_mismatch",
-            confidence=0.7,
-            rule_layer="L0",
-            quality_flags=quality_flags,
-        )
-
+    # 标题/正文无字符重叠（如中文章节 + 英文说明）不再直接 pending：历史上误伤
+    # 多、拉低入库率；保留 quality_flags 供 L2 参考，由 LLM 判断是否保留。
     return MechanicalPreCleanResult(
         decision_hint="pass",
         reason="",

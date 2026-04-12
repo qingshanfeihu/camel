@@ -116,7 +116,13 @@ def diagnose_baseline(run_id: str) -> DiagnosticResult:
         completion_count = log_content.count("[完成]")
         result.add_finding("log_completion_mark_count", completion_count)
         if completion_count != 1:
-            result.add_issue("WARN", "baseline", f"[完成] mark appears {completion_count} times, expected 1 (log append duplicate detection)")
+            result.add_issue(
+                "WARN",
+                "baseline",
+                f"[完成] appears {completion_count} times (expected 1): historically auto_convert.log "
+                f"used append; current run_procurement_document_pipeline truncates LOG_FILE at start. "
+                f"Delete or archive old auto_convert.log once to clear prior runs.",
+            )
         else:
             result.add_finding("log_integrity", "OK")
 
