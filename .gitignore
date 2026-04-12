@@ -535,3 +535,6 @@ INAGENT/vector_store/
 # Jobs：本地测试输入与运行输出（评审目录、config 任务上传等）
 INAGENT/jobs/test_review/
 INAGENT/jobs/config_tasks/
+
+# 采购 / 流水线本地测试缓存与跑批快照（体积大，仅本机）
+INAGENT/test_data/
