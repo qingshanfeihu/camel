@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from camel.loaders.local_mineru_reader import LocalMinerUReader
 from camel.logger import set_log_file, set_log_level
-from INAGENT.config.project_config import cfg_float, cfg_int, cfg_str
+from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
 
 try:
@@ -51,7 +51,10 @@ logger = logging.getLogger("auto_convert")
 #
 # - **采购管线（原始文档 → reference）**：MinerU（``mineru_procurement.convert_one``）/
 #   Office / TXT 批处理、前置页标记、规则与批量 LLM 元数据、初挂树与落盘，由 **采购**
-#   会话编排。对外权威入口为 ``INAGENT.data_tools.procurement_ingest.main``；实现函数名为
+#   会话编排。PDF 默认 **仅 MinerU 云端 API**（``allow_local_mineru_fallback`` 默认 False，
+#   见 ``cfg_bool("auto_convert.mineru.cloud.allow_local_fallback", ...)``）；
+#   本地 mineru CLI 仅当显式允许或 ``AUTO_CONVERT_MAX_PAGES_TEST`` 部分页测试（云端不跑）时使用。
+#   对外权威入口为 ``INAGENT.data_tools.procurement_ingest.main``；实现函数名为
 #   ``run_procurement_document_pipeline``。历史别名 ``main`` 仍指向同一协程。
 #
 # Bump this when auto_convert logic changes in a way that should invalidate cache
@@ -2670,9 +2673,12 @@ async def run_procurement_document_pipeline() -> None:
         # ============================================================
         # MinerU 配置说明：
         # ============================================================
-        # 1. 云端优先：配置 MINERU_API_TOKEN 或 MINERU_API_KEY 时，convert_one 先走 MinerU Cloud API；
-        #    失败或结果无效时回退本地 mineru CLI，且回退时固定为默认后端（不带 hybrid-http-client / 本地 vLLM）。
-        #    强制关云端：project.yaml auto_convert.mineru.cloud.enable: false
+        # 1. 采购管线 PDF：convert_one 默认仅 MinerU 云端（allow_local_mineru_fallback=False）。
+        #    云端失败且未显式允许本地时直接报错，不回退本地 CLI。
+        #    允许本地回退：MINERU_ALLOW_LOCAL_MINERU_FALLBACK=1 或 project.yaml
+        #    auto_convert.mineru.cloud.allow_local_fallback: true
+        #    历史「云端失败再本地」行为可通过上述开关恢复。
+        #    强制关云端解析：project.yaml auto_convert.mineru.cloud.enable: false（仍受 allow_local 约束）
         #    或环境变量 AUTO_CONVERT_MINERU_CLOUD=0
         #
         # 2. 本地默认: hybrid-auto-engine（无需本地 vLLM HTTP 服务）
@@ -2732,10 +2738,21 @@ async def run_procurement_document_pipeline() -> None:
             except ValueError:
                 logger.warning("Invalid AUTO_CONVERT_MAX_PAGES_TEST value: %s", max_pages_test)
 
+        allow_local_mineru_fb = cfg_bool(
+            "auto_convert.mineru.cloud.allow_local_fallback",
+            False,
+            env="MINERU_ALLOW_LOCAL_MINERU_FALLBACK",
+        )
+
         async def _protected_convert(p):
             async with sem:
                  try:
-                     await convert_one(reader, p, max_pages=max_pages_limit)
+                     await convert_one(
+                         reader,
+                         p,
+                         max_pages=max_pages_limit,
+                         allow_local_mineru_fallback=allow_local_mineru_fb,
+                     )
                  except Exception as e:
                      logger.error("Failed to convert %s: %s", p.name, e)
                      if not _fallback_convert_pdf_with_markitdown(p, reason=str(e)):

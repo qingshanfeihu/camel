@@ -267,6 +267,139 @@ class TestLayer2LLM:
         assert call_count["n"] == 2
 
 
+class TestLayer2Cache:
+    def test_reuses_cached_llm_raw_response(self, tmp_path):
+        call_count = {"n": 0}
+
+        def fake_step(msg):
+            call_count["n"] += 1
+            result = [
+                {
+                    "idx": 0,
+                    "action": "accept",
+                    "target_kb": "product",
+                    "confidence": 0.91,
+                    "reason": "cached accept",
+                    "suggested_category": "spec/design",
+                }
+            ]
+            r = MagicMock()
+            r.msgs = [MagicMock(content=json.dumps(result))]
+            return r
+
+        cache_dir = tmp_path / "l2_cache"
+        chunk = _make_chunk(
+            "这是一段有足够长度的产品知识内容，详细描述了某个功能模块的基本使用方法、参数说明和注意事项，请仔细阅读。"
+        )
+
+        agent1 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="mock-model",
+            llm_cache_dir=cache_dir,
+        )
+        first = agent1.evaluate_batch([chunk])
+        assert call_count["n"] == 1
+        assert first[0].decision.action == "accept"
+        assert agent1.get_l2_cache_stats() == {"hits": 0, "misses": 1}
+
+        agent2 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="mock-model",
+            llm_cache_dir=cache_dir,
+        )
+        second = agent2.evaluate_batch([chunk])
+        assert call_count["n"] == 1
+        assert second[0].decision.reason == "cached accept"
+        assert agent2.get_l2_cache_stats() == {"hits": 1, "misses": 0}
+
+    def test_model_signature_change_invalidates_cache(self, tmp_path):
+        call_count = {"n": 0}
+
+        def fake_step(msg):
+            call_count["n"] += 1
+            result = [
+                {
+                    "idx": 0,
+                    "action": "accept",
+                    "target_kb": "product",
+                    "confidence": 0.88,
+                    "reason": "model-specific",
+                    "suggested_category": "spec/design",
+                }
+            ]
+            r = MagicMock()
+            r.msgs = [MagicMock(content=json.dumps(result))]
+            return r
+
+        cache_dir = tmp_path / "l2_cache"
+        chunk = _make_chunk(
+            "这是一段有足够长度的产品知识内容，详细描述了某个功能模块的基本使用方法、参数说明和注意事项，请仔细阅读。"
+        )
+
+        agent1 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="model-A",
+            llm_cache_dir=cache_dir,
+        )
+        agent1.evaluate_batch([chunk])
+        assert call_count["n"] == 1
+
+        agent2 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="model-B",
+            llm_cache_dir=cache_dir,
+        )
+        agent2.evaluate_batch([chunk])
+        assert call_count["n"] == 2
+
+    def test_force_refresh_bypasses_cache(self, tmp_path):
+        call_count = {"n": 0}
+
+        def fake_step(msg):
+            call_count["n"] += 1
+            result = [
+                {
+                    "idx": 0,
+                    "action": "accept",
+                    "target_kb": "product",
+                    "confidence": 0.89,
+                    "reason": "forced refresh",
+                    "suggested_category": "spec/design",
+                }
+            ]
+            r = MagicMock()
+            r.msgs = [MagicMock(content=json.dumps(result))]
+            return r
+
+        cache_dir = tmp_path / "l2_cache"
+        chunk = _make_chunk(
+            "这是一段有足够长度的产品知识内容，详细描述了某个功能模块的基本使用方法、参数说明和注意事项，请仔细阅读。"
+        )
+
+        agent1 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="mock-model",
+            llm_cache_dir=cache_dir,
+        )
+        agent1.evaluate_batch([chunk])
+        assert call_count["n"] == 1
+
+        agent2 = KnowledgeProcurementAgent(
+            model=MagicMock(),
+            _chat_agent=MagicMock(step=fake_step),
+            model_signature="mock-model",
+            llm_cache_dir=cache_dir,
+            llm_cache_force_refresh=True,
+        )
+        agent2.evaluate_batch([chunk])
+        assert call_count["n"] == 2
+
+
 # ── Layer 3: Schema 检查 ────────────────────────────────────────────────────────
 
 class TestLayer3Schema:

@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 知识库会话：采购（Procurement）— 持久身份
 
-当涉及 INAGENT 知识入库、chunk 筛查、`KnowledgeProcurementAgent`、**`procurement_ingest`（MinerU/Office/TXT 批处理入口）**、采购日志或采购侧 `schema_gaps.jsonl` 时，以本规则与 `INAGENT/docs/agents/sessions/03-procurement.md` 为准。
+当涉及 INAGENT 知识入库、chunk 筛查、`KnowledgeProcurementAgent`、**`procurement_ingest`（MinerU/Office/TXT 批处理入口）**、采购日志或采购侧 `schema_gaps.jsonl` 时，以本规则与 `INAGENT/docs/agents/sessions/03-procurement.md` 为准。采购 **PDF** 默认 **仅 MinerU 云端**（`convert_one` 的 `allow_local_mineru_fallback`）；本地 mineru CLI 需 `MINERU_ALLOW_LOCAL_MINERU_FALLBACK` 等显式允许。
 
 ## 你是谁
 
@@ -20,7 +20,7 @@ alwaysApply: true
 
 ## 应改 / 非范围
 
-- **应改**：`knowledge_procurement_agent.py`、`procurement_ingest.py`（入库管线入口）、`procurement_pre_clean.py`、`INAGENT/utils/chunk_text_quality.py`、`test_knowledge_procurement_agent.py`（及机械层相关单测）。
+- **应改**：`knowledge_procurement_agent.py`、`procurement_ingest.py`（入库管线入口）、`mineru_procurement.py` / `auto_convert.py`（MinerU 策略与管线）、`procurement_pre_clean.py`、`INAGENT/utils/chunk_text_quality.py`、`test_knowledge_procurement_agent.py`（及机械层相关单测）。
 - **勿改**：GraphRAG、`KnowledgeFarmOwnerAgent`；农民 cultivate/`FillRequest`（除非极小契约修复）；统一 RAG / `KnowledgeToolkit`。
 
 ## 与农民

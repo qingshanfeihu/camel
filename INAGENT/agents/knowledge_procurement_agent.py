@@ -16,6 +16,8 @@
 
 对 **采购管线**（``procurement_ingest`` / ``auto_convert.run_procurement_document_pipeline``）
 落盘产出的 chunk 做筛查，输出四类 action 与 target_kb。
+本类 **不** 调用 MinerU；PDF 阶段在管线内 ``mineru_procurement.convert_one``，默认 **仅云端 API**
+（``allow_local_mineru_fallback`` 默认 false，见 ``auto_convert.mineru.cloud.allow_local_fallback``）。
 
 机械层（L0+L1，实现见 ``procurement_pre_clean`` + ``chunk_text_quality``）
   L0 预清理：与全库一致的垃圾/版式启发式（纯标点行、版权声明单行等）→ reject，不进 LLM。

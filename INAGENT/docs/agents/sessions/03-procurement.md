@@ -4,6 +4,13 @@
 
 你是 **「采购」会话** 负责人。**文档入库（MinerU / Office / TXT → reference）** 的编排入口为 **`INAGENT.data_tools.procurement_ingest.main`**（实现：`auto_convert.run_procurement_document_pipeline`）。对管线产出的 chunk 执行 **三层筛查**（机械 → LLM 价值判断 → 元数据合法性），输出 `accept` / `reject` / `pending_review` / `staging`，并标注 `target_kb`（`product` / `test` / `unknown`）。**不**写入 GraphRAG parquet；**不**做农民侧 cultivate；`staging` 只产出 gap 线索，结构裁决交给 **农场主**。
 
+### MinerU 与采购 PDF（权威行为）
+
+- **MinerU 属于采购文档管线**（`mineru_procurement.convert_one`），**不是** `KnowledgeProcurementAgent` 类内嵌调用；采购员筛查的是管线已解析好的 chunk。
+- **默认仅 MinerU 云端 API**：`run_procurement_document_pipeline` 调用 `convert_one(..., allow_local_mineru_fallback=False)`（配置项 `auto_convert.mineru.cloud.allow_local_fallback`，默认 `false`；环境变量 `MINERU_ALLOW_LOCAL_MINERU_FALLBACK=1` 等为 `true` 时允许本地 **mineru CLI** 回退）。
+- 需配置 **`MINERU_API_TOKEN` 或 `MINERU_API_KEY`**（及云端可达）；云端失败且未允许本地时 **报错**，不再静默回退本地 CLI。
+- **`AUTO_CONVERT_MAX_PAGES_TEST`** 部分页测试会走本地解析路径（云端分支不跑），与历史行为一致。
+
 ## 实现摘要（与 `knowledge_procurement_agent.py` 同步）
 
 ### 数据类型
@@ -72,6 +79,8 @@
 
 - `INAGENT/agents/knowledge_procurement_agent.py`
 - `INAGENT/data_tools/procurement_ingest.py`（采购文档入库管线入口；实现委托 `auto_convert.run_procurement_document_pipeline`）
+- `INAGENT/data_tools/mineru_procurement.py`（采购 PDF → MinerU；与「仅云端默认」策略相关）
+- `INAGENT/data_tools/auto_convert.py`（采购管线编排；`convert_one` 参数与注释）
 - `INAGENT/unit_tests/test_knowledge_procurement_agent.py`（存在则维护，职责扩展则新增用例）
 
 ## 非范围（勿改）

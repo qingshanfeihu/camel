@@ -1,8 +1,12 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-"""MinerU 采购阶段：PDF → Cloud/CLI → reference JSON / doc_local_reference。
+"""MinerU 采购阶段：PDF → Cloud（及可选本地 CLI）→ reference JSON / doc_local_reference。
 
 物理上与 ``auto_convert`` 解耦：原矿 PDF 的结构化、初挂与落盘在本模块完成，
 农民侧仅消费已写入 ``reference`` / ``doc_local_reference`` 的块。
+
+``convert_one(..., allow_local_mineru_fallback=...)``：采购入口 ``run_procurement_document_pipeline``
+传入 ``allow_local_mineru_fallback=False``（默认，见 ``auto_convert.mineru.cloud.allow_local_fallback``），
+即 **仅 MinerU 云端 API**；本地 mineru CLI 需显式允许或 ``max_pages`` 测试模式（云端分支不跑）。
 """
 from __future__ import annotations
 
@@ -187,7 +191,13 @@ def _infer_pdf_document_category(pdf: Path) -> str:
     return "spec/design"
 
 
-async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[int] = None) -> None:
+async def convert_one(
+    reader: LocalMinerUReader,
+    pdf: Path,
+    max_pages: Optional[int] = None,
+    *,
+    allow_local_mineru_fallback: bool = True,
+) -> None:
     import INAGENT.data_tools.auto_convert as ac
 
     json_path, cache_path = ac._target_paths(pdf)
@@ -251,6 +261,10 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
     else:
         task_id = ""
         cloud_attempted = False
+        # 采购管线默认仅云端：allow_local_mineru_fallback=False 时禁止本地 CLI；
+        # max_pages 测试模式会跳过云端分支，此时允许本地（与历史行为一致）。
+        allow_local_effective = allow_local_mineru_fallback or (max_pages is not None)
+
         # 1) MinerU 云端 API（有凭证且未限制 max_pages 时优先）
         if max_pages is None and _use_mineru_cloud():
             tok = _mineru_cloud_token()
@@ -276,13 +290,27 @@ async def convert_one(reader: LocalMinerUReader, pdf: Path, max_pages: Optional[
                         cloud_json,
                     )
                 else:
-                    logger.warning(
-                        "[mineru-cloud] unavailable or empty output; "
-                        "falling back to local MinerU CLI (non-vLLM / default backend)."
-                    )
+                    if allow_local_effective:
+                        logger.warning(
+                            "[mineru-cloud] unavailable or empty output; "
+                            "falling back to local MinerU CLI (non-vLLM / default backend)."
+                        )
+                    else:
+                        logger.error(
+                            "[mineru-cloud] unavailable or empty output; "
+                            "local MinerU CLI disabled (procurement cloud-only)."
+                        )
 
         # 2) 本地 MinerU CLI；若已尝试云端失败，强制不用 vLLM 额外参数
         if not task_id:
+            if not allow_local_effective:
+                raise RuntimeError(
+                    "MinerU：采购管线已配置为仅使用云端 API（禁止本地 mineru CLI 回退）。"
+                    "请配置 MINERU_API_TOKEN 或 MINERU_API_KEY、检查云端可用性，"
+                    "或设置 MINERU_ALLOW_LOCAL_MINERU_FALLBACK=1 / "
+                    "project.yaml auto_convert.mineru.cloud.allow_local_fallback: true。"
+                    "（若使用 AUTO_CONVERT_MAX_PAGES_TEST 做部分页测试，会自动允许本地解析。）"
+                )
             extra_args = [] if cloud_attempted else local_extra_args
             last_error: Optional[Exception] = None
             for attempt in range(1, ac.NET_RETRY_ATTEMPTS + 1):
