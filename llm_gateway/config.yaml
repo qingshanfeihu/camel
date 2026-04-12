@@ -5,6 +5,8 @@
 routing:
   # 当存在多条可路由 chat（多模型/多供应商）时，网关会按请求体 model 解析路由
   default_chat_model: "qwen-plus"
+  # response_format.type=json_object 时，若消息中无 "json" 字样则自动追加提示（百炼 API 要求）
+  ensure_json_keyword_for_json_object: true
   # true：请求中的 model 若无法识别则返回 400（不静默回落）
   strict_model_match: false
   # true：用量统计桶使用 provider:model_id（会改变 /metrics/usage 的 key 形状）

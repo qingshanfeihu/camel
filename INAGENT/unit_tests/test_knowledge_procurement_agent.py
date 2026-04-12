@@ -38,6 +38,15 @@ from INAGENT.agents.knowledge_procurement_agent import (
 from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
 
 
+@pytest.fixture(autouse=True)
+def _disable_procurement_l2_structured(monkeypatch):
+    """单测默认走纯 JSON，避免 MagicMock 未模拟 response_format 的 step 签名。"""
+    monkeypatch.setattr(
+        "INAGENT.agents.knowledge_procurement_agent._l2_structured_output_enabled",
+        lambda: False,
+    )
+
+
 @pytest.fixture
 def mock_model():
     return MagicMock()
@@ -150,6 +159,45 @@ class TestLayer1Mechanical:
 
 
 # ── Layer 2: LLM 判断 ─────────────────────────────────────────────────────────
+
+class TestLayer2Structured:
+    def test_response_format_batch_maps_to_decision(self, monkeypatch):
+        from INAGENT.agents.procurement_l2_schema import (
+            ProcurementL2Batch,
+            ProcurementL2Row,
+        )
+
+        monkeypatch.setattr(
+            "INAGENT.agents.knowledge_procurement_agent._l2_structured_output_enabled",
+            lambda: True,
+        )
+
+        def fake_step(msg, response_format=None):
+            batch = ProcurementL2Batch(
+                items=[
+                    ProcurementL2Row(
+                        idx=0,
+                        action="accept",
+                        target_kb="product",
+                        confidence=0.91,
+                        reason="structured ok",
+                        document_category="spec/design",
+                    )
+                ]
+            )
+            m = MagicMock(content=batch.model_dump_json())
+            m.parsed = batch
+            r = MagicMock()
+            r.msgs = [m]
+            return r
+
+        agent = _make_agent_with_step(fake_step)
+        chunk = _make_chunk("x" * 60, category="spec/design")
+        decisions = agent.evaluate_batch([chunk])
+        assert decisions[0].decision.action == "accept"
+        assert decisions[0].decision.suggested_value == "spec/design"
+        assert decisions[0].decision.reason == "structured ok"
+
 
 class TestLayer2LLM:
     def test_llm_suggested_module_slug_normalized_to_document_category(self):

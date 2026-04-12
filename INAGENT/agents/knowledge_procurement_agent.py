@@ -26,8 +26,9 @@
 
 三层（对外说明仍可按 L2/L3 计）
   L2 LLM：按 metadata.source_file 分组；同一文件 chunk 数超过 _LLM_BATCH_SIZE（默认 50）时拆子批，
-          每子批一次 ChatAgent.step。prompt 内每段仅展示正文前 500 字
-          （用于判断，不修改入库正文）。JSON 字段 suggested_category → ProcurementDecision.suggested_value。
+          每子批一次 ChatAgent.step（默认 response_format=ProcurementL2Batch，失败回退 JSON 数组）。
+          prompt 内每段仅展示正文前 500 字（用于判断，不修改入库正文）。
+          document_category / proposed_new_document_category → ProcurementDecision.suggested_value（L3 校验）。
           confidence < 0.6 且 action 为 accept/reject → 改为 pending_review；非法 action → pending_review。
   L3 元数据：reject/pending_review 直接返回；否则用 suggested_value 或 metadata.document_category
           校验 DOCUMENT_CATEGORIES，不在白名单 → staging (new_category)；
@@ -54,6 +55,7 @@ SchemaGapType 含 new_entity / new_entity_attribute：当前 L3 仅产生 new_ca
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import inspect
 import json
@@ -69,47 +71,79 @@ from typing import Dict, List, Literal, Optional, Tuple
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
 from camel.models import BaseModelBackend
+from INAGENT.agents.procurement_l2_schema import ProcurementL2Batch
+from INAGENT.config.project_config import cfg_bool
 from INAGENT.rag.knowledge_config import DOCUMENT_CATEGORIES
 from INAGENT.utils.env_utils import load_inagent_env
 from INAGENT.utils.chunk_text_quality import looks_like_cli_first_line
 
 logger = logging.getLogger(__name__)
 
-# LLM 常把 product_module  slug 填进 suggested_category；须映射回 DOCUMENT_CATEGORIES
-_LLM_MODULE_SLUGS = frozenset({
-    "slb", "llb", "gslb", "nat", "vlan", "vpn", "aaa", "ssl", "ospf", "bgp",
-    "rip", "vrrp", "ntp", "dns", "acl", "ha", "icookie", "ircookie", "waf",
-})
+def _l2_structured_output_enabled() -> bool:
+    """L2 是否使用 Pydantic/response_format 结构化输出；网关不支持时可关。"""
+    load_inagent_env()
+    return cfg_bool(
+        "procurement.l2.structured_output",
+        True,
+        env="INAGENT_PROCUREMENT_L2_STRUCTURED",
+    )
 
 
-def _normalize_llm_suggested_category(
+def _strip_json_fence(raw: str) -> str:
+    s = raw.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return s
+
+
+def _coerce_suggested_category(
     suggested: Optional[str],
     chunk: Dict,
 ) -> Optional[str]:
-    """Map mistaken module tokens to a valid document_category when possible."""
+    """将自由文本或误填模块名尽量对齐到 DOCUMENT_CATEGORIES；否则回退元数据/启发式。"""
     s = (suggested or "").strip()
-    if not s:
-        return None
     if s in DOCUMENT_CATEGORIES:
-        return s
-    low = s.lower().replace(" ", "")
-    if "/" in s:
         return s
     meta = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
     dc = (meta.get("document_category") or "").strip()
-    if low not in _LLM_MODULE_SLUGS:
-        return s
+    if s:
+        matches = difflib.get_close_matches(s, DOCUMENT_CATEGORIES, n=1, cutoff=0.55)
+        if matches:
+            return matches[0]
+        low = s.lower()
+        partial = [
+            c for c in DOCUMENT_CATEGORIES
+            if low == c.split("/")[0] or c.startswith(low + "/")
+        ]
+        if len(partial) == 1:
+            return partial[0]
+        if "/" in s:
+            return s
     if dc in DOCUMENT_CATEGORIES:
         return dc
     body = (chunk.get("page_content") or chunk.get("text") or "")[:2000]
     if looks_like_cli_first_line(body):
         return "cli/reference"
-    return "spec/design"
+    return None
+
+
+def _l2_item_suggested_value(item: Dict, chunk: Dict) -> Optional[str]:
+    action = item.get("action", "pending_review")
+    if action == "staging":
+        prop = item.get("proposed_new_document_category")
+        if isinstance(prop, str) and prop.strip():
+            return prop.strip()
+    raw = item.get("document_category")
+    if raw is None:
+        raw = item.get("suggested_category")
+    return _coerce_suggested_category(raw if isinstance(raw, str) else None, chunk)
+
 
 _INAGENT_ROOT = Path(__file__).resolve().parent.parent
 _KB_LOGS_DIR = _INAGENT_ROOT / "knowledge_base" / "logs"
 _PROCUREMENT_STEP_TIMEOUT = 180
-_L2_CACHE_SCHEMA_VERSION = 1
+_L2_CACHE_SCHEMA_VERSION = 2
 
 ActionType = Literal["accept", "reject", "pending_review", "staging"]
 TargetKB = Literal["product", "test", "unknown"]
@@ -246,23 +280,28 @@ def _build_system_prompt(
 【已知文档分类体系】
 {categories_str}
 
-【输出格式】
-对每个 chunk 输出一个 JSON 对象：
+【输出格式 — 结构化（优先）】
+返回一个 JSON **对象**，顶层键 `"items"`，值为数组；每个元素对应一个 chunk：
 {{
-  "idx": <chunk索引>,
-  "action": "accept" | "reject" | "pending_review" | "staging",
-  "target_kb": "product" | "test" | "unknown",
-  "confidence": 0.0~1.0,
-  "reason": "一句话说明原因",
-  "suggested_category": "必须是上方【已知文档分类体系】中的**确切一项**（如 cli/reference、test/test_list）"
+  "items": [
+    {{
+      "idx": <chunk索引>,
+      "action": "accept" | "reject" | "pending_review" | "staging",
+      "target_kb": "product" | "test" | "unknown",
+      "confidence": 0.0~1.0,
+      "reason": "一句话说明原因",
+      "document_category": "accept 时必填，且必须是上方【已知文档分类体系】中的确切一项；reject/pending 可空",
+      "proposed_new_document_category": "仅当 action=staging 且需要新文档类型时填写",
+      "product_module_hint": "可选，功能模块名（如 nat、slb），**不要**写入 document_category"
+    }}
+  ]
 }}
 
 重要：
-- suggested_category **只能**填文档类型路径（含斜杠），**禁止**填功能模块名（如 slb、nat、vlan）；
-  模块归属请写在 reason 中，或依赖 chunk 已有 metadata.product_module。
+- document_category **只能**填文档类型路径（含斜杠），**禁止**填功能模块名；模块意见用 product_module_hint 或 reason。
 - confidence < 0.6 时使用 "pending_review"，不武断判定
 - "staging" 仅用于内容有价值但确实需要**新文档类型**时；若只是模块不确定，仍选最接近的已知分类。
-- 返回 JSON 数组，按 idx 顺序排列，不输出其他文字
+- 只返回 JSON，不要输出其他文字
 """
 
 
@@ -310,8 +349,11 @@ def build_procurement_prompt(source_file: str, chunks: List[Dict]) -> str:
         lines.append("---")
     lines += [
         "",
-        "请返回 JSON 数组，每个元素对应一个片段（按 idx 顺序）。",
-        '格式：[{"idx":0,"action":"...","target_kb":"...","confidence":0.9,"reason":"...","suggested_category":"..."},...]',
+        "请返回 JSON 对象：顶层键 \"items\"，数组内每个元素对应一个片段（idx 从 0 递增）。",
+        '示例：{"items":[{"idx":0,"action":"accept","target_kb":"product","confidence":0.9,'
+        '"reason":"...","document_category":"spec/design","proposed_new_document_category":null,'
+        '"product_module_hint":null},...]}',
+        "若无法按对象格式输出，可退化为 JSON 数组（与 items 等价），字段中可用 suggested_category 代替 document_category。",
         "只返回 JSON，不要输出其他文字。",
     ]
     return "\n".join(lines)
@@ -608,6 +650,7 @@ class KnowledgeProcurementAgent:
         """Single LLM call for a sub-batch. Returns {global_idx: decision}."""
         results: Dict[int, ProcurementDecision] = {}
         local_chunks = [chunk for _, chunk in indexed_chunks]
+        nloc = len(local_chunks)
         prompt = build_procurement_prompt(source_file, local_chunks)
         cache_key = self._build_l2_cache_key(source_file, prompt)
 
@@ -617,9 +660,9 @@ class KnowledgeProcurementAgent:
             logger.info(
                 "[采购员] L2 cache hit (%s): %d chunks",
                 source_file,
-                len(local_chunks),
+                nloc,
             )
-            parsed = self._parse_llm_json(cached_raw, len(local_chunks))
+            parsed = self._decode_l2_response_to_map(cached_raw, nloc)
         else:
             self._l2_cache_misses += 1
             try:
@@ -627,7 +670,13 @@ class KnowledgeProcurementAgent:
                 self._chat_agent.clear_memory()
                 msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
                 executor = ThreadPoolExecutor(max_workers=1)
-                future = executor.submit(self._chat_agent.step, msg)
+                use_struct = _l2_structured_output_enabled()
+                if use_struct:
+                    future = executor.submit(
+                        self._chat_agent.step, msg, ProcurementL2Batch
+                    )
+                else:
+                    future = executor.submit(self._chat_agent.step, msg)
                 try:
                     response = future.result(timeout=_PROCUREMENT_STEP_TIMEOUT)
                 except FutureTimeout as exc:
@@ -637,14 +686,34 @@ class KnowledgeProcurementAgent:
                         f"采购 L2 调用超时（>{_PROCUREMENT_STEP_TIMEOUT}s）"
                     ) from exc
                 executor.shutdown(wait=False, cancel_futures=True)
-                raw = response.msgs[0].content if response.msgs else ""
-                parsed = self._parse_llm_json(raw, len(local_chunks))
+                raw_for_cache = self._l2_raw_from_response(response)
+                parsed = self._decode_l2_response_to_map(raw_for_cache, nloc)
+                if use_struct and not self._l2_indices_complete(parsed, nloc):
+                    logger.warning(
+                        "[采购员] L2 结构化输出不完整，回退为纯 JSON 再调用一次 (%s)",
+                        source_file,
+                    )
+                    self._chat_agent.clear_memory()
+                    msg = BaseMessage.make_user_message(role_name="Operator", content=prompt)
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    future = executor.submit(self._chat_agent.step, msg)
+                    try:
+                        response = future.result(timeout=_PROCUREMENT_STEP_TIMEOUT)
+                    except FutureTimeout as exc:
+                        future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise TimeoutError(
+                            f"采购 L2 调用超时（>{_PROCUREMENT_STEP_TIMEOUT}s）"
+                        ) from exc
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raw_for_cache = self._l2_raw_from_response(response)
+                    parsed = self._decode_l2_response_to_map(raw_for_cache, nloc)
                 self._store_l2_cache_raw(
                     cache_key=cache_key,
                     source_file=source_file,
                     prompt=prompt,
-                    raw_response=raw,
-                    expected_count=len(local_chunks),
+                    raw_response=raw_for_cache,
+                    expected_count=nloc,
                 )
             except Exception as exc:
                 logger.warning("[采购员] Layer 2 LLM 失败 (%s): %s", source_file, exc)
@@ -674,11 +743,7 @@ class KnowledgeProcurementAgent:
             if confidence < 0.6 and action in ("accept", "reject"):
                 action = "pending_review"
             _, ch = indexed_chunks[local_idx]
-            raw_cat = item.get("suggested_category")
-            norm_cat = _normalize_llm_suggested_category(
-                raw_cat if isinstance(raw_cat, str) else None,
-                ch,
-            )
+            norm_cat = _l2_item_suggested_value(item, ch)
             results[global_idx] = ProcurementDecision(
                 action=action,
                 target_kb=item.get("target_kb", "unknown"),
@@ -710,7 +775,8 @@ class KnowledgeProcurementAgent:
         except Exception as exc:
             logger.warning("[采购员] L2 cache 读取失败 %s: %s", cache_path.name, exc)
             return None
-        if payload.get("schema_version") != _L2_CACHE_SCHEMA_VERSION:
+        sv = payload.get("schema_version")
+        if sv not in (_L2_CACHE_SCHEMA_VERSION, 1):
             return None
         raw_response = payload.get("raw_response")
         if not isinstance(raw_response, str) or not raw_response.strip():
@@ -748,6 +814,42 @@ class KnowledgeProcurementAgent:
             )
         except Exception as exc:
             logger.warning("[采购员] L2 cache 写入失败 %s: %s", cache_path.name, exc)
+
+    def _l2_raw_from_response(self, response) -> str:
+        if not response.msgs:
+            return ""
+        m = response.msgs[-1]
+        parsed = getattr(m, "parsed", None)
+        if isinstance(parsed, ProcurementL2Batch):
+            return parsed.model_dump_json()
+        return (m.content or "").strip()
+
+    @staticmethod
+    def _l2_indices_complete(parsed: Dict[int, Dict], n: int) -> bool:
+        return all(i in parsed for i in range(n))
+
+    def _decode_l2_response_to_map(self, raw: str, n: int) -> Dict[int, Dict]:
+        """结构化对象 {"items":[...]} 或 JSON 数组 → {local_idx: item_dict}。"""
+        if not (raw or "").strip():
+            return {}
+        body = _strip_json_fence(raw)
+        try:
+            batch = ProcurementL2Batch.model_validate_json(body)
+            return {row.idx: row.model_dump() for row in batch.items}
+        except Exception:
+            pass
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict) and isinstance(obj.get("items"), list):
+                out: Dict[int, Dict] = {}
+                for it in obj["items"]:
+                    if isinstance(it, dict) and "idx" in it:
+                        out[int(it["idx"])] = it
+                if out:
+                    return out
+        except Exception:
+            pass
+        return self._parse_llm_json(raw, n)
 
     def _layer3_schema(
         self, chunk: Dict, decision: ProcurementDecision

@@ -122,6 +122,109 @@ class GatewayConfig:
         return value
 
 
+def _text_for_json_keyword_scan(msg: Dict[str, Any]) -> str:
+    """Flatten message content to plain text for 'json' substring check."""
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts: List[str] = []
+        for part in c:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        return " ".join(parts)
+    return str(c or "")
+
+
+def _ensure_json_keyword_for_json_object_enabled() -> bool:
+    """DashScope json_object: messages must contain 'json' (case-insensitive)."""
+    env = (os.getenv("LLM_GATEWAY_ENSURE_JSON_KEYWORD") or "").strip().lower()
+    if env in ("0", "false", "no", "off"):
+        return False
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if config is not None:
+        return bool(
+            config.get("routing", "ensure_json_keyword_for_json_object", default=True)
+        )
+    return True
+
+
+def normalize_messages_for_response_format(
+    messages: List[Dict[str, Any]],
+    response_format: Optional[Dict[str, Any]],
+    *,
+    ensure_json_keyword: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    """Apply gateway-side rules before forwarding to OpenAI-compatible upstream.
+
+    - Passes through full ``response_format`` (``json_object`` or nested
+      ``json_schema`` / ``strict``) unchanged to the SDK; callers must use a
+      dict shape compatible with the upstream (e.g. DashScope, OpenAI).
+    - For ``type: json_object`` only: when *ensure_json_keyword* is True and no
+      message text contains ``json``, append a short hint so Alibaba Cloud
+      Model Studio's requirement is satisfied (see json-mode docs).
+    """
+    if ensure_json_keyword is None:
+        ensure_json_keyword = _ensure_json_keyword_for_json_object_enabled()
+
+    if not messages or not response_format or not ensure_json_keyword:
+        return messages
+
+    rf_type = str(response_format.get("type", "") or "").lower()
+    if rf_type != "json_object":
+        return messages
+
+    combined = " ".join(
+        _text_for_json_keyword_scan(m)
+        for m in messages
+        if m.get("role") in ("system", "user", "assistant", "tool")
+    )
+    if "json" in combined.lower():
+        return messages
+
+    hint = "(Respond using JSON.)"
+    out: List[Dict[str, Any]] = [dict(m) for m in messages]
+
+    def augment_at(idx: int) -> None:
+        msg = out[idx]
+        role = msg.get("role")
+        c = msg.get("content")
+        if role == "system" and isinstance(c, str):
+            out[idx] = {
+                **msg,
+                "content": f"{c}\n{hint}" if c.strip() else hint,
+            }
+        elif role == "user" and isinstance(c, str):
+            out[idx] = {
+                **msg,
+                "content": f"{c}\n{hint}" if c.strip() else hint,
+            }
+
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "system" and isinstance(out[i].get("content"), str):
+            augment_at(i)
+            logger.info(
+                "[Gateway] ensure_json_keyword: appended hint to system message "
+                "(DashScope json_object)"
+            )
+            return out
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user" and isinstance(out[i].get("content"), str):
+            augment_at(i)
+            logger.info(
+                "[Gateway] ensure_json_keyword: appended hint to user message "
+                "(DashScope json_object)"
+            )
+            return out
+
+    logger.warning(
+        "[Gateway] ensure_json_keyword: no string system/user message to patch; "
+        "upstream may reject json_object (messages must mention 'json')"
+    )
+    return messages
+
+
 class ChatCompletionRequest(BaseModel):
     """OpenAI-compatible chat completion request."""
     model: str
@@ -135,7 +238,8 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0
     frequency_penalty: Optional[float] = 0
     logit_bias: Optional[Dict[str, float]] = None
-    response_format: Optional[Dict[str, str]] = None  # e.g. {"type": "json_object"}
+    # json_object | json_schema (nested name/schema/strict per OpenAI / upstream)
+    response_format: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
     user: Optional[str] = None
@@ -688,8 +792,12 @@ async def list_models():
 
 async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str, Any]:
     """Route chat to OpenAI-compatible pool, subset, or Anthropic /messages."""
+    messages = normalize_messages_for_response_format(
+        request.messages,
+        request.response_format,
+    )
     call_kwargs: Dict[str, Any] = dict(
-        messages=request.messages,
+        messages=messages,
         temperature=request.temperature,
         top_p=request.top_p,
         max_tokens=request.max_tokens,
@@ -732,6 +840,17 @@ async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str,
         )
 
     if resolution.kind == "anthropic":
+        # CAMEL 使用 beta.chat.completions.parse → 同一 /v1/chat/completions 且带 response_format；
+        # Anthropic /messages 适配层不转发结构化参数，避免静默丢字段导致难排查。
+        if request.response_format is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "response_format is not supported on the anthropic_messages route; "
+                    "use an OpenAI-compatible chat model (see GET /admin/models chat_models). "
+                    "Procurement L2 structured output requires this."
+                ),
+            )
         if anthropic_http_client is None:
             raise HTTPException(status_code=503, detail="Anthropic route not initialized")
         if request.stream:
@@ -746,7 +865,7 @@ async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str,
             )
         acfg = resolution.anthropic_config or {}
         est = (
-            sum(len(str(m.get("content", ""))) for m in request.messages) // 4 + 100
+            sum(len(str(m.get("content", ""))) for m in messages) // 4 + 100
         )
         rate_limiter.acquire(acfg["provider"], acfg["id"], est)
         chat_timeout = float(config.get("request_timeout", "chat", default=600))
@@ -756,7 +875,7 @@ async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str,
             messages_url=acfg["messages_url"],
             api_key=acfg["api_key"],
             model=acfg["model"],
-            openai_messages=request.messages,
+            openai_messages=messages,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
@@ -778,7 +897,7 @@ async def _dispatch_chat_completion(request: ChatCompletionRequest) -> Dict[str,
     if not subset:
         raise HTTPException(status_code=500, detail="Empty OpenAI chat subset")
     kw = {k: v for k, v in call_kwargs.items() if k != "messages"}
-    return await chat_caller.call_on_subset(subset, request.messages, **kw)
+    return await chat_caller.call_on_subset(subset, messages, **kw)
 
 
 @app.post("/v1/chat/completions")

@@ -175,6 +175,11 @@ class LLMConfig:
             gateway_api_key = api_key or "local-gateway"
         api_key = gateway_api_key
         logger.info("已启用 LLM Gateway: %s", base_url)
+        # 对接说明（采购员 L2 等使用 ChatAgent.step(..., response_format=Pydantic)）：
+        # CAMEL OpenAICompatibleModel 走 beta.chat.completions.parse，请求仍发到网关
+        # POST /v1/chat/completions，body 含 response_format（json_schema/json_object）。
+        # 网关 _dispatch_chat_completion 已透传至上游；ensure_json_keyword 仅对 json_object 补全「json」字样。
+        # 若路由解析为 anthropic_messages，网关会 400（需改用 OpenAI 兼容模型名）。
         
         # 对话模型配置（优先使用网关配置）
         chat_model = (
