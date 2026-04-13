@@ -26,6 +26,7 @@ def merge_knowledge_base(
     output_file: Path,
     deduplicate: bool = True,
     logger: Optional[Any] = None,
+    validate_ingest: bool = True,
 ) -> None:
     """Merge all JSON files under *reference_dir* into one knowledge_base.json.
 
@@ -34,6 +35,7 @@ def merge_knowledge_base(
         output_file: Destination path for merged output.
         deduplicate: Whether to skip duplicate chunks (based on content hash).
         logger: Optional logger instance.
+        validate_ingest: Whether to run IngestValidator quality gate.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -78,9 +80,8 @@ def merge_knowledge_base(
 
                 if "metadata" not in chunk:
                     chunk["metadata"] = {}
-
-                if "source_file" not in chunk["metadata"]:
-                    chunk["metadata"]["source_file"] = json_file.name
+                # 统一语义：source_file 始终为当前来源 JSON 文件名。
+                chunk["metadata"]["source_file"] = json_file.name
 
                 if deduplicate:
                     dedup_parts = [
@@ -101,38 +102,40 @@ def merge_knowledge_base(
             logger.error("[merge] Failed to process %s: %s", json_file.name, e)
             continue
 
-    # Guard: warn if any source file still has blocks without tree_position.
-    # This indicates knowledge_linker has not been run on that file yet.
-    for chunk in all_chunks:
-        meta = chunk.get("metadata") or {}
-        if not meta.get("tree_position") and not meta.get("owner_excluded"):
-            src = meta.get("source_file", "unknown")
-            logger.warning(
-                "[merge] chunk in '%s' is missing tree_position — "
-                "run auto_convert (post-pass) to enrich before merging",
-                src,
-            )
-            break  # one warning per merge call is enough
+    # Guard: tree_position 缺失仅在后续质量门阶段提示。
+    # 采购独占模式（validate_ingest=False）默认尚未经过农民/农场主，避免产生误导 warning。
+    if validate_ingest:
+        for chunk in all_chunks:
+            meta = chunk.get("metadata") or {}
+            if not meta.get("tree_position") and not meta.get("owner_excluded"):
+                src = meta.get("source_file", "unknown")
+                logger.warning(
+                    "[merge] chunk in '%s' is missing tree_position — "
+                    "run farmer/farm_owner pipeline before quality merge",
+                    src,
+                )
+                break  # one warning per merge call is enough
 
     # Ingest validation: quality gate + metadata enrichment
-    try:
-        from INAGENT.data_tools.ingest_validator import IngestValidator
-        from INAGENT.rag.cli_graph_store import get_cli_graph_store
+    if validate_ingest:
+        try:
+            from INAGENT.data_tools.ingest_validator import IngestValidator
+            from INAGENT.rag.cli_graph_store import get_cli_graph_store
 
-        cli_graph = get_cli_graph_store()
-        validator = IngestValidator(cli_graph_store=cli_graph)
-        all_chunks = validator.validate_batch(all_chunks)
-        rpt = validator.report
-        logger.info(
-            "[merge] IngestValidator: %d accepted, %d rejected (short=%d, dup=%d, quarantine=%d, excluded=%d), "
-            "rescued=%d, hierarchy=%d, module=%d",
-            rpt.accepted, rpt.rejected_short + rpt.duplicates + rpt.quarantined + rpt.rejected_excluded,
-            rpt.rejected_short, rpt.duplicates, rpt.quarantined, rpt.rejected_excluded,
-            rpt.category_rescued, rpt.hierarchy_backfilled, rpt.module_inferred,
-        )
-        validator.save_report(output_file.parent)
-    except Exception as e:
-        logger.warning("[merge] IngestValidator skipped: %s", e)
+            cli_graph = get_cli_graph_store()
+            validator = IngestValidator(cli_graph_store=cli_graph)
+            all_chunks = validator.validate_batch(all_chunks)
+            rpt = validator.report
+            logger.info(
+                "[merge] IngestValidator: %d accepted, %d rejected (short=%d, dup=%d, quarantine=%d, excluded=%d), "
+                "rescued=%d, hierarchy=%d, module=%d",
+                rpt.accepted, rpt.rejected_short + rpt.duplicates + rpt.quarantined + rpt.rejected_excluded,
+                rpt.rejected_short, rpt.duplicates, rpt.quarantined, rpt.rejected_excluded,
+                rpt.category_rescued, rpt.hierarchy_backfilled, rpt.module_inferred,
+            )
+            validator.save_report(output_file.parent)
+        except Exception as e:
+            logger.warning("[merge] IngestValidator skipped: %s", e)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     logger.info("[merge] Writing merged file: %s", output_file)

@@ -577,6 +577,7 @@ async def convert_one(
     # 4. 增强 metadata：基于功能结构索引添加 scenario_id 和 step_type
     logger.info("[metadata] 开始增强 metadata...")
     ac._enhance_metadata_with_function_index(knowledge_blocks)
+    ac._ensure_procurement_base_fields(knowledge_blocks, pdf, json_path.name)
     logger.info("[metadata] metadata 增强完成，共处理 %d 个块", len(knowledge_blocks))
     
     # 5. 自动识别文档模块和功能（新增）
@@ -611,17 +612,7 @@ async def convert_one(
         logger.warning("[auto-identify] 自动识别失败: %s", e)
         document_metadata = {}
 
-    # 农民匹配 + 农场主决策：将知识块挂载到命令树
-    knowledge_blocks, link_stats = ac._run_knowledge_linking(knowledge_blocks, pdf)
-
-    # Fallback tree_position：为没有 tree_position 的非 CLI 块按 section_path 深度赋予默认层级
-    ac._assign_fallback_tree_position(knowledge_blocks)
-
-    # 自然树生长：branch 过密时自动晋升为 trunk
-    ac._auto_promote_branches(knowledge_blocks)
-
-    # 叶子密集晋升：同模块下 leaf 过多时晋升为 branch/trunk
-    ac._auto_promote_dense_leaves(knowledge_blocks)
+    link_stats = {"total": len(knowledge_blocks), "skipped": True, "procurement_only": True}
 
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),

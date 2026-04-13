@@ -3,14 +3,11 @@
 初始化Pipeline - 完整的workflow基础流程
 
 包含以下步骤：
-1. PDF 文件识别和导入 (procurement_ingest.py — 采购管线)
-2. MinerU 提取内容
-3. LLM 提取 metadata (product_module, protocol_type, step_type)
-4. 基于功能结构索引增强 metadata (scenario_id, step_type)
-5. 自动识别文档模块和功能 (auto_document_integration.py)
-6. 增量更新功能结构索引 (incrementally_update_function_index)
-7. 合并为 knowledge_base.json (merge_knowledge_base.py)
-8. RAG 索引 (workforce_config_ops.py: initialize_rag_system)
+1. 采购流程：原始文档 → reference / knowledge_base.json
+2. 农民流程：reference 原始块 → 结构挂载 / schema_gaps
+3. 农场主流程：schema_gaps → 树结构裁决 / 图更新
+4. 质检流程：最终 knowledge_base / 导出物质量校验
+5. RAG 索引 (workforce_config_ops.py: initialize_rag_system)
 """
 import asyncio
 import logging
@@ -38,29 +35,30 @@ async def main():
     logger.info("开始初始化Pipeline - 完整的workflow基础流程")
     logger.info("=" * 80)
     
-    # 步骤1-7: 运行采购文档管线 procurement_ingest（实现位于 auto_convert.run_procurement_document_pipeline）
+    # 步骤1: 运行采购文档管线 procurement_ingest（仅采购阶段）
     logger.info("")
-    logger.info("步骤1-7: 运行 procurement_ingest（采购：MinerU/Office/TXT → reference）")
+    logger.info("步骤1: 运行 procurement_ingest（采购：MinerU/Office/TXT → reference）")
     logger.info("  - PDF识别和导入")
     logger.info("  - MinerU提取内容")
     logger.info("  - LLM提取metadata (product_module, protocol_type, step_type)")
     logger.info("  - 基于功能结构索引增强metadata")
-    logger.info("  - 自动识别文档模块和功能")
-    logger.info("  - 增量更新功能结构索引")
-    logger.info("  - 合并为knowledge_base.json")
+    logger.info("  - 合并为knowledge_base.json（原始采购结果）")
     logger.info("")
     
     try:
         from INAGENT.data_tools.procurement_ingest import main as procurement_ingest_main
         await procurement_ingest_main()
-        logger.info("[成功] 步骤1-7完成")
+        logger.info("[成功] 步骤1完成")
     except Exception as e:
-        logger.error(f"[错误] 步骤1-7失败: {e}", exc_info=True)
+        logger.error(f"[错误] 步骤1失败: {e}", exc_info=True)
         raise
     
-    # 步骤8: RAG索引
     logger.info("")
-    logger.info("步骤8: 初始化RAG系统并索引知识库...")
+    logger.info("步骤2-4需分别运行 farmer_ingest / farm_owner_ingest / quality_ingest")
+
+    # 步骤5: RAG索引
+    logger.info("")
+    logger.info("步骤5: 初始化RAG系统并索引知识库...")
     logger.info("")
     
     try:
@@ -70,12 +68,12 @@ async def main():
         graphrag_retriever = result[2] if len(result) > 2 else None
         if graphrag_retriever is None:
             logger.info(
-                "[成功] 步骤8完成：RAG系统已初始化（GraphRAG 未构建或未启用）"
+                "[成功] 步骤5完成：RAG系统已初始化（GraphRAG 未构建或未启用）"
             )
         else:
-            logger.info("[成功] 步骤8完成：RAG系统已初始化（含 GraphRAG）")
+            logger.info("[成功] 步骤5完成：RAG系统已初始化（含 GraphRAG）")
     except Exception as e:
-        logger.error(f"[错误] 步骤8失败: {e}", exc_info=True)
+        logger.error(f"[错误] 步骤5失败: {e}", exc_info=True)
         raise
     
     logger.info("")

@@ -17,8 +17,6 @@
     "section_title": "信安世纪APV 10.4.5用户手册",
     "document_category": "app/reference",
     "product_module": "用户管理",
-    "tree_position": { "tree_level": "leaf" },
-    "tree_attached": true,
     ...
   }
 }
@@ -101,22 +99,24 @@ INAGENT/knowledge_base/reference/_ingest_report.json
 └─ 质量无问题: 0隔离、0分类错误
 ```
 
-### 第3步: 抽检知识库内容
+### 第3步: 抽检知识库内容（采购员职责仅基础结构）
 ```
 INAGENT/knowledge_base/reference/knowledge_base.json
 ├─ 总块数: 6071条
-├─ 完整性检查:
+├─ 采购员基础结构检查:
 │  ├─ source_file: ✓ 每条必须有
+│  ├─ source_pdf: ✓ 每条必须有
 │  ├─ section_title: ✓ 每条必须有
-│  ├─ document_category: ✓ 每条必须有
-│  ├─ product_module: ✓ 每条必须有
-│  └─ tree_position.tree_level: ✓ 每条必须有
+│  └─ page_content/text: ✓ 至少一个非空
+├─ 非采购员强制项（可由后续流程补齐）:
+│  ├─ tree_position
+│  ├─ function_hierarchy
+│  └─ tree_attached
 └─ 示例块:
    source_file: app_1-40.json
    section_title: "信安世纪APV 10.4.5用户手册"
    document_category: "app/reference"
    product_module: "用户管理"
-   tree_level: "leaf"
 ```
 
 ### 第4步: 检查转换日志

@@ -45,6 +45,11 @@ LOG_FILE = LOG_DIR / "auto_convert.log"
 
 logger = logging.getLogger("auto_convert")
 
+
+def _procurement_exclusive_mode() -> bool:
+    """兼容旧日志/脚本的保留函数；采购流程现已固定为独占模式。"""
+    return True
+
 # ---------------------------------------------------------------------------
 # 模块职责（架构边界）
 #
@@ -639,6 +644,31 @@ def _source_file_label(file_path: Path) -> str:
     return f"{file_path.name} [external:{path_hash}]"
 
 
+def _ensure_procurement_base_fields(
+    knowledge_blocks: List[Dict[str, Any]],
+    source_path: Path,
+    source_label: str,
+) -> None:
+    """统一补齐采购阶段必须落盘的基础结构字段。"""
+    default_title = source_path.stem
+    source_path_str = str(source_path)
+
+    for block in knowledge_blocks:
+        if not isinstance(block, dict):
+            continue
+        meta = block.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+            block["metadata"] = meta
+
+        meta["source_file"] = source_label
+        meta["source_pdf"] = source_path_str
+
+        section_title = str(meta.get("section_title") or "").strip()
+        if not section_title:
+            meta["section_title"] = default_title
+
+
 def _collect_extra_input_paths() -> List[Path]:
     """收集额外知识输入路径（文件或目录），支持逗号/分号分隔。"""
     raw = cfg_str(
@@ -663,6 +693,13 @@ def _iter_files_by_ext(exts: Set[str]) -> List[Path]:
     """遍历 knowledge_base + 额外路径中的指定后缀文件。"""
     files: List[Path] = []
     seen: Set[str] = set()
+    excluded_dirs = {
+        DOC_LOCAL_DIR / "mineru_output",
+        DOC_LOCAL_DIR / "mineru_backup",
+        DOC_LOCAL_DIR / "logs",
+        DOC_LOCAL_DIR / "backup",
+        DOC_LOCAL_DIR / "backups",
+    }
 
     def _maybe_add(path: Path) -> None:
         key = str(path.resolve())
@@ -675,11 +712,7 @@ def _iter_files_by_ext(exts: Set[str]) -> List[Path]:
         for path in DOC_LOCAL_DIR.rglob(f"*{ext}"):
             if REFERENCE_DIR in path.parents:
                 continue
-            if (DOC_LOCAL_DIR / "mineru_output") in path.parents:
-                continue
-            if (DOC_LOCAL_DIR / "mineru_backup") in path.parents:
-                continue
-            if (DOC_LOCAL_DIR / "logs") in path.parents:
+            if any(excluded_dir in path.parents for excluded_dir in excluded_dirs):
                 continue
             if ext == ".pdf" and path.name.endswith("_layout.pdf"):
                 continue
@@ -721,8 +754,8 @@ def _iter_text_files() -> List[Path]:
 def convert_office_file(file_path: Path) -> None:
     """处理单个 Office 文档（doc/docx/xls/xlsx），写入 reference/{stem}.json。"""
     stem = _output_stem_for_file(file_path)
-    source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
+    source_label = json_path.name
     cache_path = LOG_DIR / f"{stem}.cache.json"
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -821,9 +854,10 @@ def convert_office_file(file_path: Path) -> None:
 
     # 增强 scenario_id / step_type
     _enhance_metadata_with_function_index(knowledge_blocks)
+    _ensure_procurement_base_fields(knowledge_blocks, file_path, source_label)
 
-    # 4. 农民匹配 + 农场主决策：将知识块挂载到命令树
-    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, file_path)
+    # 4. 采购流程固定只做采购落盘，不再触发农民/农场主/树挂载。
+    link_stats = {"total": len(knowledge_blocks), "skipped": True, "procurement_only": True}
 
     # 5. 写入 JSON
     json_path.write_text(
@@ -1011,8 +1045,8 @@ def convert_text_file(file_path: Path) -> None:
     6. 写入 reference/ 目录
     """
     stem = _output_stem_for_file(file_path)
-    source_label = _source_file_label(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
+    source_label = json_path.name
     cache_path = LOG_DIR / f"{stem}.cache.json"
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1062,9 +1096,10 @@ def convert_text_file(file_path: Path) -> None:
                 meta["protocol_type"] = found_protocols
 
     _enhance_metadata_with_function_index(knowledge_blocks)
+    _ensure_procurement_base_fields(knowledge_blocks, file_path, source_label)
 
-    # 农民匹配 + 农场主决策
-    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, file_path)
+    # 采购流程固定只做采购落盘，不再触发农民/农场主/树挂载。
+    link_stats = {"total": len(knowledge_blocks), "skipped": True, "procurement_only": True}
 
     # 写入 JSON
     json_path.write_text(
@@ -1147,8 +1182,9 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
                 meta["protocol_type"] = found_protocols
 
     _enhance_metadata_with_function_index(knowledge_blocks)
+    _ensure_procurement_base_fields(knowledge_blocks, pdf, source_label)
 
-    knowledge_blocks, link_stats = _run_knowledge_linking(knowledge_blocks, pdf)
+    link_stats = {"total": len(knowledge_blocks), "skipped": True, "procurement_only": True}
 
     json_path.write_text(
         json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
@@ -1445,12 +1481,6 @@ def _build_batch_system_prompt(meta_rules: Dict) -> str:
         "- function_hierarchy: e.g. 'SLB > Health Check > HTTP' (no numbers)\n"
         "- chunk_type: single_command | command_list | narrative\n"
         "- override_commands: command names that support override/覆盖, [] otherwise\n"
-        "- tree_level: knowledge hierarchy level of this chunk. "
-        "leaf = single CLI command/parameter syntax; "
-        "branch = sub-feature config steps or single-feature intro; "
-        "trunk = major module overview (principles, mechanisms, multi-sub-feature summary); "
-        "root = system architecture / protocol stack top-level design. "
-        "Judge purely from content, not document type.\n\n"
         f"Valid Intents: {valid_intents}\n"
         f"Valid Config Modes: {valid_config_modes}\n"
         f"Valid Modules: {', '.join(pm_descs[:20])}\n"
@@ -1498,11 +1528,6 @@ def _merge_llm_meta(llm_meta: Dict, meta_item: Dict, meta_rules: Dict) -> None:
         meta_item["chunk_type"] = str(llm_meta["chunk_type"])
     if llm_meta.get("override_commands") and isinstance(llm_meta["override_commands"], list):
         meta_item["override_commands"] = llm_meta["override_commands"]
-    if llm_meta.get("tree_level"):
-        tl = str(llm_meta["tree_level"]).strip().lower()
-        if tl in ("leaf", "branch", "trunk", "root"):
-            meta_item["tree_level"] = tl
-
     # Header block override: MinerU 有时把命令语法行识别为章节标题（header）
     # 若 clean_text 以小写 ASCII token 开头且含参数标记，修正为 single_command/cli
     if meta_item.get("block_type") == "header":
@@ -2657,6 +2682,12 @@ async def run_procurement_document_pipeline() -> None:
         "[config] MINERU_MODEL_SOURCE=%s",
         os.environ.get("MINERU_MODEL_SOURCE"),
     )
+    logger.info(
+        "[mode] procurement_exclusive_mode=%s",
+        _procurement_exclusive_mode(),
+    )
+    if _procurement_exclusive_mode():
+        logger.info("[mode] 当前运行仅执行采购落盘与 merge，停止于采购阶段，不执行农民/农场主")
     # 0) 自动同步配置
     _setup_mineru_config()
 
@@ -2889,9 +2920,8 @@ async def run_procurement_document_pipeline() -> None:
     else:
         logger.info("[text] 未发现 TXT 文档，跳过")
 
-    # Ensure enhanced metadata is applied even when MinerU outputs are reused via cache.
-    # When convert_one() is skipped, app.json/cli.json may predate newly added metadata
-    # fields (e.g., scenario_id/step_type). We apply the enhancer as a post-pass.
+    # Ensure enhanced metadata is applied even when cached procurement outputs are reused.
+    # Procurement阶段只负责文档块落盘与基础/规则元数据增强，不再编排农民、农场主或质检。
     try:
         for json_file in REFERENCE_DIR.glob("*.json"):
             if json_file.name == "knowledge_base.json":
@@ -2899,8 +2929,6 @@ async def run_procurement_document_pipeline() -> None:
             try:
                 blocks = json.loads(json_file.read_text(encoding="utf-8"))
                 if isinstance(blocks, list) and blocks:
-                    # Post-pass: ensure rule-based product_module/protocol_type/command_prefix are present
-                    # even when cached outputs were produced before these fields existed.
                     config = _load_project_config()
                     meta_rules = config.get("metadata_rules", {})
                     product_modules_map = _merge_product_modules_map(
@@ -2912,17 +2940,20 @@ async def run_procurement_document_pipeline() -> None:
                     for block in blocks:
                         if not isinstance(block, dict):
                             continue
-                        meta = block.get("metadata") or {}
+                        meta = block.get("metadata")
+                        if not isinstance(meta, dict):
+                            meta = {}
+                            block["metadata"] = meta
+                        # 统一语义：source_file 始终指向当前落盘 JSON 文件名。
+                        meta["source_file"] = json_file.name
                         content = str(block.get("page_content") or "")
                         lower_text = content.lower()
 
-                        # product_module (overwrite when rule-based match exists)
                         for module, keywords in product_modules_map.items():
                             if any(k.lower() in lower_text for k in keywords):
                                 meta["product_module"] = module
                                 break
 
-                        # protocol_type (list)
                         if not meta.get("protocol_type"):
                             found_protocols = _match_protocols_word_boundary(
                                 protocol_map, content
@@ -2930,7 +2961,6 @@ async def run_procurement_document_pipeline() -> None:
                             if found_protocols:
                                 meta["protocol_type"] = found_protocols
 
-                        # command_prefix
                         if not meta.get("command_prefix"):
                             for prefix, keywords in command_prefixes.items():
                                 if any(k.lower() in lower_text for k in keywords):
@@ -2939,14 +2969,6 @@ async def run_procurement_document_pipeline() -> None:
 
                     _enhance_metadata_with_function_index(blocks)
 
-                    # Contextual chunking: prepend section_title to page_content so
-                    # that BM25 and vector search can match on section headings
-                    # directly.  Without this, a block whose section title is
-                    # "产品概述" but whose body is a legal disclaimer will never
-                    # surface for the query "产品概述" because the title only exists
-                    # in metadata, not in the indexed text.
-                    # Safe to apply universally: the check `not content.startswith`
-                    # prevents double-prepending on re-runs.
                     for _blk in blocks:
                         if not isinstance(_blk, dict):
                             continue
@@ -2958,50 +2980,6 @@ async def run_procurement_document_pipeline() -> None:
                         if not _content.startswith(_title):
                             _blk["page_content"] = _title + "\n" + _content
 
-                    # Post-pass: ensure tree_position is present and has passed
-                    # the confidence threshold for all blocks.
-                    # Re-link blocks that lack tree_position or have legacy
-                    # non-structural roles (from before the charter-aligned linker).
-                    _LEGACY_ROLES = frozenset((
-                        "keyword_match",
-                        "manifest_declared_unverified",
-                        "manifest_declared_kw",
-                        "manifest_declared",
-                    ))
-
-                    def _needs_relink(b: dict) -> bool:
-                        if not isinstance(b, dict):
-                            return False
-                        tp = (b.get("metadata") or {}).get("tree_position")
-                        if not tp or not isinstance(tp, dict):
-                            return True
-                        role = tp.get("knowledge_role", "")
-                        if role in _LEGACY_ROLES:
-                            return True
-                        return False
-
-                    relink_count = sum(1 for b in blocks if _needs_relink(b))
-                    missing_tp = sum(
-                        1 for b in blocks
-                        if isinstance(b, dict)
-                        and not (b.get("metadata") or {}).get("tree_position")
-                    )
-                    low_conf_count = relink_count - missing_tp
-                    if relink_count:
-                        logger.info(
-                            "[link-gap] %s: %d block(s) need linking "
-                            "(missing=%d, low-confidence=%d), running knowledge linking",
-                            json_file.name, relink_count, missing_tp, low_conf_count,
-                        )
-                        # Clear stale keyword_match tree_position so link_blocks
-                        # treats them as unlinked and escalates to owner.
-                        for b in blocks:
-                            if _needs_relink(b):
-                                (b.get("metadata") or {}).pop("tree_position", None)
-                        blocks, _link_stats = _run_knowledge_linking(blocks, json_file)
-
-                    _assign_fallback_tree_position(blocks)
-
                     json_file.write_text(
                         json.dumps(blocks, ensure_ascii=False, indent=2),
                         encoding="utf-8",
@@ -3011,207 +2989,26 @@ async def run_procurement_document_pipeline() -> None:
     except Exception as exc:
         logger.warning("Post-enhance pass failed: %s", exc)
 
-    # Merge reference JSONs into a stable knowledge_base.json for retrieval/indexing.
-    # This file is expected by HybridRAG and GraphRAG pipelines.
     logger.info("=" * 80)
-    logger.info("[merge] 开始合并 knowledge_base.json...")
+    logger.info("[merge] 开始合并 procurement knowledge_base.json...")
     try:
-        from INAGENT.data_tools.merge_knowledge_base import (
-            merge_knowledge_base,
-        )
+        from INAGENT.data_tools.merge_knowledge_base import merge_knowledge_base
 
         reference_dir = REFERENCE_DIR
         output_file = reference_dir / "knowledge_base.json"
-        merge_knowledge_base(reference_dir, output_file, deduplicate=True, logger=logger)
-        logger.info("[ok] merged knowledge base -> %s", output_file)
+        merge_knowledge_base(
+            reference_dir,
+            output_file,
+            deduplicate=True,
+            logger=logger,
+            validate_ingest=False,
+        )
+        logger.info("[ok] procurement merged knowledge base -> %s", output_file)
     except Exception as exc:
         logger.warning("Failed to merge knowledge_base.json: %s", exc)
-        output_file = None
-
-    # Farm owner: 增量更新 GraphRAG（处理 auto_convert 产出的 schema_gaps）
-    logger.info("=" * 80)
-    logger.info("[farm-owner] 检查是否有待处理的 schema gaps...")
-    gaps_file = REFERENCE_DIR / "schema_gaps.jsonl"
-    try:
-        if gaps_file.exists() and gaps_file.stat().st_size > 0:
-            from dataclasses import fields as dc_fields
-
-            from INAGENT.agents.knowledge_farm_owner_agent import (
-                KnowledgeFarmOwnerAgent,
-            )
-            from INAGENT.rag.graphrag_integration import GraphRAGRetriever
-            from INAGENT.rag.knowledge_schema import SchemaGapEntry
-
-            gap_entries = []
-            field_names = {f.name for f in dc_fields(SchemaGapEntry)}
-            for line in gaps_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    raw = json.loads(line)
-                    filtered = {k: v for k, v in raw.items() if k in field_names}
-                    gap_entries.append(SchemaGapEntry(**filtered))
-                except Exception:
-                    continue
-
-            if gap_entries:
-                workspace = BASE_DIR.parent / "graphrag_index"
-                graphrag = GraphRAGRetriever(workspace_dir=workspace)
-                if graphrag.is_available():
-                    owner = KnowledgeFarmOwnerAgent(graphrag)
-                    logger.info("[farm-owner] 处理 %d 条 gap entries...", len(gap_entries))
-                    report = owner.process_gap_entries(gap_entries)
-                    _n_err = len(report.errors)
-                    _distinct_err = len(set(report.errors)) if report.errors else 0
-                    logger.info(
-                        "[farm-owner] 完成: entities_added=%d, discarded=%d, errors=%d (distinct=%d)",
-                        report.entities_added,
-                        report.discarded_count,
-                        _n_err,
-                        _distinct_err,
-                    )
-                    # Windows：目标已存在时 Path.rename 会 WinError 183；os.replace 可覆盖
-                    _processed = gaps_file.with_suffix(".jsonl.processed")
-                    try:
-                        os.replace(gaps_file, _processed)
-                    except OSError as exc:
-                        logger.warning(
-                            "[farm-owner] 无法将 %s 标为已处理: %s",
-                            gaps_file.name,
-                            exc,
-                        )
-                else:
-                    logger.warning("[farm-owner] GraphRAG 不可用，跳过")
-            else:
-                logger.info("[farm-owner] schema_gaps.jsonl 中无有效条目")
-        else:
-            logger.info("[farm-owner] 无 schema gaps 文件，跳过")
-    except Exception as exc:
-        logger.warning("[farm-owner] Gap 处理失败: %s", exc)
-
-    # 增量更新功能结构索引（新增）
-    logger.info("=" * 80)
-    logger.info("[index-update] 开始增量更新功能结构索引...")
-    try:
-        from INAGENT.data_tools.auto_document_integration import (
-            incrementally_update_function_index,
-        )
-        
-        # 收集所有新文档信息
-        new_documents = []
-        for pdf in pdfs:
-            cache_path = LOG_DIR / f"{pdf.stem}.cache.json"
-            if cache_path.exists():
-                try:
-                    cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
-                    if cache_data.get("document_metadata"):
-                        new_documents.append({
-                            "pdf_path": pdf,
-                            "json_path": REFERENCE_DIR / f"{pdf.stem}.json",
-                            "document_metadata": cache_data["document_metadata"]
-                        })
-                        logger.info(
-                            "[index-update] 收集到新文档: %s (模块=%s)",
-                            pdf.name,
-                            cache_data["document_metadata"].get("product_modules", [])
-                        )
-                except Exception as e:
-                    logger.warning("[index-update] 读取 cache 失败 %s: %s", pdf.name, e)
-        
-        if new_documents:
-            logger.info("[index-update] 共收集到 %d 个新文档，开始更新索引...", len(new_documents))
-            index_path = DOC_LOCAL_DIR / "function_structure_index.json"
-            updated_index = incrementally_update_function_index(
-                new_documents=new_documents,
-                existing_index_path=index_path,
-                logger=logger
-            )
-            
-            # 保存更新后的索引
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            index_path.write_text(
-                json.dumps(updated_index, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-            
-            # 统计更新结果
-            modules_count = len(updated_index.get("modules", {}))
-            scenarios_count = len(updated_index.get("scenarios", {}))
-            stats = updated_index.get("metadata_statistics", {})
-            product_modules_count = len(stats.get("product_modules", {}))
-            protocol_types_count = len(stats.get("protocol_types", {}))
-            step_types_count = len(stats.get("step_types", {}))
-            
-            logger.info("[index-update] 功能结构索引已更新:")
-            logger.info("  - 模块数量: %d", modules_count)
-            logger.info("  - 场景数量: %d", scenarios_count)
-            logger.info("  - 产品模块: %d", product_modules_count)
-            logger.info("  - 协议类型: %d", protocol_types_count)
-            logger.info("  - 步骤类型: %d", step_types_count)
-            logger.info("  - 索引文件: %s", index_path)
-        else:
-            logger.info("[index-update] 没有新文档，跳过索引更新")
-    except Exception as exc:
-        logger.warning("[index-update] 增量更新功能结构索引失败: %s", exc)
-        import traceback
-        logger.debug(traceback.format_exc())
-
-    # 自动重新索引到 RAG（新增）
-    logger.info("=" * 80)
-    logger.info("[rag-reindex] 检查是否需要重新索引到 RAG...")
-    try:
-        # 检查 knowledge_base.json 是否存在
-        kb_path = REFERENCE_DIR / "knowledge_base.json"
-        if not kb_path.exists():
-            logger.warning("[rag-reindex] knowledge_base.json 不存在，跳过 RAG 索引")
-        else:
-            # 检查是否需要重新索引（基于文件 mtime）
-            rag_hashes_path = LOG_DIR / "rag_hashes.json"
-            needs_reindex = True
-            
-            if rag_hashes_path.exists():
-                try:
-                    rag_hashes = json.loads(rag_hashes_path.read_text(encoding="utf-8"))
-                    kb_mtime = kb_path.stat().st_mtime
-                    cached_mtime = rag_hashes.get("knowledge_base_mtime", 0)
-                    
-                    if kb_mtime <= cached_mtime:
-                        logger.info("[rag-reindex] knowledge_base.json 未变更，跳过重新索引")
-                        needs_reindex = False
-                    else:
-                        logger.info(
-                            "[rag-reindex] knowledge_base.json 已更新 (mtime: %.2f -> %.2f)，需要重新索引",
-                            cached_mtime,
-                            kb_mtime
-                        )
-                except Exception as e:
-                    logger.warning("[rag-reindex] 读取 rag_hashes.json 失败: %s", e)
-            
-            if needs_reindex:
-                logger.info("[rag-reindex] 开始重新索引到 RAG...")
-                # 延迟导入，避免循环依赖
-                import sys
-                
-                # 尝试导入 workforce_config_ops
-                try:
-                    # 这里需要根据实际情况调整导入路径
-                    logger.info("[rag-reindex] 注意: RAG 重新索引需要手动调用，或通过单独的脚本执行")
-                    logger.info("[rag-reindex] 建议运行: python -m INAGENT.rag.fallback_retrieval --reindex")
-                    # 如果需要自动执行，可以在这里调用相关函数
-                    # 但为了避免循环依赖和性能问题，建议通过单独的命令执行
-                except Exception as e:
-                    logger.warning("[rag-reindex] RAG 重新索引失败: %s", e)
-                    logger.info("[rag-reindex] 请手动运行 RAG 索引脚本")
-    except Exception as exc:
-        logger.warning("[rag-reindex] 检查 RAG 索引状态失败: %s", exc)
-        import traceback
-        logger.debug(traceback.format_exc())
 
     logger.info("=" * 80)
-    logger.info(
-        "[完成] 所有处理完成！总耗时: %.2fs", time.perf_counter() - overall_start
-    )
+    logger.info("[完成] procurement stage finished; farmer / farm-owner / quality 已从 auto_convert 剥离")
     logger.info("=" * 80)
 
 

@@ -148,7 +148,6 @@ def diagnose_ingest_report() -> DiagnosticResult:
     rejected_excluded = report.get("rejected_excluded", 0)
     quarantined = report.get("quarantined", 0)
     duplicates = report.get("duplicates", 0)
-    tree_linked = report.get("tree_linked", 0)
 
     accepted_rate = accepted / input_count if input_count else 0
     quarantine_rate = quarantined / input_count if input_count else 0
@@ -159,7 +158,6 @@ def diagnose_ingest_report() -> DiagnosticResult:
     result.add_finding("accepted_rate", f"{accepted_rate:.2%}")
     result.add_finding("quarantine_rate", f"{quarantine_rate:.2%}")
     result.add_finding("duplicate_rate", f"{duplicate_rate:.2%}")
-    result.add_finding("tree_linked_rate", f"{tree_linked / input_count:.2%}" if input_count else "N/A")
 
     if accepted_rate < 0.90:
         result.add_issue("ERROR", "ingest", f"acceptance rate {accepted_rate:.2%} < 0.90 (blocking)")
@@ -179,6 +177,44 @@ def diagnose_ingest_report() -> DiagnosticResult:
         result.add_issue("ERROR", "ingest", f"quarantine rate {quarantine_rate:.2%} > 3% (blocking)")
     elif quarantine_rate > 0.01:
         result.add_issue("WARN", "ingest", f"quarantine rate {quarantine_rate:.2%} in warning zone")
+
+    return result
+
+
+def diagnose_base_structure_fields() -> DiagnosticResult:
+    """診斷2.5：採購員基礎結構字段完整性（不包含 tree 相關字段）。"""
+    result = DiagnosticResult("base_structure")
+    kb = load_knowledge_base()
+    if not kb:
+        result.add_issue("WARN", "base_structure", "knowledge_base.json not found")
+        return result
+
+    required_fields = ("source_file", "source_pdf", "section_title")
+    total = len(kb)
+    result.add_finding("total_blocks", total)
+
+    if total == 0:
+        result.add_issue("ERROR", "base_structure", "knowledge_base is empty")
+        return result
+
+    missing_counts = {field: 0 for field in required_fields}
+    for chunk in kb:
+        meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+        for field in required_fields:
+            value = meta.get(field)
+            if not isinstance(value, str) or not value.strip():
+                missing_counts[field] += 1
+
+    for field in required_fields:
+        missing = missing_counts[field]
+        completeness = (total - missing) / total
+        result.add_finding(f"{field}_completeness", f"{completeness:.2%}")
+        if missing > 0:
+            result.add_issue(
+                "ERROR",
+                "base_structure",
+                f"{field} missing in {missing}/{total} blocks",
+            )
 
     return result
 
@@ -328,6 +364,7 @@ def main():
     results = [
         diagnose_baseline(run_id),
         diagnose_ingest_report(),
+        diagnose_base_structure_fields(),
         diagnose_metadata_alignment(),
         diagnose_file_coverage(),
     ]
