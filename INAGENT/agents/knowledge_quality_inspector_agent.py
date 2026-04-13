@@ -113,6 +113,16 @@ class SummaryActionsCheck:
     detail: Optional[str] = None
 
 
+@dataclass
+class NonProductPatternCheck:
+    """Result of ``validate_non_product_knowledge_patterns``."""
+
+    ok: bool
+    detail: str = ""
+    phrase_count: int = 0
+    content_keyword_count: int = 0
+
+
 class KnowledgeQualityInspectorAgent:
     """只读质检: 采购导出与 enrich/filter_accepted 语义一致。"""
 
@@ -245,4 +255,88 @@ class KnowledgeQualityInspectorAgent:
             ok=True,
             summary_accept=sa,
             decisions_accept=accept_n,
+        )
+
+    @staticmethod
+    def validate_non_product_knowledge_patterns() -> NonProductPatternCheck:
+        """Smoke-test title regex and body keywords (single utils module)."""
+        from INAGENT.utils.non_product_section_patterns import (
+            NON_KNOWLEDGE_CONTENT_KEYWORDS,
+            NON_KNOWLEDGE_TITLE_PATTERNS,
+            non_product_section_title_regex,
+        )
+
+        n_title = len(NON_KNOWLEDGE_TITLE_PATTERNS)
+        n_kw = len(NON_KNOWLEDGE_CONTENT_KEYWORDS)
+        if n_title < 10:
+            return NonProductPatternCheck(
+                ok=False,
+                detail=f"NON_KNOWLEDGE_TITLE_PATTERNS too small: {n_title}",
+                phrase_count=n_title,
+                content_keyword_count=n_kw,
+            )
+        if n_kw < 5:
+            return NonProductPatternCheck(
+                ok=False,
+                detail=f"NON_KNOWLEDGE_CONTENT_KEYWORDS too small: {n_kw}",
+                phrase_count=n_title,
+                content_keyword_count=n_kw,
+            )
+        for kw in NON_KNOWLEDGE_CONTENT_KEYWORDS:
+            probe = f"x {kw} y".lower()
+            if kw.lower() not in probe:
+                return NonProductPatternCheck(
+                    ok=False,
+                    detail=f"content keyword not substring-testable: {kw!r}",
+                    phrase_count=n_title,
+                    content_keyword_count=n_kw,
+                )
+        try:
+            rx = non_product_section_title_regex()
+        except Exception as exc:
+            return NonProductPatternCheck(
+                ok=False,
+                detail=f"regex compile failed: {exc}",
+                phrase_count=n_title,
+                content_keyword_count=n_kw,
+            )
+        for sample in (
+            "版权声明",
+            "安装环境",
+            "命令行介绍",
+            "免责声明",
+            "about us",
+        ):
+            if not rx.search(sample):
+                return NonProductPatternCheck(
+                    ok=False,
+                    detail=f"regex does not match expected sample: {sample!r}",
+                    phrase_count=n_title,
+                    content_keyword_count=n_kw,
+                )
+        for body, needle in (
+            ("manual 版权所有 footer", "版权所有"),
+            ("(c) copyright 2024 vendor", "copyright"),
+            ("English all rights reserved text", "all rights reserved"),
+            ("注册商标与法律保护", "注册商标"),
+        ):
+            blob = body[:500].lower()
+            if needle.lower() not in blob:
+                return NonProductPatternCheck(
+                    ok=False,
+                    detail=f"content sample must contain {needle!r}: {body!r}",
+                    phrase_count=n_title,
+                    content_keyword_count=n_kw,
+                )
+        return NonProductPatternCheck(
+            ok=True,
+            phrase_count=n_title,
+            content_keyword_count=n_kw,
+        )
+
+    @staticmethod
+    def validate_non_product_section_patterns() -> NonProductPatternCheck:
+        """Compat alias; see validate_non_product_knowledge_patterns."""
+        return (
+            KnowledgeQualityInspectorAgent.validate_non_product_knowledge_patterns()
         )

@@ -6,6 +6,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+from INAGENT.utils.non_product_section_patterns import (
+    NON_KNOWLEDGE_CONTENT_KEYWORDS,
+    NON_KNOWLEDGE_TITLE_PATTERNS,
+    non_product_section_title_regex,
+)
+
 # ── Action taxonomy ───────────────────────────────────────────────────────────
 # 农场主产出的 FillRequest.action 合法值
 OwnerAction = Literal[
@@ -181,20 +187,6 @@ SchemaGapKind = Literal[
     "ambiguous_match",  # 农民无法区分多个候选节点，交给农场主裁决
     "non_knowledge",    # 非知识块（版权/商标/前言/附录/URL垃圾），由农场主决定丢弃或降级
 ]
-
-
-NON_KNOWLEDGE_TITLE_PATTERNS = frozenset({
-    "版权声明", "商标声明", "合格声明", "关于我们", "联系我们",
-    "编写目的", "适用对象", "附录", "读者对象", "版本说明",
-    "前言", "修订记录", "文档约定", "免责声明",
-    "about us", "contact us", "disclaimer", "revision history",
-})
-
-NON_KNOWLEDGE_CONTENT_KEYWORDS = frozenset({
-    "版权所有", "商标声明", "保留所有权利", "未经许可", "不得复制",
-    "copyright", "trademark", "all rights reserved",
-    "registered trademark", "注册商标",
-})
 
 
 @dataclass

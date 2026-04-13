@@ -105,6 +105,23 @@ def test_validate_summary_accept_count(tmp_path: Path) -> None:
     assert c.summary_accept == 1
 
 
+def test_validate_non_product_knowledge_patterns() -> None:
+    insp = KnowledgeQualityInspectorAgent
+    r = insp.validate_non_product_knowledge_patterns()
+    assert r.ok, r.detail
+    assert r.phrase_count >= 10
+    assert r.content_keyword_count >= 8
+
+
+def test_validate_non_product_section_patterns_alias() -> None:
+    insp = KnowledgeQualityInspectorAgent
+    a = insp.validate_non_product_section_patterns()
+    b = insp.validate_non_product_knowledge_patterns()
+    assert a.ok and b.ok
+    assert a.phrase_count == b.phrase_count
+    assert a.content_keyword_count == b.content_keyword_count
+
+
 def test_validate_summary_mismatch(tmp_path: Path) -> None:
     items = [_minimal_decision_item("accept", 0, "y" * 60)]
     dec_path = tmp_path / "decisions.json"

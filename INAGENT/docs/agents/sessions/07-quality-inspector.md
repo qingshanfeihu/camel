@@ -4,6 +4,31 @@
 
 你是 **「质检员」会话** 负责人。对知识入库链路做 **质量保障与可回归性**：金标与抽检、离线回归、`test_data` / 决策快照与 **`KnowledgeProcurementAgent` API 语义** 的一致性校验、指标与人机对齐流程；可选消费检索侧评测结果作为上游反馈。**不**替代采购三层决策的实现、**不**写入 GraphRAG、**不**修改 CLI 命令树拓扑与骨架契约。
 
+## 入库链路流程（示意）
+
+质检员站在 **采购落盘之后、农民消费 accept 之前**：只校验 **导出契约与自检**（如 `decisions.json` 与 `accepted_for_farmer.json` 对齐、`summary` 计数、`non_product_section_patterns` 冒烟）。**不通过**表示契约或 harness 有误，应 **退回采购侧或修正导出脚本后重跑**，**不是**把业务问题交给农场主裁决。农民之后的 **农场主** 路径对应 **schema gap / 结构写入**，与质检失败路径相互独立。
+
+```mermaid
+flowchart TD
+  S([开始])
+  P[采购员<br/>L0-L3 筛查 / 写 decisions 与日志]
+  Q{质检员<br/>导出契约与回归自检}
+  R[退回：修正导出或 harness<br/>重跑采购写盘]
+  F[农民<br/>cultivate / reference]
+  FO[农场主<br/>gap 裁决 / GraphRAG 与树侧写入]
+  T[操作树与合并产物<br/>merge / 骨架 / 索引]
+  E([结束])
+
+  S --> P --> Q
+  Q -->|通过| F
+  Q -->|不通过| R
+  R --> P
+  F --> FO
+  F --> T
+  FO --> T
+  T --> E
+```
+
 ## 实现摘要（与 `knowledge_quality_inspector_agent.py` 同步）
 
 | 符号 | 作用 |
@@ -13,11 +38,15 @@
 | `filter_accepted_chunks` | 等价于采购 `filter_accepted`（基于 `enrich_chunk_decision_for_farmer`），无需实例化 `KnowledgeProcurementAgent`。 |
 | `normalize_chunk_for_compare` | 比较前去掉与 `page_content` 相同的镜像 `text`，便于与未写 `text` 的落盘对齐。 |
 | `ProcurementExportValidation` / `SummaryActionsCheck` | 校验结果 dataclass。 |
+| `validate_non_product_knowledge_patterns` | 自检 `non_product_section_patterns`：标题正则可编译、样例标题可匹配；`NON_KNOWLEDGE_CONTENT_KEYWORDS` 非空且样例正文子串可命中（与农场主/链接器用法一致）。 |
+| `validate_non_product_section_patterns` | 上行的向后兼容别名。 |
+| `non_product_section_patterns` | **非产品章节标题**与 **正文法律/版权关键词** 的唯一数据源；`ingest_validator`、`knowledge_schema` 中的 `NON_KNOWLEDGE_TITLE_PATTERNS` / `NON_KNOWLEDGE_CONTENT_KEYWORDS` 均由此 re-export，避免分叉。 |
 
 ## 范围（应改）
 
 - 质检 **规范文档**（本文）与 **Cursor 规则** `.cursor/rules/kb-session-quality-inspector.mdc`
 - **`INAGENT/agents/knowledge_quality_inspector_agent.py`**、`INAGENT/unit_tests/test_knowledge_quality_inspector_agent.py`
+- **`INAGENT/utils/non_product_section_patterns.py`**（与 merge 校验、农场主/链接器子串判断对齐；变更时跑质检自检）
 - **金标集与回归清单** 的路径约定（如 `INAGENT/test_data/` 下的导出；后续若引入 `knowledge_base/quality/` 等目录，须在本文与 `DATA_FLOW.md` 同步说明）
 - **导出契约**：`decisions.json` 与 `accepted_for_farmer.json` 应对齐 `filter_accepted(enrich_decisions_for_farmer(...))` 的语义（含 `page_content` / `text` 镜像规则，见 [`03-procurement.md`](03-procurement.md)）；`ChunkDecision.chunk_index` 全量批次下标不可在导出时丢失或重排为仅 accept 的 0..N-1 除非调用方明确约定
 - **校验脚本与单测**：对采购日志字段、`write_logs` 计数与摘要一致性等的自动化检查（脚本落点以 `INAGENT/scripts/`、`INAGENT/unit_tests/` 为常，具体文件名随实现迭代）

@@ -784,6 +784,7 @@ jobs/test_review/{Bug ID}/output_{version}/{Bug ID}_review/
 
 入库与评审主链路以外，**质检员**会话（[`docs/agents/sessions/07-quality-inspector.md`](agents/sessions/07-quality-inspector.md)）负责 **可回归性与导出契约**，不替代采购/农民/农场主实现。代码入口：`INAGENT/agents/knowledge_quality_inspector_agent.py` 中的 **`KnowledgeQualityInspectorAgent`**（如 `validate_procurement_export`）。
 
+- **流程位置**：采购落盘 → **质检**（契约/回归）→ 通过后再进入农民；**质检不通过**应 **退回采购侧或修正 harness 后重跑**，与农民之后 **农场主对 gap 的裁决** 是两条不同路径（详见 07 节「入库链路流程」示意）。
 - **test_data 导出**：`accepted_for_farmer.json` 等产物应对齐 `KnowledgeProcurementAgent.filter_accepted`（含 `enrich_chunk_decision_for_farmer`）的语义；保留采购侧 **`chunk_index`**（全局下标），避免仅用 accept 子列表的 0..N-1 冒充全量批次（除非 harness 显式约定）。
 - **全链路顺序**：农民 `write_to_reference` → `merge_knowledge_base`（若需要）→ 农场主 `process_gap_entries` 等与向量刷新顺序，以 [`04-farm-owner.md`](agents/sessions/04-farm-owner.md) 与 E2E 脚本注释为准；质检推动检查项与文档一致。
 

@@ -1,6 +1,6 @@
 ---
 description: 知识库「质检员（07）」— 入库链路质量、回归与 test_data 契约（按 globs 加载）
-globs: INAGENT/test_data/**,INAGENT/docs/agents/sessions/07-quality-inspector.md,INAGENT/agents/knowledge_quality_inspector_agent.py,INAGENT/scripts/run_procurement_test_harness.py,INAGENT/scripts/test_procurement_e2e.py,INAGENT/unit_tests/test_knowledge_procurement*.py,INAGENT/unit_tests/test_knowledge_quality_inspector_agent.py
+globs: INAGENT/test_data/**,INAGENT/docs/agents/sessions/07-quality-inspector.md,INAGENT/agents/knowledge_quality_inspector_agent.py,INAGENT/utils/non_product_section_patterns.py,INAGENT/scripts/run_procurement_test_harness.py,INAGENT/scripts/test_procurement_e2e.py,INAGENT/unit_tests/test_knowledge_procurement*.py,INAGENT/unit_tests/test_knowledge_quality_inspector_agent.py
 alwaysApply: false
 ---
 
@@ -14,6 +14,7 @@ alwaysApply: false
 
 ## 核心契约（摘要）
 
+- **流程位置**：采购落盘 → 质检（导出契约）→ 通过后农民；质检失败 **退回采购侧或 harness**，**不是**默认转农场主（农场主管农民 gap，见 `07` 流程图）。
 - `accepted_for_farmer.json` 须与 `filter_accepted(enrich_decisions_for_farmer(...))` 语义一致；保留全局 **`chunk_index`**，勿用仅 accept 列表的 0..N-1 冒充全量下标（除非 harness 显式约定）。
 - 全链路顺序见 [`DATA_FLOW.md`](INAGENT/docs/DATA_FLOW.md) 与 [`04-farm-owner.md`](INAGENT/docs/agents/sessions/04-farm-owner.md)。
 

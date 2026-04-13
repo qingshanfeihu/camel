@@ -1,37 +1,30 @@
 """Knowledge base ingestion validator — 4-rule quality gate.
 
 Rules:
-1. MinLength — reject chunks with <18 chars of content
+1. MinLength — reject chunks with <20 chars of content
 2. TreePositionCheck — quarantine chunks without tree_position
 3. SimHashDedup — cross-source near-duplicate detection (64-bit SimHash)
-4. HierarchyEnrich — backfill function_hierarchy + product_module from CLI graph
+4. HierarchyEnrich — backfill function_hierarchy + product_module
+   from CLI graph
 """
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from INAGENT.rag.knowledge_schema import CAT_TO_LEVEL
+from INAGENT.utils.non_product_section_patterns import (
+    non_product_section_title_regex,
+)
 
 logger = logging.getLogger(__name__)
 
-_MIN_CONTENT_LENGTH = 18
+_MIN_CONTENT_LENGTH = 20
 _SIMHASH_BITS = 64
 _SIMHASH_THRESHOLD = 3
-
-import re
-
-_NON_PRODUCT_TITLE_PATTERNS = re.compile(
-    r"版权|商标|合格声明|免责|关于我们|公司简介"
-    r"|编写目的|适用对象|读者对象"
-    r"|电源要求|防静电|温湿度|温度湿度|空气质量|通风条件"
-    r"|安全措施|安装过程|安装环境|设备上电"
-    r"|内网连接|外线连接|连接电源"
-    r"|命令行介绍|命令行符号含义|命令行快捷键|访问控制的级别"
-)
 
 
 def _simhash(text: str, bits: int = _SIMHASH_BITS) -> int:
@@ -143,12 +136,14 @@ class IngestValidator:
 
         # Rule 1b: HeadingOnly — content 基本上只是 section_title 本身
         section_title = meta.get("section_title", "")
-        if section_title and len(content.strip()) <= len(section_title.strip()) + 22:
+        if section_title and len(content.strip()) <= len(section_title.strip()) + 15:
             self._report.rejected_short += 1
             return "reject", "heading_only"
 
         # Rule 1c: NonProductContent — 法律文本/硬件安装/手册前言等非产品知识
-        if section_title and _NON_PRODUCT_TITLE_PATTERNS.search(section_title):
+        if section_title and non_product_section_title_regex().search(
+            section_title
+        ):
             self._report.rejected_excluded += 1
             return "reject", "non_product_content"
 
