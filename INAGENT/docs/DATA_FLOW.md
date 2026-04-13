@@ -791,6 +791,13 @@ jobs/test_review/{Bug ID}/output_{version}/{Bug ID}_review/
 - **工程回归链**：采购落盘 → **`KnowledgeQualityInspectorAgent`**（导出契约/模式冒烟）→ 通过后再进入农民；**QI 不通过** 应 **退回采购侧或修正 harness**，与 **农场主对 gap 的裁决** 不是同一条失败路径。
 - **test_data 导出**：`accepted_for_farmer.json` 等产物应对齐 `KnowledgeProcurementAgent.filter_accepted`（含 `enrich_chunk_decision_for_farmer`）的语义；保留采购侧 **`chunk_index`**（全局下标），避免仅用 accept 子列表的 0..N-1 冒充全量批次（除非 harness 显式约定）。
 - **全链路顺序**：农民 `write_to_reference` → `merge_knowledge_base`（若需要）→ 农场主 `process_gap_entries` 等与向量刷新顺序，以 [`04-farm-owner.md`](agents/sessions/04-farm-owner.md) 与 E2E 脚本注释为准；质检推动检查项与文档一致。
+- **闭环质检与父子合并（已实现骨架）**：正式计划见 [`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`](PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md)。**工件路径**（默认均在 `knowledge_base/reference/`）：
+  - `_quality_feedback_inbox.jsonl`：离线反馈摄入（`schema_version` 1.0，字段见计划 §2.2）。
+  - `_quality_rule_proposals.json`：由 `build_quality_rule_proposals.py` 从 inbox 聚合 **`suggested_rule`**；**不自动写入** `_owner_quality_rules.json`，人审后手工或脚本合并。
+  - `_quality_purge_manifest.jsonl`：经 **`approved_by`** 门控的删块/补元数据清单；`apply_quality_purge_manifest.py` **默认 dry-run**，`--apply` 才真正改 reference。
+- **推荐编排顺序**（与计划 §4 一致）：校验/生成 proposals（人审规则）→ **`--apply` purge**（若需要）→ **父子 reference 合并**（`merge_reference_parent_child.py`，默认 dry-run）→ `merge_knowledge_base` → 按需向量重建。
+- **代码入口**：`INAGENT/data_tools/quality_feedback_loop.py`、`merge_reference_parent_child.py`；脚本 `INAGENT/scripts/validate_quality_feedback_inbox.py`、`build_quality_rule_proposals.py`、`apply_quality_purge_manifest.py`、`merge_reference_parent_child.py`；配置样例 `INAGENT/config/parent_child_doc_merge.example.yaml`。
+- **安全**：purge 仅允许 `reference` 下 **非 `_` 前缀** 的 `*.json` 文件名；`apply_purge_manifest` 默认要求目录位于 **INAGENT 根下**（测试可用 `--no-strict-inagent`）。
 
 ---
 

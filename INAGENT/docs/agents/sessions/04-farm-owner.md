@@ -92,19 +92,19 @@
 | 能力 | 状态 | 说明 |
 |------|------|------|
 | 质检硬门控后再进农场主 | **有**（编排层） | `quality_ingest` 写 `reference/_quality_gate_for_owner.jsonl`；`farm_owner_ingest` 在调用 `KnowledgeFarmOwnerAgent` 前用 **`_filter_entries_by_quality_gate` / `_filter_chunks_by_quality_gate`** 丢弃 `is_product_knowledge=false` 的 gap/chunk。条件规则、覆写等在 **`quality_ingest.py`** / 质检链路（见 [`07-quality-inspector.md`](07-quality-inspector.md)），**不是** `KnowledgeFarmOwnerAgent` 内逻辑。 |
-| 分析质检员反馈的「无用知识」并归因 | **无** | 无消费离线报告、金标 diff、抽检结论做汇总或规则提炼的农场主模块。 |
-| 向质检员 **下发** 可版本化的过滤规则补丁 | **无** | 无「农场主 → 质检员」的正式工件契约（如自动生成 `condition_rules` 片段并要求质检侧采纳）；规则维护入口仍在 **质检/ingest** 与配置。 |
-| 基于质检结论 **删除** 已入库片段 | **无** | 农场主 **不**删 `reference/*.json` 中的块、**不**删合并后的 `knowledge_base.json` 条目、**不**做 GraphRAG 实体级「按质检报告批量 purge」。`FillRequest` 的 `discard` + `chunk_meta_patch` 等由 **农民** `apply_fill_request` 解释；是否物理删除需 **编排 + 农民** 显式设计，**非**当前农场主交付范围。 |
+| 分析质检员反馈的「无用知识」并归因 | **部分（编排层）** | **`quality_feedback_loop`**：校验 `_quality_feedback_inbox.jsonl`、聚合 `_quality_rule_proposals.json`；**不**在 `KnowledgeFarmOwnerAgent` 内做 LLM 归因。 |
+| 向质检员 **下发** 可版本化的过滤规则补丁 | **部分** | proposals 为人审草稿；**正式生效**仍须合并进 **`_owner_quality_rules.json`**（与 `quality_ingest` 已有格式一致），**无**自动写回生产规则文件。 |
+| 基于质检结论 **删除** 已入库片段 | **部分（脚本）** | **`apply_quality_purge_manifest.py`** + `apply_purge_manifest` 可按 manifest **删块或补 metadata**；农场主 Agent 仍 **不**扫盘；GraphRAG 批量 purge 仍属 **A4 可选**。详见 [`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`](../../PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md) 与 [`DATA_FLOW.md`](../../DATA_FLOW.md) §8。 |
 
 ### 2. 数据整合与 `knowledge_base.json`
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
 | 路径 / 树上下文注入裁决 | **有** | `TreeContext`、`merge_into_existing` 与父候选等（见上文 TreeInformed）。 |
-| CLI **父子节点** reference **自动合并**（整段文档级并入父） | **无** | 无「检测父子后自动把子节点 JSON 合并进父节点文件」的专用管线；overflow 的 merge 主要指 **图实体 / 挂载语义**，不是整库树形文件合并。 |
+| CLI **父子节点** reference **自动合并**（整段文档级并入父） | **部分（机械、配置驱动）** | **`merge_reference_parent_child`**：按 YAML/JSON 配置的 `merge_jobs` 把子 reference 的块 **迁入父文件**，**保留 `block_id`**，并更新 `metadata.source_file` 为父文件名；**无**自动从 CLI 图推断父子（需配置）；图侧 `merge_into_existing` 语义不变。 |
 | 农场主 **写** 完整 `knowledge_base.json` | **刻意不做** | 合并权威在 **`merge_knowledge_base`** 与编排；农场主模块 **不**把「构建完整合并 KB」列为职责。仅在 **`refresh_hybrid_vectors=True`** 时，在 `reload()` 之后 **调用** `merge_knowledge_base` 以便指纹/向量与**当时** `reference/*.json` 一致，**不等于**承担全链路合并编排或增量合并策略的所有权。 |
 
-若产品要求闭环质检或父子文档合并，应在 **DATA_FLOW + 07 + 02** 中另立契约与负责会话（或独立编排服务），再评估是否扩展 `KnowledgeFarmOwnerAgent` 或保持农场主仅做 **图结构 + FillRequest**。
+正式需求与分阶段计划（工件草图、责任边界、验收）见 **[`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`](../PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md)**。落地时须在 **DATA_FLOW + 07 + 02** 固化契约，再评估是否扩展 `KnowledgeFarmOwnerAgent` 或保持农场主仅做 **图结构 + FillRequest**。
 
 ## 范围（应改）
 

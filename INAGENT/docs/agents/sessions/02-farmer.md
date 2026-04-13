@@ -38,7 +38,7 @@
 - **树**：消费 `kb_index`、skeleton；匹配失败或 **歧义**（`ambiguous_match`）时产出 gap 供农场主裁决；可选只读 `reference/farmer_tree_alias.json`
 - **采购**：只处理已决策 **`accept`** 的 `ChunkDecision`；交接前须 **`enrich_decisions_for_farmer` / `filter_accepted`**，保证 `metadata` 含分类与来源（见 `03-procurement.md` § 与农民交接）
 - **农场主**：在固定顺序编排中，农民主入口消费 `_owner_decisions_for_farmer.jsonl`（`schema_version=1.0`）并只处理通过裁决的块；`FillRequest` 批量回填仍是可选能力，归农民实现但不作为当前主链路默认入口
-- **质检员**：可对 `reference/*.json` 导出做 **diff、抽样与回归**（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；`cultivate_batch` / `apply_fill_request` **实现归属仍属农民**，质检不修改核心算法。
+- **质检员**：可对 `reference/*.json` 导出做 **diff、抽样与回归**（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；`cultivate_batch` / `apply_fill_request` **实现归属仍属农民**，质检不修改核心算法。**闭环与合并**：按 manifest 的 reference **删块/补 metadata** 由 `apply_quality_purge_manifest.py`（`quality_feedback_loop.apply_purge_manifest`）执行；**父子文档机械合并** 由 `merge_reference_parent_child.py` 执行（**非** `apply_fill_request` 默认路径）。计划与编排见 [`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`](../../PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md)、[`DATA_FLOW.md`](../../DATA_FLOW.md) §8。
 
 ### 知识本体塑形 vs 树（移交自树宪章）
 

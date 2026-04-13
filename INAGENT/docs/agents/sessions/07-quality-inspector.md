@@ -15,6 +15,8 @@
 
 被门控拦截的 chunk 不允许进入农场主/农民处理链路。质检阶段不再产出或覆写 `knowledge_base.json`（该文件属于采购/农民阶段产物）。
 
+**闭环质检（已实现骨架）**：反馈 JSONL **`_quality_feedback_inbox.jsonl`**、聚合产物 **`_quality_rule_proposals.json`**、经 **`approved_by`** 批准的 **`_quality_purge_manifest.jsonl`**；校验/生成/执行脚本见 **`DATA_FLOW.md`** §8 与 `INAGENT/data_tools/quality_feedback_loop.py`。规则 **定稿** 仍由人审后写入 **`_owner_quality_rules.json`**（与 `quality_ingest` 一致）。完整计划与后续 A4（图侧 purge）见 [`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`](../../PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md)。
+
 农场主阶段对输入契约做硬校验：若缺失 `_quality_gate_for_owner.jsonl` 或 `_quality_reference_for_owner.json`，则直接返回 `processed=false` 并报错阻断，不允许回退到 `knowledge_base.json`。
 
 ```mermaid

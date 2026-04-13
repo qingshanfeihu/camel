@@ -16,6 +16,7 @@ alwaysApply: false
 - **`FarmOwnerReport`**：`fill_requests`、`deferred`、`operation_log` / `tree_mutations`、`discarded_*`、`errors`。**`new_entity_attribute`** 仅 **`default_value is not None`** 时发 `FillRequest`。**不**做 chunk 内容富化。编排须调用农民 **`apply_fill_request`** 将 `fill_requests` **批量**落盘到 `reference/*.json`（及可选骨架）；农场主模块**不**内联执行回填。
 - 与 **树** 会话：CLI 与图不一致时 **先定数据归属** 再改代码。
 - **职责变更时**：同步 **`04-farm-owner.md`**、本文件、锚点、**`knowledge_farm_owner_agent.py` 模块头**；契约变更同步农民/采购单测与 PR。
+- **闭环/合并（骨架已有，非农场主 Agent 内建）**：`quality_feedback_loop` + purge/manifest 脚本、父子 **`merge_reference_parent_child`** 见 **`DATA_FLOW` §8** 与 **`PLAN_CLOSED_LOOP_QA_AND_PARENT_DOC_MERGE.md`**；自动写 `_owner_quality_rules.json`、GraphRAG 批量 purge、CLI 自动推断父子 **仍非**现成能力。**不写**完整 `knowledge_base.json`（合并属 `merge_knowledge_base`/编排）。
 
 ## 范围（应改）
 

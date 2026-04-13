@@ -1,0 +1,14 @@
+# Example: mechanical merge of child reference JSON files into a parent file.
+# Copy to e.g. knowledge_base/reference/_parent_child_merge.local.yaml and run:
+#   python -m INAGENT.scripts.merge_reference_parent_child --config path/to/config.yaml
+#
+# Block IDs are preserved; metadata.source_file is set to the parent basename for merge_knowledge_base.
+
+schema_version: "1.0"
+merge_jobs:
+  - parent: parent_module.json
+    children:
+      - child_sub_a.json
+      - child_sub_b.json
+    # empty: write [] to each child file after chunks moved; noop: leave child files unchanged
+    child_after_merge: empty
