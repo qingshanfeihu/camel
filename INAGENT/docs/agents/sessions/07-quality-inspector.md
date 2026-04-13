@@ -26,9 +26,9 @@ flowchart TD
 
 ### 与当前实现的分工（避免混淆）
 
-- **「是否产品知识」**：主要由 **采购** `KnowledgeProcurementAgent`（L0–L3）、merge 侧 **`ingest_validator`**、以及 **`non_product_section_patterns`**（标题/正文关键词）与农场主侧启发式等 **共同实现**；判定为废料或非知识的 chunk **不应** 进入农民 cultivate 主路径。
-- **`KnowledgeQualityInspectorAgent`**：**不替代** 上述业务筛查；负责 **导出契约与回归**（如 `decisions.json` 与 `accepted_for_farmer.json` 对齐、`summary` 计数、`validate_non_product_knowledge_patterns` 模式集冒烟）。**不通过** 通常表示 **harness 或写盘逻辑漂移**，应 **退回修正后重跑采购落盘**，与「丢弃不入树」是不同层面的失败。
-- **工程管线里** 常见顺序仍是：采购跑批并落盘 →（可选）跑 QI 校验脚本 → 再交给农民；**产品语义**上「质检挡非产品知识」已在采购阶段完成绝大部分判定，QI 代码侧侧重 **可回归性**。
+- **生产采购路径**：`procurement_ingest.main` 当前固定为采购-only 编排（解析、元数据增强、落盘、procurement merge），**不经过** `KnowledgeProcurementAgent` L0/L1/L2/L3 业务筛查分支。
+- **「是否产品知识」质量门**：在当前口径下由 **质检流程**（`KnowledgeQualityInspectorAgent` 与相关校验脚本/规则集）承接；采购侧只保证结构化产物与基础元数据，不承担最终产品知识准入裁决。
+- **`KnowledgeQualityInspectorAgent`**：负责 **导出契约与回归**（如 `decisions.json` 与 `accepted_for_farmer.json` 对齐、`summary` 计数、`validate_non_product_knowledge_patterns` 模式集冒烟）；不通过通常表示导出契约或写盘流程漂移，应退回修正后重跑采购落盘与质检。
 
 ## 实现摘要（与 `knowledge_quality_inspector_agent.py` 同步）
 

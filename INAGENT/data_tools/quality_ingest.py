@@ -1,5 +1,5 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-"""质检独立流程：对知识库与采购导出物执行只读/准只读质量校验。"""
+"""Quality ingest: validate knowledge_base.json and optional exports."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -35,6 +36,7 @@ def run_quality_pipeline(
     decisions_path: Optional[Path] = None,
     accepted_path: Optional[Path] = None,
     summary_path: Optional[Path] = None,
+    archive_to: Optional[Path] = None,
 ) -> Dict[str, object]:
     load_inagent_env()
     reference_dir = reference_dir or _REFERENCE_DIR
@@ -64,10 +66,18 @@ def run_quality_pipeline(
     else:
         result["ingest_report"] = None
 
-    if decisions_path and accepted_path and decisions_path.exists() and accepted_path.exists():
-        export_check = KnowledgeQualityInspectorAgent.validate_procurement_export(
-            decisions_path,
-            accepted_path,
+    has_exports = (
+        decisions_path
+        and accepted_path
+        and decisions_path.exists()
+        and accepted_path.exists()
+    )
+    if has_exports:
+        export_check = (
+            KnowledgeQualityInspectorAgent.validate_procurement_export(
+                decisions_path,
+                accepted_path,
+            )
         )
         result["procurement_export"] = {
             "ok": export_check.ok,
@@ -76,9 +86,11 @@ def run_quality_pipeline(
             "detail": export_check.mismatch_detail,
         }
         if summary_path and summary_path.exists():
-            summary_check = KnowledgeQualityInspectorAgent.validate_summary_accept_count(
-                decisions_path,
-                summary_path,
+            summary_check = (
+                KnowledgeQualityInspectorAgent.validate_summary_accept_count(
+                    decisions_path,
+                    summary_path,
+                )
             )
             result["summary_accept_count"] = {
                 "ok": summary_check.ok,
@@ -90,8 +102,31 @@ def run_quality_pipeline(
         result["procurement_export"] = None
 
     report_path = reference_dir / "_quality_report.json"
-    report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     logger.info("[quality] report written -> %s", report_path)
+
+    if archive_to is not None:
+        archive_to.mkdir(parents=True, exist_ok=True)
+        if report_path.exists():
+            shutil.copy2(report_path, archive_to / "_quality_report.json")
+        ir = reference_dir / "_ingest_report.json"
+        if ir.exists():
+            shutil.copy2(ir, archive_to / "_ingest_report.json")
+        summ = {
+            "reference_dir": str(reference_dir),
+            "archive_to": str(archive_to),
+            "ingest_report": result.get("ingest_report"),
+            "procurement_export": result.get("procurement_export"),
+        }
+        (archive_to / "summary.json").write_text(
+            json.dumps(summ, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("[quality] archived -> %s", archive_to)
+
     return result
 
 
@@ -100,6 +135,12 @@ async def main() -> None:
     parser.add_argument("--decisions", type=Path, default=None)
     parser.add_argument("--accepted", type=Path, default=None)
     parser.add_argument("--summary", type=Path, default=None)
+    parser.add_argument(
+        "--archive-to",
+        type=Path,
+        default=None,
+        help="Archive dir for copied quality and ingest JSON reports",
+    )
     args = parser.parse_args()
 
     _setup_logging()
@@ -107,6 +148,7 @@ async def main() -> None:
         decisions_path=args.decisions,
         accepted_path=args.accepted,
         summary_path=args.summary,
+        archive_to=args.archive_to,
     )
 
 

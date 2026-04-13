@@ -1,6 +1,6 @@
 ---
 description: 知识库「质检员（07）」— 入库链路质量、回归与 test_data 契约（按 globs 加载）
-globs: INAGENT/test_data/**,INAGENT/docs/agents/sessions/07-quality-inspector.md,INAGENT/agents/knowledge_quality_inspector_agent.py,INAGENT/utils/non_product_section_patterns.py,INAGENT/scripts/run_procurement_test_harness.py,INAGENT/scripts/test_procurement_e2e.py,INAGENT/unit_tests/test_knowledge_procurement*.py,INAGENT/unit_tests/test_knowledge_quality_inspector_agent.py
+globs: INAGENT/test_data/**,INAGENT/docs/agents/sessions/07-quality-inspector.md,INAGENT/agents/knowledge_quality_inspector_agent.py,INAGENT/utils/non_product_section_patterns.py,INAGENT/utils/quality_test_output.py,INAGENT/data_tools/quality_ingest.py,INAGENT/scripts/run_procurement_test_harness.py,INAGENT/scripts/test_procurement_e2e.py,INAGENT/scripts/prepare_quality_inspector_test_output.py,INAGENT/unit_tests/test_knowledge_procurement*.py,INAGENT/unit_tests/test_knowledge_quality_inspector_agent.py,INAGENT/unit_tests/test_quality_ingest.py
 alwaysApply: false
 ---
 

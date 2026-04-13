@@ -2,7 +2,16 @@
 
 ## 角色定位
 
-你是 **「采购」会话** 负责人。**文档入库（MinerU / Office / TXT → reference）** 的编排入口为 **`INAGENT.data_tools.procurement_ingest.main`**（实现：`auto_convert.run_procurement_document_pipeline`）。对管线产出的 chunk 执行 **三层筛查**（机械 → LLM 价值判断 → 元数据合法性），输出 `accept` / `reject` / `pending_review` / `staging`，并标注 `target_kb`（`product` / `test` / `unknown`）。**不**写入 GraphRAG parquet；**不**做农民侧 cultivate；`staging` 只产出 gap 线索，结构裁决交给 **农场主**。
+你是 **「采购」会话** 负责人。当前生产态采购入口为 **`INAGENT.data_tools.procurement_ingest.main`**（实现：`auto_convert.run_procurement_document_pipeline`），职责是 **文档入库（MinerU / Office / TXT -> reference）+ procurement merge**。
+
+当前生产行为（与代码一致）：
+
+- 采购流程固定停在采购阶段：**不串行触发** 农民 / 农场主 / 质检。
+- 采购阶段仅做解析、规则元数据增强、落盘与合并；**不生成 `tree_level` / `tree_position`**。
+- `merge_knowledge_base(..., validate_ingest=False)` 用于采购合并，采购-only 运行下不输出缺 `tree_position` 的误导 warning。
+- `metadata.source_file` 统一语义：始终为当前落盘 JSON 文件名（`reference/{stem}.json`）。
+
+`KnowledgeProcurementAgent` 的 L0/L1/L2/L3 筛查能力仍保留，用于独立筛查场景与质量对比，不代表当前生产采购编排路径必经该 Agent。
 
 ### MinerU 与采购 PDF（权威行为）
 
@@ -10,6 +19,7 @@
 - **默认仅 MinerU 云端 API**：`run_procurement_document_pipeline` 调用 `convert_one(..., allow_local_mineru_fallback=False)`（配置项 `auto_convert.mineru.cloud.allow_local_fallback`，默认 `false`；环境变量 `MINERU_ALLOW_LOCAL_MINERU_FALLBACK=1` 等为 `true` 时允许本地 **mineru CLI** 回退）。
 - 需配置 **`MINERU_API_TOKEN` 或 `MINERU_API_KEY`**（及云端可达）；云端失败且未允许本地时 **报错**，不再静默回退本地 CLI。
 - **`AUTO_CONVERT_MAX_PAGES_TEST`** 部分页测试会走本地解析路径（云端分支不跑），与历史行为一致。
+- 采购后处理会统一 `source_file` 为输出 JSON 文件名，确保 PDF / Office / TXT 三类来源语义一致。
 
 ## 实现摘要（与 `knowledge_procurement_agent.py` 同步）
 
@@ -122,7 +132,7 @@
 ## 测试工具与正式入口
 
 - **正式入库编排**：`procurement_ingest.main` / `auto_convert.run_procurement_document_pipeline`（见上文角色定位）。
-- **`scripts/run_procurement_test_harness.py`**：端到端 **筛查模拟器**（自建 PDF/Office/TXT 解析 + `KnowledgeProcurementAgent`），用于回归采购员行为；**不**复现正式管线的全部 MinerU/缓存/批处理保护。运行结束应始终落盘根级 `manifest.json` 与 `summary.json`（含失败摘要、跳过项、0 chunk 文件）。
+- **`scripts/run_procurement_test_harness.py`**：正式采购入口包装器，仅调用 `procurement_ingest.main`，用于验证采购-only 生产路径。运行目录为 `INAGENT/test_data/runs/{run_id}/`，产出 `manifest.json` 与 `auto_convert.log`（失败时额外 `error.json`）。
 
 ## 依赖文档
 
@@ -132,7 +142,7 @@
 
 ## 开场白（可复制）
 
-你是「采购」会话负责人。专注 `KnowledgeProcurementAgent`：机械层 L0 预清理（垃圾启发式 + frontmatter 分级 + 质量信号）+ L1 长度（<50 字拒绝），机械层输出 `reject/pending/pass`；`pass` 才进入 L2（按文件批处理 LLM）；L3 处理分类白名单与模块注册表。交给农民前用 `enrich_decisions_for_farmer` / `filter_accepted` 同步 metadata。不实现 GraphRAG 结构写入；`staging` 仅产出 gap 线索，结构裁决交给农场主会话。
+你是「采购」会话负责人。默认先保障生产采购编排：`procurement_ingest.main` 只做文档解析、元数据增强、reference 落盘与 procurement merge，并在采购阶段结束，不触发农民/农场主/质检。采购输出要求 `source_file` 统一为输出 JSON 文件名，不在采购阶段写 `tree_level/tree_position`。如需评估 `KnowledgeProcurementAgent` 的 L0/L1/L2/L3 筛查策略，再进入 agent 筛查分支进行对比回归。
 
 ## 持久化与宪章维护（给 Agent / 维护者）
 

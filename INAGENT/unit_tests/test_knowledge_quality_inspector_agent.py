@@ -42,6 +42,7 @@ def _minimal_decision_item(action: str, idx: int, content: str) -> dict:
     }
 
 
+# QI-01 导出一致（契约层，见 test_data/质检员输出/README.md）
 def test_validate_procurement_export_ok(tmp_path: Path) -> None:
     items = [
         _minimal_decision_item("reject", 0, "x" * 60),
@@ -65,6 +66,7 @@ def test_validate_procurement_export_ok(tmp_path: Path) -> None:
     assert r.expected_count == 1
 
 
+# QI-02 长度 / 列表不一致
 def test_validate_procurement_export_length_mismatch(tmp_path: Path) -> None:
     items = [_minimal_decision_item("accept", 0, "y" * 60)]
     dec_path = tmp_path / "decisions.json"
@@ -80,6 +82,7 @@ def test_validate_procurement_export_length_mismatch(tmp_path: Path) -> None:
     assert "length mismatch" in (r.mismatch_detail or "")
 
 
+# QI-03 镜像 text 与 page_content
 def test_normalize_chunk_strips_mirrored_text() -> None:
     c = {"page_content": "hello", "text": "hello", "metadata": {}}
     n = normalize_chunk_for_compare(c)
@@ -87,6 +90,7 @@ def test_normalize_chunk_strips_mirrored_text() -> None:
     assert n["page_content"] == "hello"
 
 
+# QI-04 summary.actions.accept 与 decisions accept 一致
 def test_validate_summary_accept_count(tmp_path: Path) -> None:
     items = [_minimal_decision_item("accept", 0, "y" * 60)]
     dec_path = tmp_path / "decisions.json"
@@ -105,6 +109,7 @@ def test_validate_summary_accept_count(tmp_path: Path) -> None:
     assert c.summary_accept == 1
 
 
+# QI-05 non_product_section_patterns 冒烟
 def test_validate_non_product_knowledge_patterns() -> None:
     insp = KnowledgeQualityInspectorAgent
     r = insp.validate_non_product_knowledge_patterns()
