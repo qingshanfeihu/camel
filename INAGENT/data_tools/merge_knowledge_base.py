@@ -47,7 +47,11 @@ def merge_knowledge_base(
     seen_hashes: set = set()
 
     json_files = sorted(reference_dir.glob("*.json"))
-    json_files = [f for f in json_files if f.name != "knowledge_base.json"]
+    json_files = [
+        f
+        for f in json_files
+        if f.name != "knowledge_base.json" and not f.name.startswith("_")
+    ]
 
     if not json_files:
         logger.warning("[merge] No JSON files found in %s", reference_dir)

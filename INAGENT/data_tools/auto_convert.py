@@ -785,6 +785,7 @@ def convert_office_file(file_path: Path) -> None:
 
     knowledge_blocks: List[Dict[str, Any]] = []
     doc_type = "spec/design"
+    procurement_doc_category = "unknown"
     try:
         # 1. 预览（转换后 work_path 已为 docx，可用 MarkItDown）
         content_preview = ""
@@ -806,12 +807,12 @@ def convert_office_file(file_path: Path) -> None:
             knowledge_blocks = parse_test_list(
                 work_path,
                 product_module="",
-                document_category=doc_type,
+                document_category=procurement_doc_category,
             )
         else:
             knowledge_blocks = parse_spec_document(
                 work_path,
-                document_category=doc_type,
+                document_category=procurement_doc_category,
                 product_module="",
             )
     except Exception as exc:
@@ -828,23 +829,14 @@ def convert_office_file(file_path: Path) -> None:
     # 3. 运行 metadata 增强（规则 + index）
     config = _load_project_config()
     meta_rules = config.get("metadata_rules", {})
-    product_modules_map = _merge_product_modules_map(
-        meta_rules.get("product_modules", {})
-    )
     protocol_map = meta_rules.get("protocol_types", {})
 
     for block in knowledge_blocks:
         meta = block.get("metadata", {})
         meta["source_file"] = source_label
+        meta["document_category"] = "unknown"
+        meta.pop("product_module", None)
         content = str(block.get("page_content") or "")
-        lower_text = content.lower()
-
-        # product_module（如果解析器未设置，则用规则匹配）
-        if not meta.get("product_module") or meta.get("product_module") == "unknown":
-            for module, keywords in product_modules_map.items():
-                if any(k.lower() in lower_text for k in keywords):
-                    meta["product_module"] = module
-                    break
 
         # protocol_type
         if not meta.get("protocol_type"):
@@ -934,7 +926,7 @@ def _parse_bug_fix_text(text: str, source_file: str) -> List[Dict[str, Any]]:
 
     base_meta = {
         "source_file": source_file,
-        "document_category": "review/bug_fix",
+        "document_category": "unknown",
         "bug_id": bug_id,
     }
 
@@ -1010,7 +1002,7 @@ def _parse_bug_fix_text(text: str, source_file: str) -> List[Dict[str, Any]]:
     return blocks
 
 
-def _parse_generic_text(text: str, source_file: str, category: str) -> List[Dict[str, Any]]:
+def _parse_generic_text(text: str, source_file: str, category: str = "unknown") -> List[Dict[str, Any]]:
     """将通用 TXT 文件按段落拆分为知识块。"""
     blocks: List[Dict[str, Any]] = []
     paragraphs = re.split(r"\n{2,}", text.strip())
@@ -1074,21 +1066,13 @@ def convert_text_file(file_path: Path) -> None:
     # metadata 增强
     config = _load_project_config()
     meta_rules = config.get("metadata_rules", {})
-    product_modules_map = _merge_product_modules_map(
-        meta_rules.get("product_modules", {})
-    )
     protocol_map = meta_rules.get("protocol_types", {})
 
     for block in knowledge_blocks:
         meta = block.get("metadata", {})
         content = str(block.get("page_content") or "")
-        lower_text = content.lower()
-
-        if not meta.get("product_module") or meta["product_module"] == "unknown":
-            for module, keywords in product_modules_map.items():
-                if any(k.lower() in lower_text for k in keywords):
-                    meta["product_module"] = module
-                    break
+        meta["document_category"] = "unknown"
+        meta.pop("product_module", None)
 
         if not meta.get("protocol_type"):
             found_protocols = _match_protocols_word_boundary(protocol_map, content)
@@ -1155,27 +1139,20 @@ def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
         return False
 
     source_label = json_path.name
-    knowledge_blocks = _parse_generic_text(text, source_label, "pdf_fallback")
+    knowledge_blocks = _parse_generic_text(text, source_label, "unknown")
     if not knowledge_blocks:
         logger.warning("[pdf-fallback] 未生成知识块: %s", pdf.name)
         return False
 
     config = _load_project_config()
     meta_rules = config.get("metadata_rules", {})
-    product_modules_map = _merge_product_modules_map(
-        meta_rules.get("product_modules", {})
-    )
     protocol_map = meta_rules.get("protocol_types", {})
 
     for block in knowledge_blocks:
         meta = block.get("metadata", {})
         content = str(block.get("page_content") or "")
-        lower_text = content.lower()
-        if not meta.get("product_module") or meta["product_module"] == "unknown":
-            for module, keywords in product_modules_map.items():
-                if any(k.lower() in lower_text for k in keywords):
-                    meta["product_module"] = module
-                    break
+        meta["document_category"] = "unknown"
+        meta.pop("product_module", None)
         if not meta.get("protocol_type"):
             found_protocols = _match_protocols_word_boundary(protocol_map, content)
             if found_protocols:
@@ -2931,9 +2908,6 @@ async def run_procurement_document_pipeline() -> None:
                 if isinstance(blocks, list) and blocks:
                     config = _load_project_config()
                     meta_rules = config.get("metadata_rules", {})
-                    product_modules_map = _merge_product_modules_map(
-                        meta_rules.get("product_modules", {})
-                    )
                     protocol_map = meta_rules.get("protocol_types", {})
                     command_prefixes = meta_rules.get("command_prefixes", {})
 
@@ -2946,13 +2920,10 @@ async def run_procurement_document_pipeline() -> None:
                             block["metadata"] = meta
                         # 统一语义：source_file 始终指向当前落盘 JSON 文件名。
                         meta["source_file"] = json_file.name
+                        meta["document_category"] = "unknown"
+                        meta.pop("product_module", None)
                         content = str(block.get("page_content") or "")
                         lower_text = content.lower()
-
-                        for module, keywords in product_modules_map.items():
-                            if any(k.lower() in lower_text for k in keywords):
-                                meta["product_module"] = module
-                                break
 
                         if not meta.get("protocol_type"):
                             found_protocols = _match_protocols_word_boundary(

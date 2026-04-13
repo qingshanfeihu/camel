@@ -151,14 +151,15 @@ class TestLayer1Mechanical:
         assert decisions[0].decision.action == "pending_review"
         assert decisions[0].decision.reason_code == "frontmatter_medium_confidence"
 
-    def test_title_content_mismatch_passes_mechanical_goes_to_llm(self, agent_with_mock_llm):
-        # 标题与正文无字符重叠：不再 L0 pending，交 L2；mock LLM 接受
+    def test_title_content_mismatch_pending_review_in_l0(self, agent_with_mock_llm):
+        # 当前策略：标题与正文无字符重叠时，L0 直接转 pending_review（不进入 L2）。
         chunk = _make_chunk(
             "BGP autonomous system path attributes for inter-domain routing policies." * 3,
             section_title="快照与卷管理",
         )
         decisions = agent_with_mock_llm.evaluate_batch([chunk])
-        assert decisions[0].decision.action == "accept"
+        assert decisions[0].decision.action == "pending_review"
+        assert decisions[0].decision.reason_code == "title_content_mismatch"
         qf = chunk.get("metadata", {}).get("_quality_flags") or []
         assert "title_content_mismatch" in qf
 

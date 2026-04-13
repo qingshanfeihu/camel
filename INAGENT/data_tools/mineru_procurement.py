@@ -166,29 +166,9 @@ def _can_reuse_mineru_output(pdf: Path, content_list_path: Path) -> bool:
 
 
 def _infer_pdf_document_category(pdf: Path) -> str:
-    """Infer document_category from PDF filename heuristics.
-
-    Convention (based on project naming):
-      - cli*.pdf / *命令*.pdf          → "cli/reference"
-      - app*.pdf / *应用*.pdf          → "app/reference"
-      - *架构* / *设计* / *design*       → "architecture/design"
-      - *spec* / *需求* / *prd*          → "spec/design"
-      - default                         → "spec/design"
-    """
-    name_lower = pdf.stem.lower()
-    # CLI pattern: starts with "cli" or contains CLI-specific keywords
-    if re.match(r"^cli", name_lower) or any(k in name_lower for k in ("命令参考", "cli_ref", "cliref")):
-        return "cli/reference"
-    # App/feature guide pattern
-    if re.match(r"^app", name_lower) or any(k in name_lower for k in ("应用配置", "app_guide", "feature")):
-        return "app/reference"
-    # Architecture/design pattern
-    if any(k in name_lower for k in ("架构", "design", "arch", "architecture", "设计")):
-        return "architecture/design"
-    # Spec/requirement pattern
-    if any(k in name_lower for k in ("spec", "需求", "prd", "requirement")):
-        return "spec/design"
-    return "spec/design"
+    """Procurement stage does not decide document_category anymore."""
+    _ = pdf
+    return "unknown"
 
 
 async def convert_one(
@@ -404,7 +384,6 @@ async def convert_one(
                 "section_title": section_context.get("section_title", ""),
                 "parent_section": section_context.get("parent_section", ""),
                 "section_path": section_context.get("section_path", ""),
-                "product_module": "unknown",
                 "document_category": _infer_pdf_document_category(pdf),
                 "is_frontmatter": block.get("page_idx") in frontmatter_page_set,
                 "frontmatter_confidence": (
@@ -427,17 +406,14 @@ async def convert_one(
             processed = 0
             start_time = time.perf_counter()
             
-            # Helper to run blocking processing in a thread with progress tracking
-            # Phase 1: rule-based extraction (fast, no LLM)
-            # Phase 2: batch LLM extraction (N chunks per API call)
+            # Helper to run blocking processing in a thread with progress tracking.
+            # Procurement 阶段只保留规则抽取；LLM 元数据增强已移交农场主阶段。
             def _process_batch_sync(items):
                 nonlocal processed
                 config = ac._load_project_config()
                 meta_rules = config.get("metadata_rules", {})
-                llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
-                llm_enabled = llm_config.get("enable", False)
 
-                # Phase 1: rule-based extraction for all items (fast)
+                # 规则抽取：采购只做无副作用的基础元数据整理。
                 rule_results = []
                 for text, base in items:
                     clean_text = ac._clean_chunk_text(text)
@@ -452,15 +428,9 @@ async def convert_one(
                     if section_path:
                         meta_out["section_path"] = section_path
                     lower_text = clean_text.lower()
-                    lower_section = f"{section_title} {parent_section}".lower()
                     for intent, keywords in meta_rules.get("intents", {}).items():
                         if any(k.lower() in lower_text for k in keywords):
                             meta_out["intent"] = intent
-                            break
-                    product_modules_map = ac._merge_product_modules_map(meta_rules.get("product_modules", {}))
-                    for module, keywords in product_modules_map.items():
-                        if any(k.lower() in lower_text for k in keywords) or any(k.lower() in lower_section for k in keywords):
-                            meta_out["product_module"] = module
                             break
                     for proto in ac._match_protocols_word_boundary(
                         meta_rules.get("protocol_types", {}), lower_text
@@ -486,47 +456,6 @@ async def convert_one(
                     "[parallel] 规则提取完成: %d/%d (%.1f%%) | %.1f 块/秒 | 剩余: %.1f秒",
                     processed, total, 100.0 * processed / total, rate, eta,
                 )
-
-                # Phase 2: batch LLM extraction (if enabled)
-                # Skip blocks where rule-based extraction already filled key fields
-                if llm_enabled:
-                    _KEY_FIELDS = {"product_module", "protocol_type", "intent", "config_mode"}
-                    needs_llm = []
-                    for ct, m in rule_results:
-                        filled = sum(1 for f in _KEY_FIELDS if m.get(f))
-                        if filled < 3:  # need LLM if <3 of 4 key fields filled
-                            needs_llm.append((ct, m))
-                    skipped = len(rule_results) - len(needs_llm)
-                    if skipped:
-                        logger.info(
-                            "[batch-llm] 跳过 %d/%d 块 (规则已覆盖), LLM处理 %d 块",
-                            skipped, len(rule_results), len(needs_llm),
-                        )
-                    batch_size = ac._BATCH_LLM_SIZE
-                    llm_batches = []
-                    for i in range(0, len(needs_llm), batch_size):
-                        llm_batches.append(needs_llm[i:i + batch_size])
-
-                    llm_done = 0
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, 32)) as executor:
-                        def _do_batch(batch):
-                            ac._apply_llm_metadata_extraction_batch(
-                                [(ct, m) for ct, m in batch], llm_config
-                            )
-                        futures = {executor.submit(_do_batch, b): b for b in llm_batches}
-                        for future in concurrent.futures.as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception as e:
-                                logger.warning("[batch-llm] batch failed: %s", e)
-                            llm_done += len(futures[future])
-                            llm_total = len(needs_llm)
-                            if llm_done % max(1, min(500, llm_total // 5)) < batch_size or llm_done >= llm_total:
-                                logger.info(
-                                    "[batch-llm] LLM进度: %d/%d (%.1f%%)",
-                                    llm_done, llm_total,
-                                    100.0 * llm_done / llm_total if llm_total else 100.0,
-                                )
 
                 return [meta_out for _, meta_out in rule_results]
 

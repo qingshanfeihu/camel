@@ -4,6 +4,13 @@
 
 你是 **「农民」会话** 负责人。在采购员放行后，对 chunk 做 **结构化 cultivation**：调用 `auto_convert` 模块中的 **提取/对齐函数**（如 `_extract_chunk_metadata`）富化元数据、`knowledge_base.json` 骨架匹配、diff、`schema_gaps` 上报、可选 **`update_skeleton`** 写回骨架 `page_content`/metadata；按农场主已裁决的 **`FillRequest`** 执行 **`apply_fill_request`**（**reference 为主**，可选同步骨架）。**MinerU 批处理与文档入库** 由 **采购管线** `procurement_ingest` 负责，非农民会话主路径。
 
+当前生产编排（固定顺序）下，农民阶段是 **第 4 步**：
+
+1. 采购：落盘 `reference/{stem}.json`
+2. 质检：输出 `_quality_gate_for_owner.jsonl`
+3. 农场主：输出 `_owner_decisions_for_farmer.jsonl`
+4. 农民：**仅消费农场主决策文件**，处理 owner-approved chunks，并产出（或更新）`schema_gaps.jsonl`
+
 **枝干场景加肉**：农场主 **`cultivate_scenarios()`** 写出 **`reference/scenarios_scaffold.json`**；农民 **`enrich_scenario_nodes()`** 读该文件，用 LLM 生成 **`reference/scenarios_synthesized.json`**（`scenario/guide` / `module/guide` / `product/guide`）。编排入口示例：`INAGENT/scripts/run_scenario_cultivation.py`。CLI **叶**仍以 **`cultivate_batch`** + 骨架为准。
 
 ### 与农场主的结构边界（必读）
@@ -30,7 +37,7 @@
 
 - **树**：消费 `kb_index`、skeleton；匹配失败或 **歧义**（`ambiguous_match`）时产出 gap 供农场主裁决；可选只读 `reference/farmer_tree_alias.json`
 - **采购**：只处理已决策 **`accept`** 的 `ChunkDecision`；交接前须 **`enrich_decisions_for_farmer` / `filter_accepted`**，保证 `metadata` 含分类与来源（见 `03-procurement.md` § 与农民交接）
-- **农场主**：产出 **`FillRequest`**；农民 **执行** `apply_fill_request` 写 **reference**（及可选骨架），**不做** GraphRAG 结构写入与裁决
+- **农场主**：在固定顺序编排中，农民主入口消费 `_owner_decisions_for_farmer.jsonl`（`schema_version=1.0`）并只处理通过裁决的块；`FillRequest` 批量回填仍是可选能力，归农民实现但不作为当前主链路默认入口
 - **质检员**：可对 `reference/*.json` 导出做 **diff、抽样与回归**（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；`cultivate_batch` / `apply_fill_request` **实现归属仍属农民**，质检不修改核心算法。
 
 ### 知识本体塑形 vs 树（移交自树宪章）

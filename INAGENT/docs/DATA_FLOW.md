@@ -375,22 +375,23 @@ RRF 融合后每条结果:
 }
 ```
 
-### 3.7 知识库合并与混合向量刷新（编排顺序）
+### 3.7 知识入库固定顺序与工件契约（当前生产口径）
 
-向量路径（§3.2）消费的是合并后的 `knowledge_base/reference/knowledge_base.json` 经嵌入写入的 Qdrant/BM25 索引，而不是单个 `{stem}.json`。
+当前入库主链路采用固定顺序：`Procurement -> Quality(hard gate) -> Farm-owner -> Farmer -> merge/index`。
 
-| 步骤 | 谁 | 行为 |
-|------|-----|------|
-| 写入分片 | 农民 `write_to_reference` | 只写 `reference/{stem}.json`，**不**合并、**不**刷向量 |
-| 农场主回填 | 农民 `apply_fill_request(FillRequest[])` | 按 `target_block_id` 或 `target_node_id`/`entity_title` **批量**合并 chunk `metadata`（及可选骨架 `node_id`）；**不**合并、**不**刷向量 |
-| 合并小文件 | `merge_knowledge_base(reference_dir, knowledge_base.json)` | 将 `reference/*.json` 聚合成检索用的 `knowledge_base.json` |
-| 可选一键 | `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` | 在 GraphRAG `reload()` **之后**，对**当时磁盘上**的 `reference/*.json` 执行上表合并，再 `refresh_hybrid_vector_index` |
+| 阶段 | 输入 | 输出 | 阻断条件 |
+|------|------|------|----------|
+| 采购 (`procurement_ingest`) | `knowledge_base/input/*` | `reference/{stem}.json` | 文档解析失败即失败 |
+| 质检 (`quality_ingest`) | `reference/{stem}.json` | `_quality_gate_for_owner.jsonl`（`schema_version=1.0`）, `schema_gaps.jsonl` | 无 quality gate 输出时阻断后续 |
+| 农场主 (`farm_owner_ingest`) | `_quality_gate_for_owner.jsonl`, `schema_gaps.jsonl` | `_owner_decisions_for_farmer.jsonl`（`schema_version=1.0`） | 缺 quality gate 时阻断 |
+| 农民 (`farmer_ingest`) | `_owner_decisions_for_farmer.jsonl` + `reference/{stem}.json` | 更新后的 `reference/{stem}.json`、`schema_gaps.jsonl` | owner decisions 为空时跳过 |
+| 合并索引 (`merge_knowledge_base` + RAG init) | `reference/*.json`（过滤 `_*.json`） | `reference/knowledge_base.json` + 检索索引 | merge 失败即失败 |
 
-**农民 vs 农场主（结构）**：**新建** GraphRAG 实体/任意层级树节点、**挖槽/新列/契约级 metadata** 由 **农场主** 裁决与写图；**农民** 在 **已有挂载点** 上富化、`write_to_reference` 并 **执行** 已产出的 `FillRequest`。见 `docs/agents/sessions/02-farmer.md`、`04-farm-owner.md` 中 **结构边界**。
+关键约束：
 
-**隐患（非数据污染类 bug）**：若 E2E 在「农场主且 `refresh_hybrid_vectors=True`」**之后**再执行 `write_to_reference`，则除非编排再次 `merge_knowledge_base` + `refresh_hybrid_vector_index`（或等价重建），混合检索仍看不到新 chunk。农场主路径**已**在开启该开关时前置合并，但**不能**替代「农民写分片 → 合并 → 刷向量」在时间与调用顺序上的完整闭环。
-
-**推荐顺序**（与 `scripts/test_ircookie_e2e.py` 文档串一致）：农民 `write_to_reference` → `merge_knowledge_base` → 农场主 `process_gaps` / `process_gap_entries`（若需向量一致再开 `refresh_hybrid_vectors`）→ 若仍有农民回填写 reference，则再 merge + 刷新向量。
+- 质检门控是硬门：`is_product_knowledge=false` 的 chunk 不进入农场主和农民主处理链路。
+- 农场主在“无可处理 gap”场景也必须生成 passthrough owner decisions，避免下游农民无输入。
+- 合并阶段默认忽略 `_*.json` 系统工件，防止报告/门控文件污染知识正文。
 
 ### 3.8 `hybrid_vectors_force` / `force_rebuild_vectors`（06 选型）
 

@@ -4,6 +4,14 @@
 
 你是 **「农场主」会话** 负责人。消费 `schema_gaps.jsonl`（由采购/农民路径产出），对 GraphRAG 做 **结构性维护**，并在 **树知情（TreeInformed）** 前提下与 CLI 图、SkeletonIndex 只读协作；写入前 **snapshot_backup**；处理结束后 **`GraphRAGRetriever.reload()`**。
 
+当前固定顺序编排下，农场主是 **质量门控后的第 3 步**，输入/输出契约为：
+
+- 必须输入：`reference/_quality_gate_for_owner.jsonl`
+- 可选输入：`reference/schema_gaps.jsonl`（若为空，走质量通过项 passthrough）
+- 必须输出：`reference/_owner_decisions_for_farmer.jsonl`（`schema_version=1.0`）
+
+当不存在可处理 gap 时，农场主仍需基于 quality gate 生成 passthrough decisions，确保下游农民阶段可消费且不空跑。
+
 **TreeInformed 决策（与实现对齐）**：
 
 - **`_query_tree_context(entity_title)`**：懒加载 **`CLIGraphStore`**（`get_cli_graph_store()`）与 **`SkeletonIndex`**（`get_skeleton_index()`），填充只读 **`TreeContext`**（`knowledge_schema.TreeContext`）：`exists_in_tree`、`tree_level`、`hierarchy_prefix`、`parent_candidate_id`、`skeleton_module_id`、`skeleton_artifact_exists`、`enrich_snapshot` 等。树侧命中优先走 **`cli.command_exists(entity_title)`**，签名为 **`Tuple[bool, List[str]]`**（存在标志 + 相似命令 id 列表；单测 mock 须与此一致）。同一 **`process_gap_entries`** 批次内结果写入 **`_tree_context_cache`**。
@@ -75,6 +83,29 @@
 
 - 配置文件：`INAGENT/config/farm_owner_overflow_denylist.json`，字段 `deny_field_names`（字符串数组）。出现在名单中的 `field_name` 的 overflow 条目将 **直接 discard**，不写图、不进入 LLM 裁决。
 
+## 已知缺口与设计边界（与产品期望对齐）
+
+本节把 **已实现的前向能力** 与 **尚未实现的闭环/整合** 写清，避免把编排脚本里的门控误当成「农场主 Agent 已消化质检反馈」。
+
+### 1. 质检与过滤（前向 vs 闭环）
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| 质检硬门控后再进农场主 | **有**（编排层） | `quality_ingest` 写 `reference/_quality_gate_for_owner.jsonl`；`farm_owner_ingest` 在调用 `KnowledgeFarmOwnerAgent` 前用 **`_filter_entries_by_quality_gate` / `_filter_chunks_by_quality_gate`** 丢弃 `is_product_knowledge=false` 的 gap/chunk。条件规则、覆写等在 **`quality_ingest.py`** / 质检链路（见 [`07-quality-inspector.md`](07-quality-inspector.md)），**不是** `KnowledgeFarmOwnerAgent` 内逻辑。 |
+| 分析质检员反馈的「无用知识」并归因 | **无** | 无消费离线报告、金标 diff、抽检结论做汇总或规则提炼的农场主模块。 |
+| 向质检员 **下发** 可版本化的过滤规则补丁 | **无** | 无「农场主 → 质检员」的正式工件契约（如自动生成 `condition_rules` 片段并要求质检侧采纳）；规则维护入口仍在 **质检/ingest** 与配置。 |
+| 基于质检结论 **删除** 已入库片段 | **无** | 农场主 **不**删 `reference/*.json` 中的块、**不**删合并后的 `knowledge_base.json` 条目、**不**做 GraphRAG 实体级「按质检报告批量 purge」。`FillRequest` 的 `discard` + `chunk_meta_patch` 等由 **农民** `apply_fill_request` 解释；是否物理删除需 **编排 + 农民** 显式设计，**非**当前农场主交付范围。 |
+
+### 2. 数据整合与 `knowledge_base.json`
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| 路径 / 树上下文注入裁决 | **有** | `TreeContext`、`merge_into_existing` 与父候选等（见上文 TreeInformed）。 |
+| CLI **父子节点** reference **自动合并**（整段文档级并入父） | **无** | 无「检测父子后自动把子节点 JSON 合并进父节点文件」的专用管线；overflow 的 merge 主要指 **图实体 / 挂载语义**，不是整库树形文件合并。 |
+| 农场主 **写** 完整 `knowledge_base.json` | **刻意不做** | 合并权威在 **`merge_knowledge_base`** 与编排；农场主模块 **不**把「构建完整合并 KB」列为职责。仅在 **`refresh_hybrid_vectors=True`** 时，在 `reload()` 之后 **调用** `merge_knowledge_base` 以便指纹/向量与**当时** `reference/*.json` 一致，**不等于**承担全链路合并编排或增量合并策略的所有权。 |
+
+若产品要求闭环质检或父子文档合并，应在 **DATA_FLOW + 07 + 02** 中另立契约与负责会话（或独立编排服务），再评估是否扩展 `KnowledgeFarmOwnerAgent` 或保持农场主仅做 **图结构 + FillRequest**。
+
 ## 范围（应改）
 
 - `INAGENT/agents/knowledge_farm_owner_agent.py`
@@ -95,7 +126,7 @@
 
 - 读 **农民/采购** 的 gap；向 **农民** 下发 `FillRequest`
 - 与 **树** 会话协调：若 gap 源于 CLI 实体与图结构不一致，优先明确数据归属再改代码
-- **质检员**：可度量 `schema_gaps` / `FillRequest` **闭环**与 `FarmOwnerReport` 字段（见 [`07-quality-inspector.md`](07-quality-inspector.md)）；**GraphRAG 结构裁决与写入**仍属 **农场主**，质检不替代 `process_gap_entries` 等实现。
+- **质检员**：前向门控与规则见 **07**、`quality_ingest` / `_quality_gate_for_owner.jsonl`；可度量 `schema_gaps` / `FillRequest` 与 `FarmOwnerReport`。**反向**（质检报告 → 农场主分析 → 规则回灌 → 物理删块）见上文 **§ 已知缺口**。**GraphRAG 结构裁决与写入**仍属 **农场主**，质检不替代 `process_gap_entries` 等实现。
 
 ### 产品知识本体与树（移交说明）
 

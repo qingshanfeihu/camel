@@ -11,7 +11,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from INAGENT.data_tools.ingest_validator import IngestValidator
-from INAGENT.data_tools.quality_ingest import run_quality_pipeline
+from INAGENT.data_tools.quality_ingest import (
+    _apply_condition_rules,
+    _match_chunk_against_rule,
+    run_quality_pipeline,
+)
 from INAGENT.utils.quality_test_output import prepare_run_dir
 
 
@@ -20,6 +24,8 @@ def _accept_chunk(page: str, **meta_extra: object) -> dict:
         "section_title": "CmdRef",
         "tree_position": {"tree_level": "leaf", "linked_nodes": []},
         "document_category": "cli/reference",
+        "source_file": "fixture.json",
+        "block_id": "block-1",
         **meta_extra,
     }
     return {"page_content": page, "metadata": meta}
@@ -35,14 +41,13 @@ def test_iv01_rejected_short() -> None:
     assert v.report.rejected_short >= 1
 
 
-# IV-02: non-product section_title (non_product_section_title_regex)
-def test_iv02_non_product_section_title() -> None:
+# IV-02: non-product-like section_title is no longer rejected by keyword rule
+def test_iv02_no_keyword_reject_on_section_title() -> None:
     v = IngestValidator(cli_graph_store=None)
     chunk = _accept_chunk("y" * 30, section_title="版权声明")
     verdict, reason = v.validate_chunk(chunk)
-    assert verdict == "reject"
-    assert reason == "non_product_content"
-    assert v.report.rejected_excluded >= 1
+    assert verdict == "accept"
+    assert reason == ""
 
 
 # IV-03: no tree_position and no migratable document_category -> quarantine
@@ -83,6 +88,7 @@ def test_iv05_run_quality_pipeline_writes_report(tmp_path: Path) -> None:
         return_value=None,
     ):
         result = run_quality_pipeline(reference_dir=tmp_path)
+    assert (tmp_path / "_quality_reference_for_owner.json").exists()
     assert (tmp_path / "_quality_report.json").exists()
     assert (tmp_path / "_ingest_report.json").exists()
     assert result.get("ingest_report") is not None
@@ -110,6 +116,57 @@ def test_run_quality_pipeline_archive_to(tmp_path: Path) -> None:
     assert (arc / "summary.json").exists()
 
 
+def test_run_quality_pipeline_owner_rule_override_blocks_chunk(tmp_path: Path) -> None:
+    kb = [
+        _accept_chunk(
+            "override target body " * 5,
+            source_file="owner.json",
+            block_id="b-1",
+        )
+    ]
+    (tmp_path / "knowledge_base.json").write_text(
+        json.dumps(kb, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "_owner_quality_overrides.jsonl").write_text(
+        json.dumps(
+            {
+                "source_file": "owner.json",
+                "block_id": "b-1",
+                "is_product_knowledge": False,
+                "quality_reason": "owner_rule_block",
+                "rule_tag": "owner.product.rule",
+                "rule_version": "2026-04-13",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with patch(
+        "INAGENT.data_tools.quality_ingest.get_cli_graph_store",
+        return_value=None,
+    ):
+        result = run_quality_pipeline(reference_dir=tmp_path)
+
+    source_after = json.loads((tmp_path / "knowledge_base.json").read_text(encoding="utf-8"))
+    assert len(source_after) == 1
+    out_ref = json.loads(
+        (tmp_path / "_quality_reference_for_owner.json").read_text(encoding="utf-8")
+    )
+    assert out_ref == []
+    assert result.get("quality_gate_blocked") == 1
+    assert result.get("owner_rule_hook", {}).get("overrides_total") == 1
+    gate_lines = (tmp_path / "_quality_gate_for_owner.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert gate_lines
+    gate_item = json.loads(gate_lines[0])
+    assert gate_item.get("decision_source") == "owner_rule_hook"
+    assert gate_item.get("quality_reason") == "owner_rule_block"
+
+
 def test_prepare_run_dir_copies_reference(tmp_path: Path) -> None:
     ref = tmp_path / "src_ref"
     ref.mkdir()
@@ -123,3 +180,138 @@ def test_prepare_run_dir_copies_reference(tmp_path: Path) -> None:
     )
     assert (root / "ingest" / "chunk.json").exists()
     assert (root / "procurement_contract").is_dir()
+
+
+# ──────────────────────────────────────────────
+# Condition-rule unit tests
+# ──────────────────────────────────────────────
+
+_BLOCK_RULE = {
+    "rule_id": "test_block_copyright",
+    "rule_version": "1.0",
+    "enabled": True,
+    "priority": 100,
+    "match_conditions": {"section_title_regex": "版权|copyright"},
+    "action": "block",
+    "override": {"quality_reason": "owner_rule:copyright", "risk_level": "high"},
+}
+
+_PASS_RULE = {
+    "rule_id": "test_pass_tech",
+    "rule_version": "1.0",
+    "enabled": True,
+    "priority": 80,
+    "match_conditions": {"section_title_regex": "^配置示例"},
+    "action": "pass",
+    "override": {"quality_reason": "owner_rule:pass_tech", "risk_level": "low"},
+}
+
+_DISABLED_RULE = {
+    "rule_id": "test_disabled",
+    "rule_version": "1.0",
+    "enabled": False,
+    "priority": 200,
+    "match_conditions": {"section_title_regex": ".*"},
+    "action": "block",
+}
+
+
+def test_match_chunk_against_rule_title_regex_match() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="版权声明")
+    assert _match_chunk_against_rule(chunk, _BLOCK_RULE) is True
+
+
+def test_match_chunk_against_rule_title_regex_no_match() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="配置示例")
+    assert _match_chunk_against_rule(chunk, _BLOCK_RULE) is False
+
+
+def test_match_chunk_against_rule_source_file_glob() -> None:
+    rule = {
+        "rule_id": "glob_test",
+        "enabled": True,
+        "match_conditions": {"source_file_glob": "app_*"},
+        "action": "block",
+    }
+    chunk_match = _accept_chunk("x" * 30, source_file="app_1-40.json")
+    chunk_no_match = _accept_chunk("x" * 30, source_file="cli_1-82.json")
+    assert _match_chunk_against_rule(chunk_match, rule) is True
+    assert _match_chunk_against_rule(chunk_no_match, rule) is False
+
+
+def test_apply_condition_rules_block_action() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="版权声明")
+    patch = _apply_condition_rules(chunk, [_BLOCK_RULE, _PASS_RULE])
+    assert patch is not None
+    assert patch["is_product_knowledge"] is False
+    assert patch["rule_tag"] == "test_block_copyright"
+    assert patch["risk_level"] == "high"
+
+
+def test_apply_condition_rules_pass_action() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="配置示例 OSPF")
+    patch = _apply_condition_rules(chunk, [_PASS_RULE])
+    assert patch is not None
+    assert patch["is_product_knowledge"] is True
+    assert patch["rule_tag"] == "test_pass_tech"
+
+
+def test_apply_condition_rules_disabled_rule_skipped() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="任意标题")
+    patch = _apply_condition_rules(chunk, [_DISABLED_RULE])
+    assert patch is None
+
+
+def test_apply_condition_rules_no_match_returns_none() -> None:
+    chunk = _accept_chunk("x" * 30, section_title="普通标题")
+    patch = _apply_condition_rules(chunk, [_BLOCK_RULE])
+    assert patch is None
+
+
+def test_run_quality_pipeline_condition_rule_blocks_chunk(tmp_path: Path) -> None:
+    kb = [_accept_chunk("content body " * 5, section_title="版权声明")]
+    (tmp_path / "knowledge_base.json").write_text(
+        json.dumps(kb, ensure_ascii=False), encoding="utf-8"
+    )
+    rules_data = {
+        "schema_version": "1.0",
+        "rules": [
+            {
+                "rule_id": "test_block_copyright",
+                "rule_version": "1.0",
+                "enabled": True,
+                "priority": 100,
+                "match_conditions": {"section_title_regex": "版权"},
+                "action": "block",
+                "override": {
+                    "quality_reason": "owner_rule:copyright",
+                    "risk_level": "high",
+                },
+            }
+        ],
+    }
+    (tmp_path / "_owner_quality_rules.json").write_text(
+        json.dumps(rules_data, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with patch(
+        "INAGENT.data_tools.quality_ingest.get_cli_graph_store",
+        return_value=None,
+    ):
+        result = run_quality_pipeline(reference_dir=tmp_path)
+
+    source_after = json.loads((tmp_path / "knowledge_base.json").read_text(encoding="utf-8"))
+    assert len(source_after) == 1
+    out_ref = json.loads(
+        (tmp_path / "_quality_reference_for_owner.json").read_text(encoding="utf-8")
+    )
+    assert out_ref == []
+    assert result.get("quality_gate_blocked") == 1
+    assert result.get("owner_rule_hook", {}).get("condition_rules_total") == 1
+    assert result.get("owner_rule_hook", {}).get("condition_rules_to_block") == 1
+    gate_lines = (
+        (tmp_path / "_quality_gate_for_owner.jsonl").read_text(encoding="utf-8").splitlines()
+    )
+    gate_item = json.loads(gate_lines[0])
+    assert gate_item.get("decision_source") == "owner_condition_rule"
+    assert gate_item.get("hook_rule_tag") == "test_block_copyright"

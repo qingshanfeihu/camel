@@ -4,10 +4,13 @@
 
 包含以下步骤：
 1. 采购流程：原始文档 → reference / knowledge_base.json
-2. 农民流程：reference 原始块 → 结构挂载 / schema_gaps
-3. 农场主流程：schema_gaps → 树结构裁决 / 图更新
-4. 质检流程：最终 knowledge_base / 导出物质量校验
+2. 质检流程：knowledge_base 质量门控，输出 owner 输入工件
+3. 农场主流程：消费质检门控 + schema_gaps，输出 farmer 决策工件
+4. 农民流程：仅执行农场主决策并维护 reference
 5. RAG 索引 (workforce_config_ops.py: initialize_rag_system)
+
+说明：步骤1-4的权威实现仅保留在
+`INAGENT/scripts/run_structured_ingest_pipeline.py`，本入口仅做委托调用。
 """
 import asyncio
 import logging
@@ -19,6 +22,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from INAGENT.utils import env_utils
+from INAGENT.scripts.run_structured_ingest_pipeline import (
+    run_structured_ingest_pipeline,
+)
 from INAGENT.workflow_config_generator import initialize_rag_system
 
 logger = logging.getLogger(__name__)
@@ -35,26 +41,17 @@ async def main():
     logger.info("开始初始化Pipeline - 完整的workflow基础流程")
     logger.info("=" * 80)
     
-    # 步骤1: 运行采购文档管线 procurement_ingest（仅采购阶段）
+    # 步骤1-4: 委托统一结构化入库入口（唯一权威实现）
     logger.info("")
-    logger.info("步骤1: 运行 procurement_ingest（采购：MinerU/Office/TXT → reference）")
-    logger.info("  - PDF识别和导入")
-    logger.info("  - MinerU提取内容")
-    logger.info("  - LLM提取metadata (product_module, protocol_type, step_type)")
-    logger.info("  - 基于功能结构索引增强metadata")
-    logger.info("  - 合并为knowledge_base.json（原始采购结果）")
+    logger.info("步骤1-4: 调用 run_structured_ingest_pipeline（唯一权威入口）")
     logger.info("")
-    
+
     try:
-        from INAGENT.data_tools.procurement_ingest import main as procurement_ingest_main
-        await procurement_ingest_main()
-        logger.info("[成功] 步骤1完成")
+        structured_result = await run_structured_ingest_pipeline()
+        logger.info("[成功] 步骤1-4完成: %s", structured_result)
     except Exception as e:
-        logger.error(f"[错误] 步骤1失败: {e}", exc_info=True)
+        logger.error(f"[错误] 步骤1-4失败: {e}", exc_info=True)
         raise
-    
-    logger.info("")
-    logger.info("步骤2-4需分别运行 farmer_ingest / farm_owner_ingest / quality_ingest")
 
     # 步骤5: RAG索引
     logger.info("")

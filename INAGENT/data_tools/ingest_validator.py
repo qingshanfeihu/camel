@@ -16,9 +16,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from INAGENT.rag.knowledge_schema import CAT_TO_LEVEL
-from INAGENT.utils.non_product_section_patterns import (
-    non_product_section_title_regex,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -140,13 +137,6 @@ class IngestValidator:
             self._report.rejected_short += 1
             return "reject", "heading_only"
 
-        # Rule 1c: NonProductContent — 法律文本/硬件安装/手册前言等非产品知识
-        if section_title and non_product_section_title_regex().search(
-            section_title
-        ):
-            self._report.rejected_excluded += 1
-            return "reject", "non_product_content"
-
         # Rule 2: TreePositionCheck — tree_position 必须存在且有效
         tp = meta.get("tree_position")
         if isinstance(tp, dict) and tp.get("tree_level"):
@@ -165,9 +155,21 @@ class IngestValidator:
                 }
                 self._report.tree_linked += 1
             else:
-                self._report.quarantined += 1
-                self._quarantine.append(chunk)
-                return "quarantine", "no_tree_position"
+                # 新契约：采购阶段不再决断 document_category，
+                # 质量门控为后续农场主裁决保留占位 tree_position。
+                source_file = str(meta.get("source_file") or "")
+                if source_file:
+                    meta["tree_position"] = {
+                        "tree_level": "branch",
+                        "linked_nodes": [],
+                        "confidence": 0.2,
+                        "knowledge_role": "quality_gate_placeholder",
+                    }
+                    self._report.tree_linked += 1
+                else:
+                    self._report.quarantined += 1
+                    self._quarantine.append(chunk)
+                    return "quarantine", "no_tree_position"
 
         # Rule 3: SimHash dedup
         h = _simhash(content[:500])

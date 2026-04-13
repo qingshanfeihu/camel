@@ -1,0 +1,87 @@
+{
+  "target_product": {
+    "name": "NSAE",
+    "full_name": "NSAE (InfosecOS) 负载均衡器",
+    "aliases": ["APV", "InfosecOS", "NSAE"],
+    "command_prefixes": [
+      "slb", "nat", "ha", "vlan", "interface", "ip", "route",
+      "acl", "firewall", "ssl", "http", "tcp", "udp",
+      "bandwidth", "qos", "monitor", "log", "snmp",
+      "aaa", "user", "admin", "system", "config",
+      "show", "clear", "debug", "no", "set"
+    ],
+    "product_modules": [
+      "SLB", "NAT", "高可用", "HA", "VLAN", "基础网络",
+      "安全", "SSL", "HTTP", "TCP/IP", "路由",
+      "访问控制", "防火墙", "带宽管理", "QoS",
+      "监控", "日志", "SNMP", "用户管理", "AAA",
+      "系统管理", "配置管理"
+    ],
+    "product_keywords": [
+      "NSAE", "APV", "InfosecOS", "负载均衡器",
+      "虚拟服务", "真实服务器", "健康检查",
+      "会话保持", "连接复用", "SSL卸载"
+    ]
+  },
+  "competitor_products": [
+    {
+      "name": "华为",
+      "aliases": ["Huawei", "华为技术", "HUAWEI"],
+      "command_prefixes": [
+        "display", "system-view", "interface gigabitethernet",
+        "vlan batch", "stp", "lacp", "ospf", "bgp",
+        "acl number", "firewall zone", "nat server",
+        "load-balance", "health-check", "server-map"
+      ],
+      "product_keywords": [
+        "华为", "Huawei", "eNSP", "VRP", "CloudEngine",
+        "S系列交换机", "AR系列路由器", "USG防火墙"
+      ]
+    },
+    {
+      "name": "思科",
+      "aliases": ["Cisco", "思科系统", "CISCO"],
+      "command_prefixes": [
+        "enable", "configure terminal", "interface fastethernet",
+        "router ospf", "router bgp", "access-list",
+        "ip nat", "ip route", "switchport", "vlan database",
+        "spanning-tree", "port-channel"
+      ],
+      "product_keywords": [
+        "思科", "Cisco", "IOS", "Catalyst", "Nexus",
+        "ASA", "ASR", "ISR"
+      ]
+    },
+    {
+      "name": "F5",
+      "aliases": ["F5 Networks", "BIG-IP"],
+      "command_prefixes": [
+        "tmsh", "create ltm", "modify ltm", "list ltm",
+        "create net", "modify net", "create sys",
+        "bigip", "ltm pool", "ltm virtual", "ltm node"
+      ],
+      "product_keywords": [
+        "F5", "BIG-IP", "LTM", "GTM", "ASM", "APM",
+        "iRules", "Virtual Server", "Pool Member"
+      ]
+    },
+    {
+      "name": "Citrix",
+      "aliases": ["Citrix NetScaler", "NetScaler", "ADC"],
+      "command_prefixes": [
+        "add lb", "set lb", "show lb", "add cs",
+        "add service", "add server", "bind lb",
+        "enable ns feature", "save ns config"
+      ],
+      "product_keywords": [
+        "Citrix", "NetScaler", "ADC", "MPX", "VPX",
+        "Content Switching", "Load Balancing"
+      ]
+    }
+  ],
+  "filter_rules": {
+    "min_target_score": 0.3,
+    "max_competitor_score": 0.2,
+    "comment": "如果 target_score < min_target_score 且 competitor_score > max_competitor_score，则判定为非目标产品"
+  }
+}
