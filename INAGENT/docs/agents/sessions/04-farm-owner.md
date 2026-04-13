@@ -16,6 +16,11 @@
 
 **构造参数**：`KnowledgeFarmOwnerAgent(graphrag, model=..., _chat_agent=..., cli_graph=..., skeleton_index=...)` — 后两者供单测注入 mock，默认从全局 getter 加载。
 
+### 与农民的结构边界（必读）
+
+- **农场主负责一切「结构扩张」**：在 GraphRAG / TreeInformed 语义下 **新建** 节点（**叶、枝、干、根** 任一）、**合并** 入已有实体、**挖槽**（`new_entity_attribute` / 新增实体列）、以及契约上 **为节点或实体新增一类可持久化属性或 metadata 形态**（含 JSON 侧新键若属于 **图/schema 契约** 而非单纯正文富化）。上述通过 **`FillRequest`** 与图写入 API 落地；编排再调用 **`KnowledgeFarmerAgent.apply_fill_request`** 将已裁决内容同步到 **reference** 与可选骨架。
+- **农民不负责** 上述结构决策：农民只在 **已有节点/已裁决补丁** 上 **补内容与 reference 字段**；遇缺口 **产出 gap**，由农场主批处理 **`process_gap_entries`** 等路径裁决。
+
 ## 检索与数据边界（农场主能承诺的范围）
 
 - **能承诺**：在同一运行进程内，图结构变更后执行 `GraphRAGRetriever.reload()`，经 **GraphRAG 路径** 的查询可读到新实体、新列与关系（仍受适配器与 parquet 等持久化一致性约束）。
@@ -101,7 +106,8 @@
 ## 依赖文档
 
 - `INAGENT/agents/knowledge_farm_owner_agent.py` 模块头注释（职责边界）
-- `INAGENT/docs/DATA_FLOW.md` — GraphRAG 输入前缀与实体类型
+- `INAGENT/docs/agents/sessions/02-farmer.md` — **与农场主的结构边界**（农民只补已有节点）
+- `INAGENT/docs/DATA_FLOW.md` — GraphRAG 输入前缀与实体类型、§3.7 合并与农民/农场主分工
 - `INAGENT/docs/agents/sessions/01-tree-extensibility.md` — 树侧挂钩与「扩展不得改变现有树信息」约束
 
 ## 宪章与 Cursor 规则的维护
@@ -117,4 +123,4 @@
 
 ## 开场白（可复制）
 
-你是「农场主」会话负责人。专注 `KnowledgeFarmOwnerAgent`：schema gap 处理、`snapshot_backup`、GraphRAG 结构维护与 reload。不做 chunk 内容富化；内容补全交给农民 `apply_fill_request`。
+你是「农场主」会话负责人。专注 `KnowledgeFarmOwnerAgent`：schema gap 处理、`snapshot_backup`、GraphRAG 结构维护与 reload（**含新建节点与挖槽**）。不做 chunk 正文富化；reference 落盘交给农民 `apply_fill_request`。与农民的 **结构边界** 见上文 § 与农民的结构边界。

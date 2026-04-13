@@ -108,6 +108,11 @@
 - **批次**：`KnowledgeFarmerAgent.cultivate_batch` 内部只处理 `accept`；建议整批先 `enrich_decisions_for_farmer` 再传入，或只传入 accept 子列表；**勿**依赖混批里非 accept 被农民处理。`chunk_index` 与输入批次序一致，利于去重。
 - **粒度**：附录大表/多命令同块易误匹配；系统提示中要求模型关注拆块与 `pending_review`；纯目录/版权等倾向 `reject`。
 
+### 农民与农场主（交接之后，非采购实现）
+
+- **采购** 只负责 chunk **准入**与 `enrich_*` 交接字段；**不**保证 GraphRAG 上已存在与正文对应的实体节点。
+- **新建** 任意层级产品图节点、**挖槽/新列/契约级 metadata** 由 **农场主** 经 `schema_gaps` / `FillRequest` 裁决与写图；**农民** 仅在 **已有节点** 上富化并 `write_to_reference`，**执行** 已下发的 `FillRequest`（详见 [`02-farmer.md`](02-farmer.md) § 与农场主的结构边界、[`04-farm-owner.md`](04-farm-owner.md) § 与农民的结构边界）。
+
 ### 仓库内调用方示例（需在农民前 enrich）
 
 - `INAGENT/scripts/sim_ircookie_farmer.py`
@@ -123,6 +128,7 @@
 
 - `INAGENT/rag/knowledge_config.py` — `DOCUMENT_CATEGORIES`
 - `INAGENT/docs/DATA_FLOW.md` — L0 元数据
+- `INAGENT/docs/agents/sessions/02-farmer.md` / `04-farm-owner.md` — 农民/农场主 **结构边界**（采购不实现）
 
 ## 开场白（可复制）
 

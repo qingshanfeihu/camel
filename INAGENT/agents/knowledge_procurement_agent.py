@@ -45,6 +45,7 @@
 农民交接：enrich_chunk_decision_for_farmer / enrich_decisions_for_farmer / filter_accepted
   浅拷贝 chunk；非空 suggested_value → metadata.suggested_value；在 DOCUMENT_CATEGORIES 内则写 document_category；
   source_file 与 ChunkDecision 对齐。不截断正文、不删入库元数据（含 MinerU/规则阶段字段）。
+  accept **不**表示 GraphRAG 已有对应实体；**新建图节点/挖槽** 由农民上报 gap、农场主裁决（见 03/02/04 宪章「结构边界」）。
 
 SchemaGapType 含 new_entity / new_entity_attribute：当前 L3 仅产生 new_category、new_module。
 

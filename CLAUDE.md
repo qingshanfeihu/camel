@@ -44,6 +44,7 @@ llm_gateway/                # LLM Gateway (多模型路由, :9000/v1)
 - `INAGENT/workforce_pipeline.py` — Workforce multi-agent pipeline
 - `llm_gateway/start.py` — 启动 LLM Gateway
 - 知识库会话宪章（含 **质检员**）：`INAGENT/docs/agents/sessions/07-quality-inspector.md`；实现：`INAGENT/agents/knowledge_quality_inspector_agent.py`；Cursor：`.cursor/rules/kb-session-quality-inspector.mdc`
+- 入库 **农民 vs 农场主** 结构边界（已有节点补信息 vs 新建节点/挖槽）：`INAGENT/docs/agents/sessions/02-farmer.md`、`04-farm-owner.md` 同名小节；`DATA_FLOW.md` §3.7 有简述。
 
 ## Development
 

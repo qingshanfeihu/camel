@@ -39,7 +39,8 @@ reload → merge_knowledge_base → refresh_hybrid_vector_index（默认 hybrid_
 推荐顺序：所有目标 ``write_to_reference`` 完成 **早于** 带 ``refresh_hybrid_vectors=True``
 的农场主步骤（见 ``INAGENT/docs/agents/sessions/04-farm-owner.md``、``DATA_FLOW.md`` §3.7）。
 
-仅做图结构维护，不做 chunk 内容富化（农民的职责）。
+仅做图结构维护（含新建实体/任意层级节点、挖槽与列），不做 chunk 内容富化（农民的职责）。
+与农民分工：农民只在已有节点上富化并 apply_fill_request；凡需扩张树或新槽位均由本 Agent 裁决。见 04-farm-owner.md § 与农民的结构边界。
 
 职责变更时请同步：INAGENT/docs/agents/sessions/04-farm-owner.md、
 .cursor/rules/kb-session-farm-owner.mdc 与 kb-session-farm-owner-anchor.mdc。

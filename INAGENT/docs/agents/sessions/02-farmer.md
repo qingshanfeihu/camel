@@ -6,6 +6,12 @@
 
 **枝干场景加肉**：农场主 **`cultivate_scenarios()`** 写出 **`reference/scenarios_scaffold.json`**；农民 **`enrich_scenario_nodes()`** 读该文件，用 LLM 生成 **`reference/scenarios_synthesized.json`**（`scenario/guide` / `module/guide` / `product/guide`）。编排入口示例：`INAGENT/scripts/run_scenario_cultivation.py`。CLI **叶**仍以 **`cultivate_batch`** + 骨架为准。
 
+### 与农场主的结构边界（必读）
+
+- **农民只负责「在已有节点上」补信息与正文**：`cultivate_batch` 富化与骨架对齐、`update_skeleton` 在 **已匹配** 的骨架条目中补字段、`apply_fill_request` 把 **农场主已产出** 的 `FillRequest` 合并进 **reference**（及 `kb_path` 命中时的骨架项）。语义上是对 **现成 `tree_node_id` / `node_id` 所指对象** 做内容侧补充，**不扩张** GraphRAG 上的树/图结构。
+- **凡需「新增树或图上的节点」**（叶、枝、干、根任一层级），或 **节点上新增一类持久化槽位**（例如 GraphRAG **新实体/新列**、`new_entity_attribute` 挖槽，或契约上 **新增** 一类 chunk / 骨架 **metadata** 形态），**一律由农场主裁决并写图**（`tree_create_*`、`merge_into_existing`、`add_entity_columns` 等路径）；农民 **只执行** 农场主随 `FillRequest` 下发的落盘，**不得**在未获裁决时自行创节点、自行加列或自定新槽语义。
+- 遇 **ambiguous_match / overflow / new_entity** 等需结构决策时，农民 **上报 gap**，等待农场主 `FillRequest`；**禁止**为「省事」在 reference 里伪造未裁决的图身份。
+
 ## 范围（应改）
 
 - `INAGENT/agents/knowledge_farmer_agent.py`
@@ -77,6 +83,7 @@
 ## 依赖文档
 
 - `INAGENT/rag/knowledge_schema.py` — `FillRequest`、`SchemaGapEntry`（含 `ambiguous_match`、`ambiguous_candidates`）、`TreeMutation`（若农民消费）
+- `INAGENT/docs/agents/sessions/04-farm-owner.md` — **与农民的结构边界**（新建节点/挖槽归农场主）
 - `INAGENT/docs/DATA_FLOW.md` — L0 / L1、§3.7 合并顺序与回填后再 merge
 - `INAGENT/docs/agents/farmer-design.md` — 农民设计详版
 - `INAGENT/docs/agents/sessions/01-tree-extensibility.md` — 树侧挂钩；**扩展不得破坏现有 CLI 树信息**
@@ -88,4 +95,4 @@
 
 ## 开场白（可复制）
 
-你是「农民」会话负责人。专注 `KnowledgeFarmerAgent`：`cultivate_batch`、`enrich_scenario_nodes`、`write_to_reference`、`update_skeleton`、`emit_schema_gaps`、**`apply_fill_request`（FillRequest → reference + 可选骨架）**。不修改 `KnowledgeFarmOwnerAgent` / `KnowledgeProcurementAgent` 内决策逻辑；接口变更需写明契约并尽量小步 PR。
+你是「农民」会话负责人。专注 `KnowledgeFarmerAgent`：`cultivate_batch`、`enrich_scenario_nodes`、`write_to_reference`、`update_skeleton`、`emit_schema_gaps`、**`apply_fill_request`（FillRequest → reference + 可选骨架）**。**不擅自新建图节点或挖槽**（归农场主）；不修改 `KnowledgeFarmOwnerAgent` / `KnowledgeProcurementAgent` 内决策逻辑；接口变更需写明契约并尽量小步 PR。

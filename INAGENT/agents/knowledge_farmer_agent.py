@@ -21,6 +21,8 @@
   4. 执行农场主已产出的 FillRequest：apply_fill_request 批量合并到 reference/*.json（及 kb_path 存在时的骨架 node_id 命中项），不自动 merge、不刷向量
   5. enrich_scenario_nodes：读农场主产出的 scenarios_scaffold，LLM 写 scenarios_synthesized（与 cultivate_batch 批处理路径分离）
 
+结构边界：仅给 **已有** 树/图挂载点补信息与 reference；**新建** 叶/枝/干/根节点、**挖槽/新列** 由农场主裁决（gap / FillRequest），农民不擅自扩张 GraphRAG 结构。见 docs/agents/sessions/02-farmer.md § 与农场主的结构边界。
+
 `auto_convert` 模块中的 **提取函数**（如 `_extract_chunk_metadata`）是农民结构化工具；**原始文档批处理（MinerU 等）** 属采购，入口为 `procurement_ingest.main`。
 
 持久化：
@@ -422,8 +424,9 @@ class KnowledgeFarmerAgent:
                         enriched.append(k)
                 gaps.extend(diff_gaps)
 
-                # Shadow new_entity: block 的 command_prefix 比匹配到的 CT 节点
-                # 更具体（子命令），且 content 含参数标记 → 需要创建 new_leaf
+                # Shadow new_entity: command_prefix 比匹配到的 CT 节点更具体（子命令），
+                # 且正文含参数形态 → 上报 new_entity，由农场主裁决是否新建叶/关系。
+                # 宪章：农民不预写 tree_level / tree_position（扩树归农场主）。
                 _sne_cp = str(meta.get("command_prefix") or "").strip()
                 _sne_tokens = _sne_cp.split()
                 if (
@@ -458,24 +461,6 @@ class KnowledgeFarmerAgent:
                             chunk_content=content[:500],
                             chunk_block_id=str(meta.get("block_id", "")),
                         ))
-                        # shadow new_entity 是纯规则判断，直接写 tree_level=new_leaf
-                        # 无需等待农场主 LLM 决策（需_tree_session 路径永远不回写）
-                        meta["tree_level"] = "new_leaf"
-                        meta["document_category"] = "cli/reference"
-                        _tp = meta.get("tree_position")
-                        if isinstance(_tp, dict):
-                            _tp["tree_level"] = "new_leaf"
-                            _tp["knowledge_role"] = "command_ref"
-                        else:
-                            meta["tree_position"] = {
-                                "tree_level": "new_leaf",
-                                "linked_nodes": [matched_node_id] if matched_node_id else [],
-                                "confidence": 0.8,
-                                "knowledge_role": "command_ref",
-                            }
-                        for _fk in ("tree_level", "document_category", "tree_position"):
-                            if _fk not in enriched:
-                                enriched.append(_fk)
             else:
                 for fname in ("product_module", "protocol_type", "intent",
                               "config_mode", "description"):
@@ -1088,6 +1073,9 @@ class KnowledgeFarmerAgent:
 
         Batched I/O: reads each JSON file once, applies all matching patches in memory,
         writes once. O(files × items + requests) instead of O(requests × files × items).
+
+        ``create_slot`` requests must be produced by :class:`KnowledgeFarmOwnerAgent`
+        (or equivalent orchestration); this method only performs reference I/O.
         """
         ref_dir = ref_dir or _REFERENCE_DIR
         kb_path = kb_path or _KB_PATH
@@ -1244,6 +1232,7 @@ class KnowledgeFarmerAgent:
         return count
 
     def _apply_create_slot(self, req: FillRequest, ref_dir: Path) -> int:
+        """Append one reference chunk for an existing ``tree_node_id`` (FO decision only)."""
         template = req.new_node_template
         if not isinstance(template, dict):
             return 0

@@ -16,6 +16,7 @@
 
 - **树会话裁定**：**仅** CLI 结构真相源（`command_tree` XML → 图 → 骨架叶子）及与农民 **`kb_index` / `_match_tree_node` 契约** 一致的数据形态。
 - **树会话不裁定**：某份产品 spec、架构文档、Bug 叙事在知识本体里算「根 / 枝 / 叶」——那是 **农民 + 农场主**（含元数据、GraphRAG、`artifact_links` 等）的塑形问题。
+- **与农民 / 农场主分工**：CLI **拓扑与 `node_id` 真相源** 由树会话维护；**在 CLI 叶之上新建 GraphRAG 实体、挖槽、产品树层级** 归 **农场主**；农民 **只匹配已有叶并富化**。细则见 [`02-farmer.md`](02-farmer.md)、[`04-farm-owner.md`](04-farm-owner.md) 中的 **结构边界** 小节。
 - **橡皮泥**：树提供 **可扩展载体**（图节点可选字段、`skeleton_index` 的 `artifacts` / `artifact_links`、稳定 `node_id` / `command_prefix` 等），供上层 **可选挂载**；详见 [01-tree-extensibility.md](01-tree-extensibility.md)。
 - **非破坏性扩展**（强制）：任何「扩展」**不得在无显式、可回滚的重建/迁移流程下** 改变已有树的 **`node_id`、拓扑边、骨架块契约字段**；默认 **叠加、可选、向后兼容**。细则见 `01-tree-extensibility.md` §0。
 

@@ -7,19 +7,18 @@
 
 ## 1. 角色定位
 
-**农民（Farmer）** 是知识加工流水线中位于「采购员（Procurement）」之后、「农场主（FarmOwner）」之前的执行层。
+**农民（Farmer）** 是知识加工流水线中位于「采购员（Procurement）」之后、**农场主 GraphRAG 结构裁决** 并列协作的执行层：首轮 **`cultivate_batch`** 富化 chunk、匹配骨架并 **上报 gap**；后续按编排 **`apply_fill_request`** 将 **农场主已产出** 的 **`FillRequest`** 落盘到 reference。**结构扩张决策**（新建节点/挖槽）不在农民（见下节与 [`sessions/02-farmer.md`](sessions/02-farmer.md) § 与农场主的结构边界）。
 
 核心职责：
 - 对采购员放行（`accept`）的裸 chunk 做结构化元数据补全
-- 将 chunk 匹配到知识骨架（`knowledge_base.json`）叶节点
-- 逐字段 diff，将可对齐部分记入待写路径；冲突 / 溢出 / 无匹配上报为 `SchemaGapEntry`；可选 **`update_skeleton`** 写回骨架正文小节（`[说明]`、`参数:`、`语法:`、`相关操作:`）
-- 按编排调用执行农场主已产出的 **`FillRequest`**：**`apply_fill_request`** 以 **reference 内 chunk `metadata` 为主**批量合并，骨架仅在 `kb_path` 存在且 `node_id` 命中时同步
+- 将 chunk 匹配到知识骨架（`knowledge_base.json`）**已有**叶节点（无匹配 / 歧义 / 溢出则 **上报 gap**，不自创图节点）
+- 逐字段 diff，将可对齐部分记入待写路径；冲突 / 溢出 / 无匹配上报为 `SchemaGapEntry`；可选 **`update_skeleton`** 在 **已匹配** 条目中写回骨架正文小节（`[说明]`、`参数:`、`语法:`、`相关操作:`）
+- 按编排调用执行农场主已产出的 **`FillRequest`**：**`apply_fill_request`** 以 **reference 内 chunk `metadata` 为主**批量合并，骨架仅在 `kb_path` 存在且 `node_id` 命中时同步（含农场主决策的 `create_slot` 等，农民 **只落盘**）
 
-**不属于农民的工作**：
-- 创建骨架新节点（农场主负责）
-- 修改 GraphRAG 结构（农场主负责）
-- 修改采购决策逻辑（采购员负责）
-- 修改树拓扑 / `node_id`（树会话负责）
+**结构边界（与 [`sessions/04-farm-owner.md`](sessions/04-farm-owner.md) 对读）**：
+- **农民**：仅在 **已有树/图挂载点** 上补信息与 reference；**不**自行 **新建** GraphRAG 实体（叶/枝/干/根任一层级）、**不**自行 **挖槽/新列** 或定义新的契约级 metadata 形态。
+- **农场主**：**新建节点、merge、add_entity_columns、`tree_create_*` 等** 图侧结构与槽位裁决；农民通过 gap 与 **`FillRequest`** 承接结果。
+- **不属于农民的工作**：修改采购决策（采购员）；**未裁决时**改 GraphRAG 拓扑或实体 schema（农场主）；CLI **真相源树** 拓扑与 `node_id` 变更（树会话，见 [`sessions/01-tree.md`](sessions/01-tree.md)）。
 
 ---
 

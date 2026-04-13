@@ -14,7 +14,8 @@ alwaysApply: false
 
 ## 核心契约（摘要）
 
-- **流程位置**：采购落盘 → 质检（导出契约）→ 通过后农民；质检失败 **退回采购侧或 harness**，**不是**默认转农场主（农场主管农民 gap，见 `07` 流程图）。
+- **产品语义**：采购 → **挡非产品知识（不入树）** → 农场主映射树 → 农民维护 → 操作树（见 `07` 主流程图）。
+- **QI Agent**：采购落盘后的 **导出契约/回归**；失败 **退回 harness**，与「丢弃不入树」不同层。
 - `accepted_for_farmer.json` 须与 `filter_accepted(enrich_decisions_for_farmer(...))` 语义一致；保留全局 **`chunk_index`**，勿用仅 accept 列表的 0..N-1 冒充全量下标（除非 harness 显式约定）。
 - 全链路顺序见 [`DATA_FLOW.md`](INAGENT/docs/DATA_FLOW.md) 与 [`04-farm-owner.md`](INAGENT/docs/agents/sessions/04-farm-owner.md)。
 

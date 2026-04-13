@@ -572,7 +572,7 @@ class TestSkeletonDiff:
         assert any(g.field_name == "scenario_id" for g in overflow_gaps)
 
     def test_unmatched_multi_token_cmd_gets_new_entity(self):
-        # 多 token ASCII 命令 → new_entity gap（Phase A: new_leaf 通用方案）
+        # 多 token ASCII 命令 → new_entity gap（树层级由农场主裁决，农民不预写）
         agent = _make_agent(ac_metas=[{"command_prefix": "new cmd", "description": "new"}])
         agent._skeleton = {}
         agent._kb_index = {}

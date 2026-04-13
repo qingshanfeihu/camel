@@ -386,6 +386,8 @@ RRF 融合后每条结果:
 | 合并小文件 | `merge_knowledge_base(reference_dir, knowledge_base.json)` | 将 `reference/*.json` 聚合成检索用的 `knowledge_base.json` |
 | 可选一键 | `KnowledgeFarmOwnerAgent.process_gap_entries(..., refresh_hybrid_vectors=True)` | 在 GraphRAG `reload()` **之后**，对**当时磁盘上**的 `reference/*.json` 执行上表合并，再 `refresh_hybrid_vector_index` |
 
+**农民 vs 农场主（结构）**：**新建** GraphRAG 实体/任意层级树节点、**挖槽/新列/契约级 metadata** 由 **农场主** 裁决与写图；**农民** 在 **已有挂载点** 上富化、`write_to_reference` 并 **执行** 已产出的 `FillRequest`。见 `docs/agents/sessions/02-farmer.md`、`04-farm-owner.md` 中 **结构边界**。
+
 **隐患（非数据污染类 bug）**：若 E2E 在「农场主且 `refresh_hybrid_vectors=True`」**之后**再执行 `write_to_reference`，则除非编排再次 `merge_knowledge_base` + `refresh_hybrid_vector_index`（或等价重建），混合检索仍看不到新 chunk。农场主路径**已**在开启该开关时前置合并，但**不能**替代「农民写分片 → 合并 → 刷向量」在时间与调用顺序上的完整闭环。
 
 **推荐顺序**（与 `scripts/test_ircookie_e2e.py` 文档串一致）：农民 `write_to_reference` → `merge_knowledge_base` → 农场主 `process_gaps` / `process_gap_entries`（若需向量一致再开 `refresh_hybrid_vectors`）→ 若仍有农民回填写 reference，则再 merge + 刷新向量。
@@ -784,7 +786,8 @@ jobs/test_review/{Bug ID}/output_{version}/{Bug ID}_review/
 
 入库与评审主链路以外，**质检员**会话（[`docs/agents/sessions/07-quality-inspector.md`](agents/sessions/07-quality-inspector.md)）负责 **可回归性与导出契约**，不替代采购/农民/农场主实现。代码入口：`INAGENT/agents/knowledge_quality_inspector_agent.py` 中的 **`KnowledgeQualityInspectorAgent`**（如 `validate_procurement_export`）。
 
-- **流程位置**：采购落盘 → **质检**（契约/回归）→ 通过后再进入农民；**质检不通过**应 **退回采购侧或修正 harness 后重跑**，与农民之后 **农场主对 gap 的裁决** 是两条不同路径（详见 07 节「入库链路流程」示意）。
+- **产品语义顺序**（挡非产品知识 → 农场主映射树 → 农民维护 → 操作树）：见 [`07-quality-inspector.md`](agents/sessions/07-quality-inspector.md)「入库链路流程（产品语义）」。
+- **工程回归链**：采购落盘 → **`KnowledgeQualityInspectorAgent`**（导出契约/模式冒烟）→ 通过后再进入农民；**QI 不通过** 应 **退回采购侧或修正 harness**，与 **农场主对 gap 的裁决** 不是同一条失败路径。
 - **test_data 导出**：`accepted_for_farmer.json` 等产物应对齐 `KnowledgeProcurementAgent.filter_accepted`（含 `enrich_chunk_decision_for_farmer`）的语义；保留采购侧 **`chunk_index`**（全局下标），避免仅用 accept 子列表的 0..N-1 冒充全量批次（除非 harness 显式约定）。
 - **全链路顺序**：农民 `write_to_reference` → `merge_knowledge_base`（若需要）→ 农场主 `process_gap_entries` 等与向量刷新顺序，以 [`04-farm-owner.md`](agents/sessions/04-farm-owner.md) 与 E2E 脚本注释为准；质检推动检查项与文档一致。
 

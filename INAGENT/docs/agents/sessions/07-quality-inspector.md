@@ -4,30 +4,31 @@
 
 你是 **「质检员」会话** 负责人。对知识入库链路做 **质量保障与可回归性**：金标与抽检、离线回归、`test_data` / 决策快照与 **`KnowledgeProcurementAgent` API 语义** 的一致性校验、指标与人机对齐流程；可选消费检索侧评测结果作为上游反馈。**不**替代采购三层决策的实现、**不**写入 GraphRAG、**不**修改 CLI 命令树拓扑与骨架契约。
 
-## 入库链路流程（示意）
+## 入库链路流程（产品语义）
 
-质检员站在 **采购落盘之后、农民消费 accept 之前**：只校验 **导出契约与自检**（如 `decisions.json` 与 `accepted_for_farmer.json` 对齐、`summary` 计数、`non_product_section_patterns` 冒烟）。**不通过**表示契约或 harness 有误，应 **退回采购侧或修正导出脚本后重跑**，**不是**把业务问题交给农场主裁决。农民之后的 **农场主** 路径对应 **schema gap / 结构写入**，与质检失败路径相互独立。
+目标顺序：**先挡住非产品知识，再谈树与写入**。采购员产出带结构的 chunk 与元数据（如 `source_file`、`section_title` 等）后，由 **质检** 判定 **是否为产品知识**；**否** 则 **丢弃、不入树**。**是** 则由 **农场主** 判定知识与 **操作树** 的对应关系并补齐 `document_category`、`product_module`、`tree_level` / 挂载等属性，再由 **农民** 按农场主约束 **维护树侧内容与 reference**，最后进入 **操作树**（merge、骨架、索引等）直至结束。
 
 ```mermaid
 flowchart TD
   S([开始])
-  P[采购员<br/>L0-L3 筛查 / 写 decisions 与日志]
-  Q{质检员<br/>导出契约与回归自检}
-  R[退回：修正导出或 harness<br/>重跑采购写盘]
-  F[农民<br/>cultivate / reference]
-  FO[农场主<br/>gap 裁决 / GraphRAG 与树侧写入]
-  T[操作树与合并产物<br/>merge / 骨架 / 索引]
+  P[采购员<br/>格式化与 chunk 元数据 / 基础结构]
+  Q{质检员<br/>是否为产品知识}
+  D[丢弃不入树]
+  FO[农场主<br/>知识与树的对应关系、属性与挂载]
+  FM[农民<br/>按农场主要求维护树与 reference]
+  T[操作树<br/>merge / 骨架 / GraphRAG 等]
   E([结束])
 
   S --> P --> Q
-  Q -->|通过| F
-  Q -->|不通过| R
-  R --> P
-  F --> FO
-  F --> T
-  FO --> T
-  T --> E
+  Q -->|否| D
+  Q -->|是| FO --> FM --> T --> E
 ```
+
+### 与当前实现的分工（避免混淆）
+
+- **「是否产品知识」**：主要由 **采购** `KnowledgeProcurementAgent`（L0–L3）、merge 侧 **`ingest_validator`**、以及 **`non_product_section_patterns`**（标题/正文关键词）与农场主侧启发式等 **共同实现**；判定为废料或非知识的 chunk **不应** 进入农民 cultivate 主路径。
+- **`KnowledgeQualityInspectorAgent`**：**不替代** 上述业务筛查；负责 **导出契约与回归**（如 `decisions.json` 与 `accepted_for_farmer.json` 对齐、`summary` 计数、`validate_non_product_knowledge_patterns` 模式集冒烟）。**不通过** 通常表示 **harness 或写盘逻辑漂移**，应 **退回修正后重跑采购落盘**，与「丢弃不入树」是不同层面的失败。
+- **工程管线里** 常见顺序仍是：采购跑批并落盘 →（可选）跑 QI 校验脚本 → 再交给农民；**产品语义**上「质检挡非产品知识」已在采购阶段完成绝大部分判定，QI 代码侧侧重 **可回归性**。
 
 ## 实现摘要（与 `knowledge_quality_inspector_agent.py` 同步）
 
@@ -70,6 +71,8 @@ flowchart TD
 | **树** | `kb_index`、骨架与 `_match_tree_node` 消费契约的 **契约测试** | 不改 `node_id` 与拓扑 |
 | **销售员 / 混合搜索** | 可选：将检索置信度、bad case 回流为入库或标注优先级 | 不改 Router/UnifiedRAG 核心实现 |
 
+**结构边界（农民 vs 农场主）**：新建任意层级节点、挖槽/新列/契约级 metadata 由 **农场主** 裁决与写图；**农民** 只在 **已有节点** 上补信息与执行已下发的 `FillRequest`。见 [`02-farmer.md`](02-farmer.md)、[`04-farm-owner.md`](04-farm-owner.md) 对应小节。
+
 ## 交付物（建议）
 
 - **回归检查清单**（可置于团队 wiki 或本文后续附录）：采购跑批 → 导出对齐 → 农民写 reference → 农场主 gap（顺序见 `DATA_FLOW`）
@@ -86,7 +89,7 @@ flowchart TD
 
 ## 开场白（可复制）
 
-你是「质检员」会话负责人。使用 **`KnowledgeQualityInspectorAgent`** 等工具专注入库链路的 **可回归性与数据一致性**：金标、抽检、`test_data` 与 `filter_accepted` 对齐、采购日志字段校验；可对 reference 与报告做 **只读** diff/指标。不实现采购/农民/农场主/树的核心业务逻辑；不直接改 GraphRAG 与 CLI 树。
+你是「质检员」会话负责人。上文 **产品语义流程**（先挡非产品知识、再农场主映射、农民维护）用于与各会话对齐叙事；**`KnowledgeQualityInspectorAgent`** 则专注 **可回归性与导出契约**（`decisions`/`accepted`、摘要、模式集冒烟等）。使用 QI 工具做金标、抽检、`test_data` 与 `filter_accepted` 对齐、采购日志字段校验；可对 reference 与报告做 **只读** diff/指标。不实现采购/农民/农场主/树的核心业务逻辑；不直接改 GraphRAG 与 CLI 树。
 
 ## 宪章维护（持久化与同步）
 

@@ -25,7 +25,7 @@ alwaysApply: true
 
 ## 与农民
 
-交 `cultivate_batch` 前必须 enrich；正文完整；accept-only 语义；`staging` 只做 gap 线索，结构裁决归农场主。
+交 `cultivate_batch` 前必须 enrich；正文完整；accept-only 语义；`staging` 只做 gap 线索，结构裁决归农场主。accept **不**表示 GraphRAG 已有对应实体；**新建节点/挖槽** 见 `02`/`04` 结构边界（采购不实现）。
 
 ## 宪章同步
 

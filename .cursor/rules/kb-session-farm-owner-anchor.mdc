@@ -11,6 +11,6 @@ alwaysApply: true
 - **实现细节摘要**：[`kb-session-farm-owner.mdc`](kb-session-farm-owner.mdc)（编辑农场主相关文件时务必遵守）。
 - **宪章同步义务**：在后续开发中若农场主职责有 **增、删、改**，须 **同一 PR（或紧随其后的提交）** 同步更新：`04-farm-owner.md`、本锚点（若一句话职责变化）、`kb-session-farm-owner.mdc`，必要时更新 `knowledge_farm_owner_agent.py` 模块头注释。
 
-不做 chunk 内容富化；内容侧交给农民 `apply_fill_request`。
+不做 chunk 内容富化；内容侧交给农民 `apply_fill_request`。**新建节点（任意层级）、挖槽/新列/契约级 metadata** 归农场主；农民只给已有节点补信息（见 `04` § 与农民的结构边界）。
 
 **检索**：图侧依赖 **`reload()`**；混合向量可另选 **`process_gap_entries(..., refresh_hybrid_vectors=True)`** 或编排 **`merge_knowledge_base` + `refresh_hybrid_vector_index()`**。**Qdrant 仅全量或指纹模式，无按条增量**（见 `04-farm-owner.md` § 给混合搜索）。农民写 reference 与 merge 顺序见宪章。
