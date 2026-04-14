@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-04-13T12:57:23.456352+00:00",
+  "from_inbox": "",
+  "proposal_count": 3,
+  "proposals": [
+    {
+      "aggregated_from_feedback_ids": [
+        "product_mismatch_cisco_knowledge.json_cisco_001"
+      ],
+      "support_count": 1,
+      "suggested_rule": {
+        "competitor": "思科",
+        "confidence": 0.30952380952380953,
+        "type": "competitor_pattern"
+      },
+      "conflict_note": null
+    },
+    {
+      "aggregated_from_feedback_ids": [
+        "product_mismatch_huawei_knowledge.json_huawei_001"
+      ],
+      "support_count": 1,
+      "suggested_rule": {
+        "competitor": "华为",
+        "confidence": 0.17602040816326534,
+        "type": "competitor_pattern"
+      },
+      "conflict_note": null
+    },
+    {
+      "aggregated_from_feedback_ids": [
+        "product_mismatch_huawei_knowledge.json_huawei_002"
+      ],
+      "support_count": 1,
+      "suggested_rule": {
+        "competitor": "华为",
+        "confidence": 0.18877551020408165,
+        "type": "competitor_pattern"
+      },
+      "conflict_note": null
+    }
+  ],
+  "conflicts": []
+}

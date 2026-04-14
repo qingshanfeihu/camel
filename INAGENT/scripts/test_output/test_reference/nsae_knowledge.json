@@ -1,0 +1,22 @@
+[
+  {
+    "page_content": "使用 slb virtual-server 命令配置虚拟服务器。支持 TCP/UDP 协议。",
+    "metadata": {
+      "source_file": "nsae_knowledge.json",
+      "block_id": "nsae_001",
+      "section_title": "SLB虚拟服务器配置",
+      "source": "NSAE_manual_v1.0.pdf",
+      "page": 42
+    }
+  },
+  {
+    "page_content": "配置 NAT 规则，支持源地址转换和目的地址转换。",
+    "metadata": {
+      "source_file": "nsae_knowledge.json",
+      "block_id": "nsae_002",
+      "section_title": "NAT配置",
+      "source": "NSAE_manual_v1.0.pdf",
+      "page": 58
+    }
+  }
+]

@@ -1,28 +1,31 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-"""农场主独立流程：消费 schema gaps，执行树结构裁决与图更新。"""
+"""农场主独立流程：质量门控后的通过项增强与销售员交接。"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import asdict
 import json
 import logging
-import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import fields as dc_fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from INAGENT.agents.knowledge_farm_owner_agent import KnowledgeFarmOwnerAgent
-from INAGENT.rag.graphrag_integration import GraphRAGRetriever
-from INAGENT.rag.knowledge_schema import FarmOwnerReport, FillRequest, SchemaGapEntry
+from INAGENT.data_tools.quality_feedback_loop import (
+    FEEDBACK_INBOX_SCHEMA_VERSION,
+    QUALITY_RULE_PROPOSALS_FILE,
+    build_rule_proposals_from_inbox,
+    feedback_gate_key,
+)
+from INAGENT.rag.knowledge_schema import FillRequest, SchemaGapEntry
 from INAGENT.utils.env_utils import load_inagent_env
-from INAGENT.web.deps import get_llm_model
 
 logger = logging.getLogger("farm_owner_ingest")
 _INAGENT_ROOT = Path(__file__).resolve().parent.parent
 _REFERENCE_DIR = _INAGENT_ROOT / "knowledge_base" / "reference"
-_GRAPH_DIR = _INAGENT_ROOT / "graphrag_index"
 _QUALITY_GATE_FILE = "_quality_gate_for_owner.jsonl"
 _QUALITY_REFERENCE_FOR_OWNER_FILE = "_quality_reference_for_owner.json"
 _OWNER_DECISIONS_FILE = "_owner_decisions_for_farmer.jsonl"
@@ -238,44 +241,14 @@ def _build_quality_passed_llm_patches(
     return patches
 
 
-def _build_quality_passed_classification(
-    owner: KnowledgeFarmOwnerAgent,
-    chunks: List[Dict[str, object]],
-) -> Dict[str, FillRequest]:
-    if not chunks:
-        return {}
-
-    report = FarmOwnerReport()
-    requests = owner.classify_uncovered_chunks(chunks, report)
-    block_id_to_source = _build_block_id_to_source(chunks)
-    by_key: Dict[str, FillRequest] = {}
-    for request in requests:
-        block_id = str(request.target_block_id or "")
-        if not block_id:
-            continue
-        source_file = ""
-        if isinstance(request.chunk_meta_patch, dict):
-            source_file = str(request.chunk_meta_patch.get("source_file") or "")
-        if not source_file:
-            source_file = str(block_id_to_source.get(block_id) or "")
-        if not source_file:
-            continue
-        by_key[f"{source_file}::{block_id}"] = request
-    return by_key
-
-
 def _build_passthrough_decisions(
     gate: Dict[str, Dict[str, object]],
     passed_chunks: List[Dict[str, object]],
-    owner: KnowledgeFarmOwnerAgent,
 ) -> tuple[List[Dict[str, object]], Dict[str, int]]:
     rows: List[Dict[str, object]] = []
     llm_patches = _build_quality_passed_llm_patches(passed_chunks)
-    classification = _build_quality_passed_classification(owner, passed_chunks)
 
     llm_enhanced = 0
-    classified = 0
-    discarded = 0
     for chunk in passed_chunks:
         meta = chunk.get("metadata") or {}
         if not isinstance(meta, dict):
@@ -299,15 +272,6 @@ def _build_passthrough_decisions(
             llm_enhanced += 1
 
         action = "merge_into_existing"
-        class_req = classification.get(key)
-        if class_req is not None:
-            action = str(class_req.action or action)
-            if isinstance(class_req.chunk_meta_patch, dict):
-                chunk_meta_patch.update(class_req.chunk_meta_patch)
-            classified += 1
-            if action == "discard":
-                discarded += 1
-
         rows.append(
             {
                 "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
@@ -326,13 +290,13 @@ def _build_passthrough_decisions(
         )
     return rows, {
         "llm_enhanced": llm_enhanced,
-        "classified": classified,
-        "discarded": discarded,
+        "classified": 0,
+        "discarded": 0,
     }
 
 
 def _infer_source_file_for_request(
-    req,
+    req: FillRequest,
     gate: Dict[str, Dict[str, object]],
     block_id_to_source: Dict[str, Optional[str]],
 ) -> str:
@@ -356,13 +320,14 @@ def _infer_source_file_for_request(
 def _write_owner_decisions(
     reference_dir: Path,
     passthrough_rows: List[Dict[str, object]],
-    report,
+    deferred_rows: List[Dict[str, object]],
     gate: Dict[str, Dict[str, object]],
 ) -> Path:
     out_file = reference_dir / _OWNER_DECISIONS_FILE
     lines: List[str] = []
 
     lines.extend(json.dumps(row, ensure_ascii=False, default=str) for row in passthrough_rows)
+    lines.extend(json.dumps(row, ensure_ascii=False, default=str) for row in deferred_rows)
 
     block_id_to_source: Dict[str, Optional[str]] = {}
     for item in gate.values():
@@ -375,25 +340,112 @@ def _write_owner_decisions(
         elif block_id_to_source[block_id] != source_file:
             block_id_to_source[block_id] = None
 
-    for req in list(report.fill_requests) + list(report.deferred):
-        source_file = _infer_source_file_for_request(req, gate, block_id_to_source)
-        payload = {
-            "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
-            "source_file": source_file,
-            "entity_title": req.entity_title,
-            "action": req.action,
-            "target_node_id": req.target_node_id,
-            "target_block_id": req.target_block_id,
-            "tree_level": req.tree_level,
-            "fill_fields": req.fill_fields,
-            "enrich_fields": req.enrich_fields,
-            "chunk_meta_patch": req.chunk_meta_patch,
-            "source_evidence": req.source_evidence,
-            "resolved_value": req.resolved_value,
-        }
-        lines.append(json.dumps(payload, ensure_ascii=False, default=str))
     out_file.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return out_file
+
+
+def _build_quality_deferred_decisions(
+    entries: List[SchemaGapEntry],
+    gate: Dict[str, Dict[str, object]],
+    chunks: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    if not entries:
+        return []
+
+    block_id_to_source = _build_block_id_to_source(chunks)
+    rows: List[Dict[str, object]] = []
+    for entry in entries:
+        req = FillRequest(
+            entity_title=str(entry.entity_title or ""),
+            action="needs_tree_session",
+            target_block_id=str(entry.chunk_block_id or ""),
+            source_evidence="quality_rule_candidate_for_inspector",
+            resolved_value={
+                "delegate_to": "quality_inspector",
+                "gap_type": str(entry.gap_type or ""),
+                "field_name": str(entry.field_name or ""),
+            },
+            chunk_meta_patch={"source_file": str(entry.source_file or "")},
+        )
+        source_file = _infer_source_file_for_request(req, gate, block_id_to_source)
+        rows.append(
+            {
+                "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+                "source_file": source_file,
+                "entity_title": req.entity_title,
+                "action": req.action,
+                "target_node_id": req.target_node_id,
+                "target_block_id": req.target_block_id,
+                "tree_level": req.tree_level,
+                "fill_fields": req.fill_fields,
+                "enrich_fields": req.enrich_fields,
+                "chunk_meta_patch": req.chunk_meta_patch,
+                "source_evidence": req.source_evidence,
+                "resolved_value": req.resolved_value,
+            }
+        )
+    return rows
+
+
+def _build_quality_feedback_records(entries: List[SchemaGapEntry]) -> List[Dict[str, object]]:
+    records: List[Dict[str, object]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for idx, entry in enumerate(entries):
+        source_file = str(entry.source_file or "").strip()
+        block_id = str(entry.chunk_block_id or "").strip()
+        if not source_file or not block_id:
+            continue
+        gap_type = str(entry.gap_type or "unknown").strip() or "unknown"
+        suggested_rule: Dict[str, object] = {
+            "rule_source": "farm_owner_ingest",
+            "reason_code": f"farm_owner_gap_{gap_type}",
+            "match": {
+                "source_file_glob": source_file,
+                "block_id": block_id,
+            },
+            "action": {
+                "verdict": "review",
+            },
+        }
+        if entry.field_name:
+            suggested_rule["match"]["field_name"] = str(entry.field_name)
+        if entry.entity_title:
+            suggested_rule["match"]["entity_title"] = str(entry.entity_title)
+        records.append(
+            {
+                "schema_version": FEEDBACK_INBOX_SCHEMA_VERSION,
+                "feedback_id": f"farm-owner-gap-{idx}",
+                "source_file": source_file,
+                "block_id": block_id,
+                "gate_key": feedback_gate_key(source_file, block_id),
+                "verdict": "review",
+                "reason_code": f"farm_owner_gap_{gap_type}",
+                "source_run_id": "farm_owner_ingest",
+                "notes": f"generated_at={now}",
+                "suggested_rule": suggested_rule,
+            }
+        )
+    return records
+
+
+def _write_quality_rule_proposals(
+    reference_dir: Path,
+    entries: List[SchemaGapEntry],
+) -> Optional[Path]:
+    records = _build_quality_feedback_records(entries)
+    if not records:
+        return None
+    proposals_path = reference_dir / QUALITY_RULE_PROPOSALS_FILE
+    doc = build_rule_proposals_from_inbox(
+        records,
+        inbox_path="farm_owner_ingest_generated",
+    )
+    doc["from_gap_entries"] = [asdict(entry) for entry in entries]
+    proposals_path.write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return proposals_path
 
 
 def run_farm_owner_pipeline(reference_dir: Path | None = None) -> Dict[str, object]:
@@ -419,37 +471,30 @@ def run_farm_owner_pipeline(reference_dir: Path | None = None) -> Dict[str, obje
         }
         logger.info("[farm-owner] blocked: %s", json.dumps(result, ensure_ascii=False))
         return result
-    graphrag = GraphRAGRetriever(workspace_dir=_GRAPH_DIR)
-    if not graphrag.is_available():
-        return {"processed": False, "reason": "GraphRAG unavailable"}
-
     gate = _load_quality_gate(gate_file)
     validated_chunks = _filter_chunks_by_quality_gate(
         _load_quality_filtered_reference(reference_dir),
         gate,
     )
-
-    owner_model = None
-    try:
-        owner_model = get_llm_model()
-    except Exception as exc:
-        logger.warning("[farm-owner] 获取 LLM model 失败，回退为非 LLM 模式: %s", exc)
-
-    owner = KnowledgeFarmOwnerAgent(graphrag, model=owner_model)
     passthrough_rows, passthrough_stats = _build_passthrough_decisions(
         gate,
         validated_chunks,
-        owner,
     )
 
     entries: List[SchemaGapEntry] = []
     if gaps_file.exists() and gaps_file.stat().st_size > 0:
         entries = _load_gap_entries(gaps_file)
     entries = _filter_entries_by_quality_gate(entries, gate)
+    deferred_rows = _build_quality_deferred_decisions(entries, gate, validated_chunks)
+    quality_rule_proposals_file = _write_quality_rule_proposals(reference_dir, entries)
 
     if not entries:
-        report = type("_DummyReport", (), {"fill_requests": [], "deferred": []})()
-        owner_decisions_file = _write_owner_decisions(reference_dir, passthrough_rows, report, gate)
+        owner_decisions_file = _write_owner_decisions(
+            reference_dir,
+            passthrough_rows,
+            deferred_rows,
+            gate,
+        )
         result = {
             "processed": bool(passthrough_rows),
             "reason": "no valid gap entries after quality gate",
@@ -459,37 +504,42 @@ def run_farm_owner_pipeline(reference_dir: Path | None = None) -> Dict[str, obje
             "llm_enhanced_blocks": passthrough_stats.get("llm_enhanced", 0),
             "classified_blocks": passthrough_stats.get("classified", 0),
             "discarded_blocks": passthrough_stats.get("discarded", 0),
+            "quality_rule_proposals_file": (
+                str(quality_rule_proposals_file) if quality_rule_proposals_file else None
+            ),
         }
         logger.info("[farm-owner] done: %s", json.dumps(result, ensure_ascii=False))
         return result
 
-    report = owner.process_gap_entries(entries)
-    owner_decisions_file = _write_owner_decisions(reference_dir, passthrough_rows, report, gate)
-    processed_file = None
-    if gaps_file.exists() and gaps_file.stat().st_size > 0:
-        processed_file = gaps_file.with_suffix(".jsonl.processed")
-        try:
-            os.replace(gaps_file, processed_file)
-        except OSError as exc:
-            logger.warning("[farm-owner] 标记 processed 失败: %s", exc)
+    owner_decisions_file = _write_owner_decisions(
+        reference_dir,
+        passthrough_rows,
+        deferred_rows,
+        gate,
+    )
 
     result = {
-        "processed": True,
+        "processed": bool(passthrough_rows or deferred_rows),
         "decision_schema_version": _OWNER_DECISION_SCHEMA_VERSION,
         "gap_entries": len(entries),
+        "delegated_gap_entries": len(deferred_rows),
         "quality_passed_blocks": len(passthrough_rows),
         "llm_enhanced_blocks": passthrough_stats.get("llm_enhanced", 0),
         "classified_blocks": passthrough_stats.get("classified", 0),
         "discarded_blocks": passthrough_stats.get("discarded", 0),
-        "entities_added": report.entities_added,
-        "discarded_count": report.discarded_count,
-        "fill_requests": len(report.fill_requests),
-        "deferred": len(report.deferred),
-        "errors": list(report.errors),
-        "snapshot_dir": str(report.snapshot_dir) if report.snapshot_dir else None,
-        "processed_file": str(processed_file) if processed_file else None,
+        "entities_added": 0,
+        "discarded_count": 0,
+        "fill_requests": 0,
+        "deferred": len(deferred_rows),
+        "errors": [],
+        "snapshot_dir": None,
+        "processed_file": None,
         "quality_gate_file": str(gate_file),
         "owner_decisions_file": str(owner_decisions_file),
+        "quality_rule_proposals_file": (
+            str(quality_rule_proposals_file) if quality_rule_proposals_file else None
+        ),
+        "delegated_to": "quality_inspector",
     }
     logger.info("[farm-owner] done: %s", json.dumps(result, ensure_ascii=False))
     return result

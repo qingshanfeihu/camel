@@ -1,0 +1,22 @@
+[
+  {
+    "page_content": "华为S5700交换机接口配置。使用 system-view 进入系统视图，然后使用 interface GigabitEthernet 命令配置接口。支持 VLAN 和 IP 地址配置。使用 display interface 查看接口状态。",
+    "metadata": {
+      "source_file": "huawei_knowledge.json",
+      "block_id": "huawei_001",
+      "section_title": "华为S5700接口配置",
+      "source": "Huawei_S5700_manual.pdf",
+      "page": 12
+    }
+  },
+  {
+    "page_content": "华为交换机VLAN配置。使用 vlan batch 命令批量创建 VLAN。支持 VLAN 范围配置。使用 display vlan 查看VLAN信息。CloudEngine系列交换机支持更多高级特性。",
+    "metadata": {
+      "source_file": "huawei_knowledge.json",
+      "block_id": "huawei_002",
+      "section_title": "华为VLAN配置",
+      "source": "Huawei_S5700_manual.pdf",
+      "page": 25
+    }
+  }
+]

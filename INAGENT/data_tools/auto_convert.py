@@ -1,13 +1,23 @@
+"""采购管线编排与块级工具。
+
+`run_procurement_document_pipeline`：扫描 knowledge_base → MinerU / Office / TXT
+→ reference + merge；MinerU 细节在 `mineru_procurement`。
+
+农民 / 农场主仍从此模块导入 `_extract_chunk_metadata`、`_extract_text_from_block`、
+`_apply_llm_metadata_extraction_batch` 等。
+"""
 import asyncio
 import hashlib
 import html as html_stdlib
 import json
 import logging
+import math
 import os
 import random
 import re
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
 import urllib.request
 
@@ -27,7 +37,6 @@ from INAGENT.config.project_config import cfg_bool, cfg_float, cfg_int, cfg_str
 from INAGENT.data_tools.spec_parser import parse_spec_document
 from INAGENT.data_tools.testlist_parser import parse_test_list
 from INAGENT.utils.env_utils import load_inagent_env, resolve_env_placeholder
-from INAGENT.utils.libreoffice_convert import convert_doc_to_docx
 
 try:
     from openai import OpenAI
@@ -45,28 +54,6 @@ LOG_FILE = LOG_DIR / "auto_convert.log"
 
 logger = logging.getLogger("auto_convert")
 
-
-def _procurement_exclusive_mode() -> bool:
-    """兼容旧日志/脚本的保留函数；采购流程现已固定为独占模式。"""
-    return True
-
-# ---------------------------------------------------------------------------
-# 模块职责（架构边界）
-#
-# - **农民工具（本模块对外 API）**：供 ``KnowledgeFarmerAgent`` 等调用的结构化函数，例如
-#   ``_extract_chunk_metadata``、``_extract_text_from_block``、``_clean_chunk_text``、
-#   ``_run_knowledge_linking``。这些函数**不**绑定 MinerU 子进程；只处理已有块/文本。
-#
-# - **采购管线（原始文档 → reference）**：MinerU（``mineru_procurement.convert_one``）/
-#   Office / TXT 批处理、前置页标记、规则与批量 LLM 元数据、初挂树与落盘，由 **采购**
-#   会话编排。PDF 默认 **仅 MinerU 云端 API**（``allow_local_mineru_fallback`` 默认 False，
-#   见 ``cfg_bool("auto_convert.mineru.cloud.allow_local_fallback", ...)``）；
-#   本地 mineru CLI 仅当显式允许或 ``AUTO_CONVERT_MAX_PAGES_TEST`` 部分页测试（云端不跑）时使用。
-#   对外权威入口为 ``INAGENT.data_tools.procurement_ingest.main``；实现函数名为
-#   ``run_procurement_document_pipeline``。历史别名 ``main`` 仍指向同一协程。
-#
-# Bump this when auto_convert logic changes in a way that should invalidate cache
-# (e.g., text extraction, metadata extraction, block selection).
 AUTO_CONVERT_SCHEMA_VERSION = "2026-06-30.1"
 
 
@@ -84,33 +71,25 @@ def _match_protocols_word_boundary(
 
 
 def _remove_section_number(title: str) -> str:
-    """
-    去除章节标题中的编号
-    
-    规则：
-    - 移除开头的数字编号（如"11.3.1. "、"11.3.1 "、"第11章 "等）
-    - 只保留有意义的标题内容
-    
-    示例：
-    - "11.3.1. HTTP配置" -> "HTTP配置"
-    - "11.3.1 HTTP配置" -> "HTTP配置"
-    - "第11章 服务器负载均衡" -> "服务器负载均衡"
-    - "HTTP配置" -> "HTTP配置"（无编号，保持不变）
+    """去除章节标题开头的编号前缀。
+
+    支持格式：
+    - 数字编号（含可选末尾点）: "4. " "4.1 " "1.2.3. "
+    - 大写字母附录编号: "A. " "B.1 "
+    - 括号数字: "(1) " "1) "
+    - 中文章节: "第4章 " "第四章 " "第4节 "
     """
     if not title:
         return title
-    
-    # 匹配开头的数字编号模式
-    # 模式1: "11.3.1. " 或 "11.3.1 " 或 "11.3 "
-    pattern1 = r"^\d+(?:\.\d+)*\.?\s+"
-    # 模式2: "第11章 " 或 "第11节 "
-    pattern2 = r"^第\d+[章节]\s*"
-    
-    # 先尝试匹配模式1
-    title = re.sub(pattern1, "", title)
-    # 再尝试匹配模式2
-    title = re.sub(pattern2, "", title)
-    
+    # 数字编号
+    title = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title)
+    # 大写字母附录编号（如 "A. Overview"）
+    title = re.sub(r"^[A-Z](?:\.\d+)*\.?\s+", "", title)
+    # 括号数字: "(1) " 或 "1) "
+    title = re.sub(r"^\(\d+\)\s+", "", title)
+    title = re.sub(r"^\d+\)\s+", "", title)
+    # 中文章节（支持阿拉伯数字和中文数字）
+    title = re.sub(r"^第[0-9一二三四五六七八九十百千]+[章节篇]\s*", "", title)
     return title.strip()
 
 
@@ -176,22 +155,6 @@ VLLM_INFER_TIMEOUT = cfg_float(
     30.0,
     env="VLLM_INFER_TIMEOUT",
 )
-
-
-def _normalize_openai_base_url(url: str) -> str:
-    """Normalize OpenAI-compatible base_url.
-
-    The OpenAI Python SDK appends path segments like "/chat/completions" to
-    the configured base_url. If callers accidentally pass a full endpoint
-    (e.g., ".../v1/chat/completions"), requests become
-    ".../v1/chat/completions/chat/completions" and will 404.
-    """
-    url = (url or "").strip()
-    if not url:
-        return url
-    if url.endswith("/chat/completions"):
-        url = url[: -len("/chat/completions")]
-    return url.rstrip("/")
 
 
 _project_config_cache: Optional[Dict] = None
@@ -301,108 +264,6 @@ def _merge_product_modules_map(base_map: Dict[str, List[str]]) -> Dict[str, List
     return merged
 
 
-def _extract_page_texts(blocks: List[Dict], max_chars: int = 800) -> Dict[int, str]:
-    page_texts: Dict[int, List[str]] = {}
-    for block in blocks:
-        text = block.get("text") or ""
-        if not text.strip():
-            continue
-        page_idx = int(block.get("page_idx", 0))
-        page_texts.setdefault(page_idx, []).append(text.strip())
-
-    compact_texts: Dict[int, str] = {}
-    for page_idx, texts in page_texts.items():
-        joined = " ".join(texts)
-        compact_texts[page_idx] = joined[:max_chars]
-    return compact_texts
-
-
-def _parse_json_array(response_text: str) -> List[int]:
-    try:
-        start = response_text.index("[")
-        end = response_text.rindex("]")
-        payload = response_text[start : end + 1]
-        data = json.loads(payload)
-        if isinstance(data, list):
-            return [int(x) for x in data if isinstance(x, (int, float, str))]
-    except Exception:
-        return []
-    return []
-
-
-def _filter_front_matter_blocks(blocks: List[Dict]) -> List[Dict]:
-    """
-    使用 LLM 过滤前置页
-    """
-    config = _load_project_config()
-    llm_config = config.get("llm-aided-config", {})
-    filter_config = llm_config.get("front_matter_filter", {})
-
-    if not filter_config.get("enable", False):
-        return blocks
-
-    max_pages = int(filter_config.get("max_pages", 10))
-    if OpenAI is None:
-        logger.warning(
-            "OpenAI client not available; skipping front-matter filter."
-        )
-        return blocks
-
-    runtime = _get_llm_gateway_runtime()
-    api_key = str(runtime.get("api_key") or "")
-    base_url = str(runtime.get("base_url") or "")
-    model = str(runtime.get("model") or "")
-
-    if not api_key:
-        logger.warning("网关 api_key 未配置，跳过 front-matter filter")
-        return blocks
-
-    page_texts = _extract_page_texts(blocks)
-    if not page_texts:
-        return blocks
-
-    page_items = []
-    for page_idx in sorted(page_texts.keys())[:max_pages]:
-        page_items.append({"page_idx": page_idx, "text": page_texts[page_idx]})
-
-    prompt = (
-        "你是文档结构清理助手。下面是文档前几页的内容摘要。\n"
-        "请判断哪些页面属于目录/版权/声明/前言/致谢/修订记录等前置页，"
-        "这些页面对正文检索价值很低，应被删除。\n"
-        "仅返回需要删除的 page_idx 列表（JSON 数组），不要输出其他文字。\n\n"
-        f"Pages: {json.dumps(page_items, ensure_ascii=False)}"
-    )
-
-    try:
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=600)
-        response = _call_llm_with_retry_and_fallback(
-            client=client,
-            base_url=base_url,
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=_llm_temperature(),
-        )
-        content = response.choices[0].message.content or ""
-        drop_pages = _parse_json_array(content)
-        if not drop_pages:
-            logger.info("Front-matter filter: no pages selected for removal.")
-            return blocks
-
-        drop_set = {int(p) for p in drop_pages}
-        logger.info(
-            "Front-matter filter: removing pages %s", sorted(drop_set)
-        )
-        return [block for block in blocks if block.get("page_idx") not in drop_set]
-    except Exception as exc:
-        logger.warning(
-            "Front-matter filter failed (网关, base_url=%s, model=%s): %s",
-            base_url,
-            model,
-            exc,
-        )
-        return blocks
-
-
 # MinerU PDF 阶段（convert_one、输出目录、云端/vLLM 配置）见 ``mineru_procurement``。
 from INAGENT.data_tools import mineru_procurement as _mp
 from INAGENT.data_tools.mineru_procurement import (
@@ -447,10 +308,6 @@ NET_TIMEOUT = cfg_float(
 )
 
 
-
-
-
-
 def _llm_temperature() -> float:
     """获取 LLM 温度参数，默认 0.7。"""
     raw = cfg_str("llm.siliconflow.temperature", "0.7", env="SILICONFLOW_TEMPERATURE")
@@ -463,9 +320,6 @@ def _llm_temperature() -> float:
 
 _siliconflow_temperature = _llm_temperature  # compat alias
 _qianfan_temperature = _llm_temperature  # compat alias
-
-
-
 
 
 def _get_llm_gateway_runtime() -> Dict[str, object]:
@@ -752,7 +606,7 @@ def _iter_text_files() -> List[Path]:
 
 
 def convert_office_file(file_path: Path) -> None:
-    """处理单个 Office 文档（doc/docx/xls/xlsx），写入 reference/{stem}.json。"""
+    """Office（表格走 testlist，其余走 spec_parser）→ reference/{stem}.json。"""
     stem = _output_stem_for_file(file_path)
     json_path = REFERENCE_DIR / f"{stem}.json"
     source_label = json_path.name
@@ -767,22 +621,7 @@ def convert_office_file(file_path: Path) -> None:
     start_time = time.perf_counter()
     logger.info("[office] 开始处理: %s", file_path.name)
 
-    # 旧版 .doc → LibreOffice 无头转临时 .docx，再走与 docx 相同管线
     work_path = file_path
-    _lo_cleanup: Optional[Path] = None
-    if file_path.suffix.lower() == ".doc":
-        _conv = convert_doc_to_docx(file_path)
-        if _conv is None:
-            logger.info(
-                "[office] 无法转换 %s（未安装 LibreOffice 或转换失败）。"
-                "请安装 LibreOffice，或手动另存为 .docx / PDF。",
-                file_path.name,
-            )
-            return
-        work_path = _conv.docx_path
-        _lo_cleanup = _conv.temp_root
-        logger.info("[office] LibreOffice 已转换: %s -> %s", file_path.name, work_path.name)
-
     knowledge_blocks: List[Dict[str, Any]] = []
     doc_type = "spec/design"
     procurement_doc_category = "unknown"
@@ -818,9 +657,6 @@ def convert_office_file(file_path: Path) -> None:
     except Exception as exc:
         logger.warning("[office] 解析失败 %s: %s", file_path.name, exc)
         knowledge_blocks = []
-    finally:
-        if _lo_cleanup is not None:
-            shutil.rmtree(_lo_cleanup, ignore_errors=True)
 
     if not knowledge_blocks:
         logger.warning("[office] 未生成任何知识块: %s", file_path.name)
@@ -1116,80 +952,6 @@ def convert_text_file(file_path: Path) -> None:
     )
 
 
-def _fallback_convert_pdf_with_markitdown(pdf: Path, reason: str = "") -> bool:
-    """当 MinerU 不可用时，回退为 MarkItDown 纯文本抽取。"""
-    try:
-        from camel.loaders.markitdown import MarkItDownLoader
-    except Exception as exc:
-        logger.warning("[pdf-fallback] 依赖不可用，无法回退: %s", exc)
-        return False
-
-    json_path, cache_path = _target_paths(pdf)
-    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-    logger.warning("[pdf-fallback] 启动 MarkItDown 回退: %s (reason=%s)", pdf.name, reason)
-    try:
-        text = MarkItDownLoader().convert_file(str(pdf)) or ""
-    except Exception as exc:
-        logger.warning("[pdf-fallback] 文本抽取失败: %s", exc)
-        return False
-    if not text.strip():
-        logger.warning("[pdf-fallback] 抽取文本为空: %s", pdf.name)
-        return False
-
-    source_label = json_path.name
-    knowledge_blocks = _parse_generic_text(text, source_label, "unknown")
-    if not knowledge_blocks:
-        logger.warning("[pdf-fallback] 未生成知识块: %s", pdf.name)
-        return False
-
-    config = _load_project_config()
-    meta_rules = config.get("metadata_rules", {})
-    protocol_map = meta_rules.get("protocol_types", {})
-
-    for block in knowledge_blocks:
-        meta = block.get("metadata", {})
-        content = str(block.get("page_content") or "")
-        meta["document_category"] = "unknown"
-        meta.pop("product_module", None)
-        if not meta.get("protocol_type"):
-            found_protocols = _match_protocols_word_boundary(protocol_map, content)
-            if found_protocols:
-                meta["protocol_type"] = found_protocols
-
-    _enhance_metadata_with_function_index(knowledge_blocks)
-    _ensure_procurement_base_fields(knowledge_blocks, pdf, source_label)
-
-    link_stats = {"total": len(knowledge_blocks), "skipped": True, "procurement_only": True}
-
-    json_path.write_text(
-        json.dumps(knowledge_blocks, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cache_payload = {
-        "source_file": str(pdf),
-        "source_file_fingerprint": _compute_file_fingerprint(pdf),
-        "schema_version": AUTO_CONVERT_SCHEMA_VERSION,
-        "link_stats": link_stats,
-        "record_count": len(knowledge_blocks),
-        "output_json": str(json_path),
-        "fallback_parser": "markitdown",
-        "fallback_reason": reason,
-    }
-    cache_path.write_text(
-        json.dumps(cache_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info(
-        "[pdf-fallback] 完成: %s -> %s (%d 块)",
-        pdf.name,
-        json_path.name,
-        len(knowledge_blocks),
-    )
-    return True
-
-
 def _prompt_continue_on_error(component: str, error: str) -> bool:
     if cfg_str("auto_convert.assume_yes", "", env="AUTO_CONVERT_ASSUME_YES").strip().lower() in {
         "1",
@@ -1220,46 +982,6 @@ def _target_paths(pdf: Path) -> Tuple[Path, Path]:
     json_path = REFERENCE_DIR / f"{stem}.json"
     cache_path = LOG_DIR / f"{stem}.cache.json"
     return json_path, cache_path
-
-
-def _find_existing_mineru_output(task_id: str) -> Optional[Path]:
-    r"""Find an existing MinerU content list JSON for a given task.
-
-    Prefer *_content_list_v2.json when present.
-
-    Returns:
-        Optional[Path]: Path to content list JSON if found.
-    """
-    task_dir = MINERU_OUTPUT_DIR / task_id
-    if not task_dir.exists():
-        return None
-
-    preferred = [
-        task_dir / "hybrid_auto" / f"{task_id}_content_list_v2.json",
-        task_dir / "hybrid_auto" / f"{task_id}_content_list.json",
-    ]
-    for candidate in preferred:
-        if candidate.exists():
-            return candidate
-
-    # Fallback: search recursively
-    for root, _dirs, files in os.walk(task_dir):
-        for file in files:
-            if file.endswith("_content_list_v2.json"):
-                return Path(root) / file
-    for root, _dirs, files in os.walk(task_dir):
-        for file in files:
-            if file.endswith("_content_list.json"):
-                return Path(root) / file
-    return None
-
-
-def _can_reuse_mineru_output(pdf: Path, content_list_path: Path) -> bool:
-    r"""Return True if existing MinerU output is newer than the input PDF."""
-    try:
-        return content_list_path.stat().st_mtime >= pdf.stat().st_mtime
-    except Exception:
-        return False
 
 
 def _compute_pdf_fingerprint(pdf: Path) -> Dict[str, object]:
@@ -1425,6 +1147,7 @@ def _apply_llm_metadata_extraction(text: str, meta: Dict[str, object], config: D
 _BATCH_LLM_SIZE = cfg_int("auto_convert.batch.size", 40, env="LLM_BATCH_SIZE")
 _BATCH_TEXT_LIMIT = 500      # chars per chunk snippet in prompt
 _BATCH_TOKEN_BUDGET = cfg_int("auto_convert.batch.token_budget", 6000, env="LLM_BATCH_TOKEN_BUDGET")
+_BATCH_MAX_WORKERS = cfg_int("auto_convert.batch.max_workers", 8, env="LLM_BATCH_MAX_WORKERS")
 _CHARS_PER_TOKEN = 3.5       # rough estimate for mixed EN/ZH
 
 
@@ -1449,13 +1172,9 @@ def _build_batch_system_prompt(meta_rules: Dict) -> str:
         "- intent: from valid list\n"
         "- config_mode: cli | console | api\n"
         "- command_prefix: first command word if CLI syntax, '' otherwise\n"
-        "- description: max 30 words\n"
-        "- required_keywords: list of important technical terms\n"
-        "- section_title: from content, strip chapter numbers (e.g. '11.3.1. HTTP' → 'HTTP')\n"
-        "- parent_section: parent section, strip numbers\n"
-        "- scenario_id: e.g. HTTP_SLB_CONFIG, or 'unknown'\n"
+        "- description: max 20 words\n"
+        "- required_keywords: up to 5 important technical terms\n"
         "- step_type: e.g. basic_config/health_checks/policies_and_algorithms, or ''\n"
-        "- function_hierarchy: e.g. 'SLB > Health Check > HTTP' (no numbers)\n"
         "- chunk_type: single_command | command_list | narrative\n"
         "- override_commands: command names that support override/覆盖, [] otherwise\n"
         f"Valid Intents: {valid_intents}\n"
@@ -1551,7 +1270,7 @@ def _apply_llm_metadata_extraction_batch(
     if not selected_api_key:
         return
 
-    if _LLM_METADATA_AVAILABLE is None:
+    if _LLM_METADATA_AVAILABLE is None or not _LLM_METADATA_AVAILABLE:
         if not selected_base_url:
             _LLM_METADATA_AVAILABLE = False
             return
@@ -1602,11 +1321,10 @@ def _apply_llm_metadata_extraction_batch(
                 base_url=selected_base_url,
                 model=selected_model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt + "\n\n必须返回 JSON 数组格式。"},
                     {"role": "user", "content": user_content},
                 ],
                 temperature=_llm_temperature(),
-                response_format={"type": "json_object"},
                 allow_fallback=False,
                 fallback_config=None,
             )
@@ -1639,198 +1357,39 @@ def _apply_llm_metadata_extraction_batch(
             if idx < len(parsed) and isinstance(parsed[idx], dict):
                 _merge_llm_meta(parsed[idx], meta_item, meta_rules)
 
+    # 先把所有 items 切分成 sub_batches 列表，再并发提交
+    sub_batches: List[List[Tuple[str, Dict[str, object]]]] = []
     sub_batch: List[Tuple[str, Dict[str, object]]] = []
     token_count = 0
+    total = len(items)
     for text, meta_item in items:
-        item_tokens = len(text[:_BATCH_TEXT_LIMIT]) // int(_CHARS_PER_TOKEN)
+        item_tokens = math.ceil(len(text[:_BATCH_TEXT_LIMIT]) / _CHARS_PER_TOKEN)
         if sub_batch and (token_count + item_tokens > _BATCH_TOKEN_BUDGET or len(sub_batch) >= _BATCH_LLM_SIZE):
-            _process_sub_batch(sub_batch)
+            sub_batches.append(sub_batch)
             sub_batch = []
             token_count = 0
         sub_batch.append((text, meta_item))
         token_count += item_tokens
     if sub_batch:
-        _process_sub_batch(sub_batch)
+        sub_batches.append(sub_batch)
 
+    total_sub_batches = len(sub_batches)
+    workers = min(_BATCH_MAX_WORKERS, total_sub_batches) if total_sub_batches else 1
+    logger.info("[batch-llm] 开始处理 %d 块，%d 个子批次，并发数=%d", total, total_sub_batches, workers)
 
-def _run_knowledge_linking(
-    knowledge_blocks: List[Dict[str, Any]],
-    source_file: Path,
-) -> Tuple[List[Dict[str, Any]], dict]:
-    """农民结构匹配：将知识块挂载到命令树。
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_sub_batch, sb): i for i, sb in enumerate(sub_batches)}
+        for future in as_completed(futures):
+            completed += 1
+            idx = futures[future]
+            try:
+                future.result()
+                logger.info("[batch-llm] 子批次 %d/%d 完成 (%d/%d)", idx + 1, total_sub_batches, completed, total_sub_batches)
+            except Exception as e:
+                logger.warning("[batch-llm] 子批次 %d 失败: %s", idx + 1, e)
 
-    仅做结构验证（command_exists, hierarchy, section_title 命令匹配）。
-    无法匹配的块产出 SchemaGapEntry 写入 schema_gaps.jsonl，
-    由农场主 (process_gap_entries) 后续消费。
-    """
-    try:
-        from INAGENT.data_tools.knowledge_linker import link_blocks
-        from INAGENT.rag.cli_graph_store import CLIGraphStore
-
-        cli_graph = CLIGraphStore()
-        cli_graph._ensure_loaded()
-
-        blocks, gap_entries, stats = link_blocks(knowledge_blocks, cli_graph)
-
-        if gap_entries:
-            _write_gap_entries(gap_entries, source_file)
-
-        logger.info(
-            "[link] %s: farmer=%d, escalated=%d / total=%d",
-            source_file.name,
-            stats.get("farmer_matched", 0),
-            stats.get("escalated", 0),
-            stats.get("total", 0),
-        )
-        return blocks, stats
-    except Exception as e:
-        logger.warning("[link] 知识链接跳过 (%s): %s", source_file.name, e)
-        return knowledge_blocks, {"total": len(knowledge_blocks), "skipped": True, "error": str(e)}
-
-
-def _write_gap_entries(gap_entries, source_file: Path) -> None:
-    """将农民产出的 SchemaGapEntry 追加写入 schema_gaps.jsonl。"""
-    from dataclasses import asdict
-    gaps_dir = Path(__file__).resolve().parent.parent / "knowledge_base" / "reference"
-    gaps_file = gaps_dir / "schema_gaps.jsonl"
-    try:
-        with open(gaps_file, "a", encoding="utf-8") as f:
-            for gap in gap_entries:
-                line = json.dumps(asdict(gap), ensure_ascii=False)
-                f.write(line + "\n")
-        logger.info(
-            "[link] wrote %d gap entries for %s → %s",
-            len(gap_entries), source_file.name, gaps_file.name,
-        )
-    except Exception as e:
-        logger.warning("[link] failed to write gap entries: %s", e)
-
-
-_AUTO_PROMOTE_THRESHOLD = 5
-
-
-def _auto_promote_branches(knowledge_blocks: List[Dict[str, Any]]) -> int:
-    """自然树生长：当某个 product_module 下 branch 子节点过多时，自动将其晋升为 trunk。
-
-    规则：同一 product_module 下 distinct section_title 数量 >= _AUTO_PROMOTE_THRESHOLD
-    且当前块 tree_level 为 branch → 将概述/总体介绍类块晋升为 trunk。
-    返回晋升的块数。
-    """
-    from collections import defaultdict
-    module_sections: Dict[str, set] = defaultdict(set)
-    for blk in knowledge_blocks:
-        meta = blk.get("metadata", {})
-        tp = meta.get("tree_position", {})
-        if tp.get("tree_level") == "branch":
-            mod = meta.get("product_module", "").strip()
-            title = meta.get("section_title", "").strip()
-            if mod and title:
-                module_sections[mod].add(title)
-
-    dense_modules = {m for m, titles in module_sections.items() if len(titles) >= _AUTO_PROMOTE_THRESHOLD}
-    if not dense_modules:
-        return 0
-
-    _OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构", "工作模式", "功能介绍")
-    promoted = 0
-    for blk in knowledge_blocks:
-        meta = blk.get("metadata", {})
-        tp = meta.get("tree_position", {})
-        if tp.get("tree_level") != "branch":
-            continue
-        mod = meta.get("product_module", "").strip()
-        if mod not in dense_modules:
-            continue
-        fh = meta.get("function_hierarchy", "").strip()
-        sp = meta.get("section_path", "").strip()
-        title = meta.get("section_title", "").strip()
-        fh_parts = [p.strip() for p in fh.replace(">", "/").split("/") if p.strip()] if fh else []
-        is_overview = (
-            len(fh_parts) <= 1
-            or any(kw in sp for kw in _OVERVIEW_KW)
-            or any(kw in title for kw in _OVERVIEW_KW)
-        )
-        if is_overview:
-            tp["tree_level"] = "trunk"
-            tp["_auto_promoted"] = True
-            tp["knowledge_role"] = "structural"
-            promoted += 1
-    if promoted:
-        logger.info("[auto-promote] %d blocks promoted branch→trunk in modules: %s",
-                    promoted, sorted(dense_modules))
-    return promoted
-
-
-_LEAF_PROMOTE_THRESHOLD = 8
-
-
-def _auto_promote_dense_leaves(knowledge_blocks: List[Dict[str, Any]]) -> int:
-    """叶子密集晋升：当同一 product_module + parent_section 下 leaf 块过多时，
-    将该组中 function_hierarchy 层级最浅的少数叶子晋升为 branch（概述性质→trunk）。
-
-    规则：同一 (product_module, parent_section) 下 leaf 数量 >= _LEAF_PROMOTE_THRESHOLD
-    → 取该组 function_hierarchy 深度最浅的块，最多晋升 ceil(group_size/4) 个。
-    """
-    import math
-    from collections import defaultdict
-
-    def _fh_depth(b):
-        fh = b.get("metadata", {}).get("function_hierarchy", "")
-        return len([p for p in fh.replace(">", "/").split("/") if p.strip()]) if fh else 999
-
-    group_leaves: Dict[tuple, List[Dict]] = defaultdict(list)
-    for blk in knowledge_blocks:
-        meta = blk.get("metadata", {})
-        tp = meta.get("tree_position", {})
-        if tp.get("tree_level") != "leaf":
-            continue
-        mod = meta.get("product_module", "").strip()
-        parent = meta.get("parent_section", "").strip()
-        if mod:
-            group_leaves[(mod, parent)].append(blk)
-
-    _MAX_PROMOTE_GROUP_SIZE = 100
-    dense_groups = {k: v for k, v in group_leaves.items() if len(v) >= _LEAF_PROMOTE_THRESHOLD}
-    if not dense_groups:
-        return 0
-
-    _OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构", "工作模式", "功能介绍")
-    promoted = 0
-    promoted_modules = set()
-    for (mod, parent), leaves in dense_groups.items():
-        if len(leaves) > _MAX_PROMOTE_GROUP_SIZE:
-            logger.warning(
-                "[auto-promote] skip oversized group (%s/%s): %d leaves > %d limit, "
-                "likely heading-stack pollution",
-                mod, parent, len(leaves), _MAX_PROMOTE_GROUP_SIZE,
-            )
-            continue
-        max_promote = max(2, math.ceil(len(leaves) / 4))
-        sorted_leaves = sorted(leaves, key=_fh_depth)
-        min_depth = _fh_depth(sorted_leaves[0])
-        group_promoted = 0
-        for blk in sorted_leaves:
-            if group_promoted >= max_promote:
-                break
-            depth = _fh_depth(blk)
-            if depth > min_depth + 1:
-                break
-            meta = blk.get("metadata", {})
-            tp = meta.get("tree_position", {})
-            sp = meta.get("section_path", "").strip()
-            title = meta.get("section_title", "").strip()
-            is_overview = any(kw in sp for kw in _OVERVIEW_KW) or any(kw in title for kw in _OVERVIEW_KW)
-            tp["tree_level"] = "trunk" if is_overview else "branch"
-            tp["_auto_promoted"] = True
-            tp["_leaf_group_size"] = len(leaves)
-            group_promoted += 1
-            promoted += 1
-            promoted_modules.add(mod)
-    if promoted:
-        logger.info("[auto-promote] %d leaf blocks promoted in modules: %s (groups: %s)",
-                    promoted, sorted(promoted_modules),
-                    {f"{m}/{p}": len(v) for (m, p), v in dense_groups.items()})
-    return promoted
+    logger.info("[batch-llm] 全部完成，共 %d 块", total)
 
 
 def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]) -> None:
@@ -2230,6 +1789,15 @@ def _build_section_context_map(blocks: List[Dict]) -> Dict[int, Dict[str, str]]:
             heading_title = first_line_raw or clean_text
         else:
             inferred_level = _infer_section_level_from_heading(clean_text)
+            if not inferred_level:
+                # MinerU 常见格式：第一行是纯中文标题，第二行是"章节号. 标题"
+                # clean_text 把换行合并了，所以用 raw_text 逐行尝试
+                for line in raw_text.strip().split('\n'):
+                    line = line.strip()
+                    if line:
+                        inferred_level = _infer_section_level_from_heading(line)
+                        if inferred_level:
+                            break
             if inferred_level:
                 heading_level = inferred_level
                 heading_title = first_line_raw or clean_text
@@ -2448,49 +2016,6 @@ def _filter_frontmatter_blocks(blocks: List[Dict]) -> Tuple[List[Dict], List[int
     return filtered, frontmatter_pages
 
 
-def _assign_fallback_tree_position(knowledge_blocks: List[Dict[str, Any]]) -> int:
-    """为没有 tree_position 的非 CLI 块按 section_path 深度赋予默认层级。
-
-    CLI 块由 farmer_link 处理，此处只处理 app/arch/spec 类文档。
-    section_path 深度 <= 1 → trunk，深度 2 → branch，深度 >= 3 → leaf。
-    """
-    assigned = 0
-    for blk in knowledge_blocks:
-        meta = blk.get("metadata", {})
-        if meta.get("tree_position"):
-            continue
-        doc_cat = meta.get("document_category", "")
-        if doc_cat.startswith("cli"):
-            # 农民/ linker 未挂上树时仍缺 tree_position：给 merge/ingest 可消费的弱兜底
-            meta["tree_position"] = {
-                "tree_level": "leaf",
-                "linked_nodes": [],
-                "confidence": 0.35,
-                "knowledge_role": "fallback_cli_unlinked",
-            }
-            assigned += 1
-            continue
-        sp = meta.get("section_path", "")
-        depth = len([p for p in sp.replace(">", "/").split("/") if p.strip()]) if sp else 0
-        if depth <= 1:
-            level = "trunk"
-        elif depth == 2:
-            level = "branch"
-        else:
-            level = "leaf"
-        meta["tree_position"] = {
-            "tree_level": level,
-            "linked_nodes": [],
-            "confidence": 0.5,
-            "knowledge_role": "fallback_section_depth",
-        }
-        assigned += 1
-    if assigned:
-        logger.info("[fallback-tree] assigned tree_position to %d non-CLI blocks", assigned)
-    return assigned
-
-
-
 def _cleanup_old_logs(max_age_days: int = 30) -> None:
     """Remove log files older than max_age_days to prevent disk bloat."""
     if not LOG_DIR.exists():
@@ -2659,13 +2184,7 @@ async def run_procurement_document_pipeline() -> None:
         "[config] MINERU_MODEL_SOURCE=%s",
         os.environ.get("MINERU_MODEL_SOURCE"),
     )
-    logger.info(
-        "[mode] procurement_exclusive_mode=%s",
-        _procurement_exclusive_mode(),
-    )
-    if _procurement_exclusive_mode():
-        logger.info("[mode] 当前运行仅执行采购落盘与 merge，停止于采购阶段，不执行农民/农场主")
-    # 0) 自动同步配置
+    logger.info("[mode] 采购管线：reference 落盘 + merge（不含农民/农场主/质检）")
     _setup_mineru_config()
 
     if _mp.USE_DOCKER_VLLM:
@@ -2769,27 +2288,7 @@ async def run_procurement_document_pipeline() -> None:
     # PDF 处理（MinerU）
     # ============================================================
     if pdfs:
-        # ============================================================
-        # MinerU 配置说明：
-        # ============================================================
-        # 1. 采购管线 PDF：convert_one 默认仅 MinerU 云端（allow_local_mineru_fallback=False）。
-        #    云端失败且未显式允许本地时直接报错，不回退本地 CLI。
-        #    允许本地回退：MINERU_ALLOW_LOCAL_MINERU_FALLBACK=1 或 project.yaml
-        #    auto_convert.mineru.cloud.allow_local_fallback: true
-        #    历史「云端失败再本地」行为可通过上述开关恢复。
-        #    强制关云端解析：project.yaml auto_convert.mineru.cloud.enable: false（仍受 allow_local 约束）
-        #    或环境变量 AUTO_CONVERT_MINERU_CLOUD=0
-        #
-        # 2. 本地默认: hybrid-auto-engine（无需本地 vLLM HTTP 服务）
-        #    可选 vLLM：project.yaml auto_convert.vllm.enable: true 或 AUTO_CONVERT_USE_MINERU_VLLM=1
-        #    详见: https://opendatalab.github.io/MinerU/zh/quick_start/extension_modules/#vllm-vlm
-        #
-        # 3. MinerU 命令查找优先级：
-        #    a. MINERU_CLI 环境变量（如果设置）
-        #    b. INFOAGEN/mineru/venv/Scripts/mineru.exe
-        #    c. PATH 中的 mineru 命令
-        # ============================================================
-
+        # convert_one：默认云端优先；本地 CLI 回退见 auto_convert.mineru.cloud.allow_local_fallback
         mineru_cmd = cfg_str("auto_convert.mineru.cli", "", env="MINERU_CLI")
         if not mineru_cmd:
             # 兼容两种目录布局：
@@ -2812,10 +2311,6 @@ async def run_procurement_document_pipeline() -> None:
             "MinerU CLI default backend (enable auto_convert.vllm.enable or "
             "AUTO_CONVERT_USE_MINERU_VLLM=1 for local hybrid-http-client + vLLM)"
         )
-        overall_start = time.perf_counter()
-
-        # Semaphore for file-level concurrency
-        # Default to 3 concurrent files (assuming average PDF size, this balances memory/CPU)
         max_concurrent_files = cfg_int(
             "auto_convert.parallel.max_files",
             3,
@@ -2845,17 +2340,12 @@ async def run_procurement_document_pipeline() -> None:
 
         async def _protected_convert(p):
             async with sem:
-                 try:
-                     await convert_one(
-                         reader,
-                         p,
-                         max_pages=max_pages_limit,
-                         allow_local_mineru_fallback=allow_local_mineru_fb,
-                     )
-                 except Exception as e:
-                     logger.error("Failed to convert %s: %s", p.name, e)
-                     if not _fallback_convert_pdf_with_markitdown(p, reason=str(e)):
-                         logger.error("[pdf-fallback] 仍失败: %s", p.name)
+                await convert_one(
+                    reader,
+                    p,
+                    max_pages=max_pages_limit,
+                    allow_local_mineru_fallback=allow_local_mineru_fb,
+                )
 
         tasks = [_protected_convert(p) for p in pdfs]
         logger.info("Starting conversion with file_concurrency=%d", max_concurrent_files)
@@ -2866,17 +2356,40 @@ async def run_procurement_document_pipeline() -> None:
         logger.info("no pdf files found, skipping MinerU phase.")
 
     # ============================================================
-    # Office 文档处理（docx/xlsx/doc/xls）
+    # Office 文档处理（docx/xlsx/doc/xls/pptx/ppt）
     # ============================================================
+    # MinerU 云端 API 原生支持 pdf/doc/docx/ppt/pptx，输出与 PDF 完全一致（块粒度）。
+    # • 可走 MinerU 的格式（文档类）：.docx/.doc/.pptx/.ppt → 必须走 MinerU 云端
+    # • 不走 MinerU 的格式（表格类）：.xlsx/.xls → 走 testlist_parser
+    MINERU_OFFICE_EXTS = {".docx", ".doc", ".pptx", ".ppt"}
+    SPREADSHEET_EXTS = {".xlsx", ".xls"}
+
     office_files = office_files_early
     if office_files:
         logger.info("=" * 80)
         logger.info("[office] 发现 %d 个 Office 文档，开始处理...", len(office_files))
-        for ofile in office_files:
-            try:
-                convert_office_file(ofile)
-            except Exception as e:
-                logger.error("[office] 处理失败 %s: %s", ofile.name, e)
+
+        # 分流：表格类走 testlist_parser，文档类走 MinerU（无回退）
+        doc_files = [f for f in office_files if f.suffix.lower() in MINERU_OFFICE_EXTS]
+        spreadsheet_files = [f for f in office_files if f.suffix.lower() in SPREADSHEET_EXTS]
+
+        # 表格类（xlsx/xls）—— testlist_parser
+        for ofile in spreadsheet_files:
+            convert_office_file(ofile)
+
+        # 文档类（docx/doc/pptx/ppt）—— 必须走 MinerU 云端，不可用则报错终止
+        if doc_files:
+            if not (_use_mineru_cloud() and bool(_mp._mineru_cloud_token())):
+                raise RuntimeError(
+                    f"发现 {len(doc_files)} 个文档文件需要 MinerU 云端处理，"
+                    "但 MinerU 云端不可用（未配置或 token 为空）。请配置 MINERU_CLOUD_TOKEN。"
+                )
+            logger.info(
+                "[office-mineru] %d 个文档文件走 MinerU 管线", len(doc_files)
+            )
+            doc_tasks = [_protected_convert(f) for f in doc_files]
+            await asyncio.gather(*doc_tasks)
+
         logger.info("[office] Office 文档处理完成")
     else:
         logger.info("[office] 未发现 Office 文档，跳过")

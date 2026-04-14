@@ -216,8 +216,8 @@ def download_and_extract_zip_items(
     return extracted
 
 
-def mineru_cloud_parse_pdfs(
-    pdf_paths: List[Path],
+def mineru_cloud_parse_files(
+    file_paths: List[Path],
     *,
     output_root: Path,
     token: str,
@@ -232,13 +232,16 @@ def mineru_cloud_parse_pdfs(
     poll_timeout: float = 3600.0,
     logger: Optional[logging.Logger] = None,
 ) -> List[Path]:
-    """Full cloud pipeline for one or more PDFs; returns paths to ``*_content_list.json``."""
+    """Full cloud pipeline for one or more files (pdf/doc/docx/ppt/pptx/images).
+
+    Returns paths to ``*_content_list.json``.
+    """
     log = logger or logging.getLogger(__name__)
-    if not pdf_paths:
+    if not file_paths:
         return []
     batch_id = batch_upload_and_put_files(
         token=token,
-        pdf_paths=pdf_paths,
+        pdf_paths=file_paths,  # parameter name is historical; API accepts all formats
         api_base=api_base,
         model_version=model_version,
         language=language,
@@ -259,8 +262,12 @@ def mineru_cloud_parse_pdfs(
     return download_and_extract_zip_items(items, output_root, logger=log)
 
 
-def mineru_cloud_parse_one_pdf(
-    pdf: Path,
+# Legacy alias
+mineru_cloud_parse_pdfs = mineru_cloud_parse_files
+
+
+def mineru_cloud_parse_one_file(
+    src: Path,
     *,
     output_root: Path,
     token: str,
@@ -275,11 +282,14 @@ def mineru_cloud_parse_one_pdf(
     poll_timeout: float = 3600.0,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[Path]:
-    """Parse a single PDF via cloud API. Returns content_list path or ``None`` on failure."""
+    """Parse a single file (pdf/doc/docx/ppt/pptx) via cloud API.
+
+    Returns content_list path or ``None`` on failure.
+    """
     log = logger or logging.getLogger(__name__)
     try:
-        paths = mineru_cloud_parse_pdfs(
-            [pdf],
+        paths = mineru_cloud_parse_files(
+            [src],
             output_root=output_root,
             token=token,
             api_base=api_base,
@@ -294,12 +304,16 @@ def mineru_cloud_parse_one_pdf(
             logger=log,
         )
     except Exception as exc:
-        log.warning("[mineru-cloud] failed for %s: %s", pdf.name, exc)
+        log.warning("[mineru-cloud] failed for %s: %s", src.name, exc)
         return None
     if not paths:
-        log.warning("[mineru-cloud] no content_list extracted for %s", pdf.name)
+        log.warning("[mineru-cloud] no content_list extracted for %s", src.name)
         return None
     return paths[0]
+
+
+# Legacy alias
+mineru_cloud_parse_one_pdf = mineru_cloud_parse_one_file
 
 
 def validate_content_list(path: Path) -> bool:

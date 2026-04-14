@@ -2191,3 +2191,348 @@ class KnowledgeFarmOwnerAgent:
         except Exception:
             pass
         return snapshot
+
+    # ── 产品特定过滤与质检反馈处理 ───────────────────────────────────────────
+
+    def analyze_product_match(
+        self,
+        chunks: List[Dict[str, Any]],
+        *,
+        product_signatures_path: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
+        """分析 chunks 是否匹配目标产品，返回不匹配的 feedback records。
+
+        Args:
+            chunks: 待分析的知识块列表
+            product_signatures_path: 产品特征配置文件路径（默认 config/product_signatures.json）
+
+        Returns:
+            List of feedback records for quality_feedback_inbox.jsonl
+        """
+        if product_signatures_path is None:
+            product_signatures_path = (
+                Path(__file__).resolve().parent.parent / "config" / "product_signatures.json"
+            )
+
+        if not product_signatures_path.exists():
+            logger.warning("产品特征配置文件不存在: %s", product_signatures_path)
+            return []
+
+        try:
+            signatures = json.loads(product_signatures_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.error("加载产品特征配置失败: %s", exc)
+            return []
+
+        target = signatures.get("target_product", {})
+        competitors = signatures.get("competitor_products", [])
+        rules = signatures.get("filter_rules", {})
+        min_target_score = rules.get("min_target_score", 0.05)
+        max_competitor_score = rules.get("max_competitor_score", 0.1)
+        competitor_advantage_threshold = rules.get("competitor_advantage_threshold", 2.0)
+
+        feedback_records = []
+        for chunk in chunks:
+            meta = chunk.get("metadata", {})
+            content = chunk.get("page_content", "")
+            source_file = meta.get("source_file", "")
+            block_id = meta.get("block_id", "")
+
+            if not source_file or not block_id:
+                logger.debug("跳过块（缺少 source_file 或 block_id）: %s", chunk)
+                continue
+
+            target_score = self._calculate_product_score(chunk, target)
+            competitor_matches = []
+            for comp in competitors:
+                comp_score = self._calculate_product_score(chunk, comp)
+                if comp_score > max_competitor_score:
+                    competitor_matches.append({
+                        "name": comp.get("name", "unknown"),
+                        "score": comp_score,
+                    })
+
+            logger.debug(
+                "块 %s/%s: target=%.3f, competitors=%s",
+                source_file, block_id, target_score,
+                [(m["name"], f"{m['score']:.3f}") for m in competitor_matches]
+            )
+
+            # 判断是否为非目标产品：
+            # 1. 绝对判断：target_score 太低 且 competitor_score 超过阈值
+            # 2. 相对判断：竞品得分显著高于目标产品（competitor_score / target_score > threshold）
+            is_wrong_product = False
+            best_match = None
+
+            if competitor_matches:
+                best_match = max(competitor_matches, key=lambda x: x["score"])
+
+                # 绝对判断
+                if target_score < min_target_score:
+                    is_wrong_product = True
+                    reason = f"目标产品得分 {target_score:.3f} < {min_target_score}"
+                # 相对判断
+                elif target_score > 0 and best_match["score"] / target_score > competitor_advantage_threshold:
+                    is_wrong_product = True
+                    ratio = best_match["score"] / target_score
+                    reason = f"竞品得分优势过大 (比率 {ratio:.2f} > {competitor_advantage_threshold})"
+
+            if is_wrong_product and best_match:
+                feedback_records.append({
+                    "schema_version": "1.0",
+                    "feedback_id": f"product_mismatch_{source_file}_{block_id}",
+                    "source_file": source_file,
+                    "block_id": block_id,
+                    "verdict": "reject",
+                    "reason_code": "wrong_product",
+                    "notes": (
+                        f"{reason}，"
+                        f"检测到竞品特征: {best_match['name']} (得分 {best_match['score']:.3f})"
+                    ),
+                    "suggested_rule": {
+                        "type": "competitor_pattern",
+                        "competitor": best_match["name"],
+                        "confidence": best_match["score"],
+                    },
+                })
+
+        return feedback_records
+
+    def _calculate_product_score(
+        self, chunk: Dict[str, Any], product_def: Dict[str, Any]
+    ) -> float:
+        """计算 chunk 与产品定义的匹配度（0.0-1.0）。"""
+        meta = chunk.get("metadata", {})
+        content = (chunk.get("page_content", "") + " " + meta.get("section_title", "")).lower()
+
+        score = 0.0
+        total_weight = 0.0
+
+        # 命令前缀匹配（权重 0.4）
+        cmd_prefixes = product_def.get("command_prefixes", [])
+        if cmd_prefixes:
+            matches = sum(1 for prefix in cmd_prefixes if prefix.lower() in content)
+            score += (matches / len(cmd_prefixes)) * 0.4
+            total_weight += 0.4
+
+        # 产品模块匹配（权重 0.3）
+        modules = product_def.get("product_modules", [])
+        if modules:
+            matches = sum(1 for mod in modules if mod.lower() in content)
+            score += (matches / len(modules)) * 0.3
+            total_weight += 0.3
+
+        # 产品关键词匹配（权重 0.3）
+        keywords = product_def.get("product_keywords", [])
+        if keywords:
+            matches = sum(1 for kw in keywords if kw.lower() in content)
+            score += (matches / len(keywords)) * 0.3
+            total_weight += 0.3
+
+        return score / total_weight if total_weight > 0 else 0.0
+
+    def process_quality_feedback(
+        self,
+        reference_dir: Path,
+        *,
+        auto_analyze_product: bool = True,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """处理质检反馈：分析无用知识、生成过滤规则、执行删除。
+
+        Args:
+            reference_dir: reference 目录路径
+            auto_analyze_product: 是否自动分析产品匹配度
+            dry_run: 是否仅模拟运行（不实际删除）
+
+        Returns:
+            处理报告字典
+        """
+        from INAGENT.data_tools.quality_feedback_loop import (
+            load_and_validate_inbox,
+            build_rule_proposals_from_inbox,
+            apply_purge_manifest,
+            QUALITY_FEEDBACK_INBOX_FILE,
+            QUALITY_RULE_PROPOSALS_FILE,
+            QUALITY_PURGE_MANIFEST_FILE,
+        )
+
+        report = {
+            "product_analysis": {"analyzed": 0, "mismatches": 0},
+            "inbox_validation": {"valid": 0, "errors": 0},
+            "rule_proposals": {"generated": 0},
+            "purge": {"deleted": 0, "errors": 0},
+            "dry_run": dry_run,
+        }
+
+        # 1. 产品特定过滤（可选）
+        if auto_analyze_product:
+            logger.info("开始产品匹配度分析...")
+            all_chunks = []
+            for json_file in reference_dir.glob("*.json"):
+                if json_file.name.startswith("_") or json_file.name == "knowledge_base.json":
+                    continue
+                try:
+                    chunks = json.loads(json_file.read_text(encoding="utf-8"))
+                    if isinstance(chunks, list):
+                        all_chunks.extend(chunks)
+                except Exception as exc:
+                    logger.warning("读取 %s 失败: %s", json_file.name, exc)
+
+            report["product_analysis"]["analyzed"] = len(all_chunks)
+            feedback_records = self.analyze_product_match(all_chunks)
+            report["product_analysis"]["mismatches"] = len(feedback_records)
+
+            if feedback_records:
+                inbox_path = reference_dir / QUALITY_FEEDBACK_INBOX_FILE
+                with open(inbox_path, "a", encoding="utf-8") as f:
+                    for rec in feedback_records:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                logger.info("写入 %d 条产品不匹配反馈到 %s", len(feedback_records), inbox_path)
+
+        # 2. 加载并验证 inbox
+        inbox_path = reference_dir / QUALITY_FEEDBACK_INBOX_FILE
+        if inbox_path.exists():
+            valid_records, errors = load_and_validate_inbox(inbox_path)
+            report["inbox_validation"]["valid"] = len(valid_records)
+            report["inbox_validation"]["errors"] = len(errors)
+            logger.info("质检反馈 inbox: %d 有效, %d 错误", len(valid_records), len(errors))
+
+            # 3. 生成规则建议
+            if valid_records:
+                proposals = build_rule_proposals_from_inbox(valid_records)
+                proposals_path = reference_dir / QUALITY_RULE_PROPOSALS_FILE
+                proposals_path.write_text(
+                    json.dumps(proposals, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                report["rule_proposals"]["generated"] = len(proposals.get("proposals", []))
+                logger.info("生成 %d 条规则建议到 %s", report["rule_proposals"]["generated"], proposals_path)
+
+                # 4. 生成 purge manifest（仅 verdict=reject 的记录）
+                purge_records = [
+                    {
+                        "schema_version": "1.0",
+                        "source_file": rec["source_file"],
+                        "block_id": rec["block_id"],
+                        "action": "delete",
+                        "reason": rec.get("reason_code", ""),
+                        "feedback_id": rec.get("feedback_id", ""),
+                    }
+                    for rec in valid_records
+                    if rec.get("verdict") == "reject"
+                ]
+
+                if purge_records:
+                    manifest_path = reference_dir / QUALITY_PURGE_MANIFEST_FILE
+                    with open(manifest_path, "w", encoding="utf-8") as f:
+                        for rec in purge_records:
+                            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    logger.info("生成 purge manifest: %d 条记录", len(purge_records))
+
+                    # 5. 执行删除（如果不是 dry_run）
+                    if not dry_run:
+                        purge_report = apply_purge_manifest(reference_dir, manifest_path, dry_run=False)
+                        report["purge"]["deleted"] = purge_report.get("deleted", 0)
+                        report["purge"]["errors"] = len(purge_report.get("errors", []))
+                        logger.info("执行删除: %d 成功, %d 失败", report["purge"]["deleted"], report["purge"]["errors"])
+                    else:
+                        logger.info("dry_run=True，跳过实际删除")
+        else:
+            logger.info("质检反馈 inbox 不存在: %s", inbox_path)
+
+        return report
+
+    def merge_section_blocks_in_reference(
+        self,
+        reference_dir: Path,
+        *,
+        output_suffix: str = "_merged",
+        min_blocks_to_merge: int = 2,
+    ) -> Dict[str, Any]:
+        """合并 reference 目录下所有 JSON 文件中的章节块。
+
+        将同一章节的多个块合并成一个完整块，解决大数据清洗后上下文丢失的问题。
+
+        Args:
+            reference_dir: reference 目录路径
+            output_suffix: 输出文件后缀（默认 "_merged"）
+            min_blocks_to_merge: 最少需要多少个块才执行合并（默认2）
+
+        Returns:
+            处理报告字典
+        """
+        from INAGENT.data_tools.merge_section_blocks import merge_section_blocks
+
+        report = {
+            "processed_files": 0,
+            "total_input_chunks": 0,
+            "total_output_chunks": 0,
+            "total_merged_sections": 0,
+            "total_merged_chunks": 0,
+            "files": [],
+        }
+
+        for json_file in reference_dir.glob("*.json"):
+            # 跳过特殊文件
+            if json_file.name.startswith("_") or json_file.name == "knowledge_base.json":
+                continue
+            # 跳过已合并的文件
+            if output_suffix in json_file.stem:
+                continue
+
+            try:
+                chunks = json.loads(json_file.read_text(encoding="utf-8"))
+                if not isinstance(chunks, list):
+                    logger.warning("跳过非列表文件: %s", json_file.name)
+                    continue
+
+                # 执行合并
+                merged_chunks, merge_report = merge_section_blocks(
+                    chunks, min_blocks_to_merge=min_blocks_to_merge
+                )
+
+                # 写入合并后的文件
+                output_name = f"{json_file.stem}{output_suffix}.json"
+                output_path = reference_dir / output_name
+                output_path.write_text(
+                    json.dumps(merged_chunks, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                # 更新报告
+                report["processed_files"] += 1
+                report["total_input_chunks"] += merge_report.total_chunks
+                report["total_output_chunks"] += merge_report.output_chunks
+                report["total_merged_sections"] += merge_report.merged_sections
+                report["total_merged_chunks"] += merge_report.merged_chunks
+
+                report["files"].append({
+                    "input_file": json_file.name,
+                    "output_file": output_name,
+                    "input_chunks": merge_report.total_chunks,
+                    "output_chunks": merge_report.output_chunks,
+                    "merged_sections": merge_report.merged_sections,
+                    "merged_chunks": merge_report.merged_chunks,
+                })
+
+                logger.info(
+                    "合并 %s: %d 块 -> %d 块 (合并 %d 章节)",
+                    json_file.name,
+                    merge_report.total_chunks,
+                    merge_report.output_chunks,
+                    merge_report.merged_sections,
+                )
+
+            except Exception as exc:
+                logger.error("处理文件 %s 失败: %s", json_file.name, exc)
+                continue
+
+        logger.info(
+            "章节合并完成: 处理 %d 文件, 输入 %d 块, 输出 %d 块, 合并 %d 章节",
+            report["processed_files"],
+            report["total_input_chunks"],
+            report["total_output_chunks"],
+            report["total_merged_sections"],
+        )
+
+        return report

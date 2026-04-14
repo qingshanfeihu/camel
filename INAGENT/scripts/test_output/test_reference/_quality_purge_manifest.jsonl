@@ -1,0 +1,3 @@
+{"schema_version": "1.0", "source_file": "cisco_knowledge.json", "block_id": "cisco_001", "action": "delete", "reason": "wrong_product", "feedback_id": "product_mismatch_cisco_knowledge.json_cisco_001"}
+{"schema_version": "1.0", "source_file": "huawei_knowledge.json", "block_id": "huawei_001", "action": "delete", "reason": "wrong_product", "feedback_id": "product_mismatch_huawei_knowledge.json_huawei_001"}
+{"schema_version": "1.0", "source_file": "huawei_knowledge.json", "block_id": "huawei_002", "action": "delete", "reason": "wrong_product", "feedback_id": "product_mismatch_huawei_knowledge.json_huawei_002"}

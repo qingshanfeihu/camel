@@ -1,0 +1,12 @@
+[
+  {
+    "page_content": "Cisco IOS基本配置。使用 enable 进入特权模式，使用 configure terminal 进入配置模式。使用 show running-config 查看当前配置。Catalyst交换机和ISR路由器都支持这些命令。",
+    "metadata": {
+      "source_file": "cisco_knowledge.json",
+      "block_id": "cisco_001",
+      "section_title": "Cisco IOS基本配置",
+      "source": "Cisco_IOS_guide.pdf",
+      "page": 8
+    }
+  }
+]

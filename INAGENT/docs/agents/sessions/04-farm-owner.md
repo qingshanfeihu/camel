@@ -10,6 +10,12 @@
 - 可选输入：`reference/schema_gaps.jsonl`（若为空，走质量通过项 passthrough）
 - 必须输出：`reference/_owner_decisions_for_farmer.jsonl`（`schema_version=1.0`）
 
+当前生产入口 `INAGENT.data_tools.farm_owner_ingest.run_farm_owner_pipeline` 已改为 **检索剥离模式**：
+
+- 农场主入口不再初始化 GraphRAG 检索或触发混合向量刷新；
+- 对 `schema_gaps.jsonl` 仅做质量门控后产出质检规则建议，输出 `reference/_quality_rule_proposals.json`；
+- 面向农民仍输出 `reference/_owner_decisions_for_farmer.jsonl` 结构化决策，不与销售员直接耦合。
+
 当不存在可处理 gap 时，农场主仍需基于 quality gate 生成 passthrough decisions，确保下游农民阶段可消费且不空跑。
 
 **TreeInformed 决策（与实现对齐）**：

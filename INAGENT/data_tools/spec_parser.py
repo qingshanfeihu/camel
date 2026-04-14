@@ -35,9 +35,11 @@ def _split_markdown_sections(markdown_text: str) -> List[Dict[str, Any]]:
     """
     lines = markdown_text.split("\n")
     sections: List[Dict[str, Any]] = []
-    heading_stack: List[str] = []  # 按 level 存储当前路径
+    # heading_stack 存储归一化标题（已去编号），包含当前节点自身
+    # 结构: [...祖先, 当前]  → parent = stack[-2], path = join(stack)
+    heading_stack: List[str] = []
 
-    current_heading = ""
+    current_heading = ""   # 原始标题（含编号），用于 page_content 显示
     current_level = 0
     current_lines: List[str] = []
 
@@ -45,8 +47,10 @@ def _split_markdown_sections(markdown_text: str) -> List[Dict[str, Any]]:
         nonlocal current_heading, current_level, current_lines
         content = "\n".join(current_lines).strip()
         if content or current_heading:
-            parent = heading_stack[-1] if heading_stack else ""
-            path = " > ".join(heading_stack + [current_heading]) if current_heading else ""
+            # heading_stack[-1] 是当前节点（已归一化）
+            # heading_stack[-2] 是直接父节点（已归一化），不存在则为 ""
+            parent = heading_stack[-2] if len(heading_stack) >= 2 else ""
+            path = " > ".join(heading_stack) if heading_stack else ""
             sections.append({
                 "heading": current_heading,
                 "level": current_level,
@@ -62,12 +66,13 @@ def _split_markdown_sections(markdown_text: str) -> List[Dict[str, Any]]:
             _flush()
             level = len(m.group(1))
             heading = m.group(2).strip()
-            # 维护 heading_stack
+            normalized = _remove_section_number(heading)
+            # 维护 heading_stack（归一化，包含当前节点）
             while len(heading_stack) >= level:
                 heading_stack.pop()
             current_heading = heading
             current_level = level
-            heading_stack.append(heading)
+            heading_stack.append(normalized)
         else:
             current_lines.append(line)
 
@@ -101,14 +106,12 @@ def parse_spec_document(
     Returns:
         List[Dict] 兼容 knowledge_base.json 的块列表
     """
-    # 直接传入 .doc 时无法解析；采购管线中应经 convert_office_file（LibreOffice 转临时 docx）
+    # .doc 文件由采购管线通过 MinerU 云端处理，spec_parser 只处理 .docx
     if file_path.suffix.lower() == ".doc":
-        logger.info(
-            "[spec_parser] %s 为 .doc，请使用 auto_convert.convert_office_file（将调 LibreOffice 转 docx），"
-            "或先手动另存为 .docx。",
-            file_path.name,
+        raise ValueError(
+            f"[spec_parser] {file_path.name} 为 .doc 格式，"
+            "应通过 MinerU 云端管线处理，不应直接传入 spec_parser。"
         )
-        return []
 
     from camel.loaders.markitdown import MarkItDownLoader
 
@@ -212,9 +215,23 @@ def _split_long_text(text: str, max_chars: int) -> List[str]:
 
 
 def _remove_section_number(title: str) -> str:
-    """去除章节标题中的编号"""
+    """去除章节标题开头的编号前缀。
+
+    支持格式：
+    - 数字编号（含可选末尾点）: "4. " "4.1 " "1.2.3. "
+    - 大写字母附录编号: "A. " "B.1 "
+    - 括号数字: "(1) " "1) "
+    - 中文章节: "第4章 " "第四章 " "第4节 "
+    """
     if not title:
         return title
-    title = re.sub(r"^(?:\d+\.)+\s*", "", title)
-    title = re.sub(r"^第\d+[章节]\s*", "", title)
+    # 数字编号
+    title = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title)
+    # 大写字母附录编号（如 "A. Overview"）
+    title = re.sub(r"^[A-Z](?:\.\d+)*\.?\s+", "", title)
+    # 括号数字: "(1) " 或 "1) "
+    title = re.sub(r"^\(\d+\)\s+", "", title)
+    title = re.sub(r"^\d+\)\s+", "", title)
+    # 中文章节（支持阿拉伯数字和中文数字）
+    title = re.sub(r"^第[0-9一二三四五六七八九十百千]+[章节篇]\s*", "", title)
     return title.strip()

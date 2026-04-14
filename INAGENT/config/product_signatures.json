@@ -80,8 +80,9 @@
     }
   ],
   "filter_rules": {
-    "min_target_score": 0.3,
-    "max_competitor_score": 0.2,
-    "comment": "如果 target_score < min_target_score 且 competitor_score > max_competitor_score，则判定为非目标产品"
+    "min_target_score": 0.05,
+    "max_competitor_score": 0.1,
+    "competitor_advantage_threshold": 2.0,
+    "comment": "如果 target_score < min_target_score 且 competitor_score > max_competitor_score，或者 competitor_score / target_score > competitor_advantage_threshold，则判定为非目标产品"
   }
 }
