@@ -125,6 +125,195 @@ def _sanitize_section_path(path: str) -> str:
     return ' > '.join(valid)
 
 
+_CHINESE_NUMERAL_DIGITS = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+_ROMAN_NUMERAL_DIGITS = {
+    "I": 1,
+    "V": 5,
+    "X": 10,
+    "L": 50,
+    "C": 100,
+    "D": 500,
+    "M": 1000,
+}
+
+
+def _chinese_numeral_to_int(token: str) -> Optional[int]:
+    """Convert common Chinese numerals to int."""
+    raw = str(token or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    if raw == "十":
+        return 10
+
+    total = 0
+    current = 0
+    unit_map = {"十": 10, "百": 100, "千": 1000}
+    for char in raw:
+        if char in _CHINESE_NUMERAL_DIGITS:
+            current = _CHINESE_NUMERAL_DIGITS[char]
+            continue
+        unit = unit_map.get(char)
+        if unit is None:
+            return None
+        if current == 0:
+            current = 1
+        total += current * unit
+        current = 0
+    total += current
+    return total or None
+
+
+def _roman_numeral_to_int(token: str) -> Optional[int]:
+    """Convert Roman numerals to int."""
+    raw = str(token or "").strip().upper()
+    if not raw:
+        return None
+    total = 0
+    prev = 0
+    for char in reversed(raw):
+        value = _ROMAN_NUMERAL_DIGITS.get(char)
+        if value is None:
+            return None
+        if value < prev:
+            total -= value
+        else:
+            total += value
+            prev = value
+    return total or None
+
+
+def _parse_heading_numbering_info(title: str) -> Optional[Dict[str, object]]:
+    """Parse structured numbering information from a heading."""
+    line = str(title or "").strip()
+    if not line:
+        return None
+
+    numeric_match = re.match(r"^(\d+(?:\.\d+)*)\s*[.．]?\s+", line)
+    if numeric_match:
+        parts = tuple(int(part) for part in numeric_match.group(1).split("."))
+        return {"kind": "numeric", "parts": parts, "level": len(parts)}
+
+    appendix_match = re.match(r"^([A-Z])(?:\.(\d+(?:\.\d+)*))?\s*[.．]?\s+", line)
+    if appendix_match:
+        parts = [ord(appendix_match.group(1)) - ord("A") + 1]
+        suffix = appendix_match.group(2)
+        if suffix:
+            parts.extend(int(part) for part in suffix.split("."))
+        tuple_parts = tuple(parts)
+        return {"kind": "appendix", "parts": tuple_parts, "level": len(tuple_parts)}
+
+    roman_match = re.match(r"^([IVXLCDM]+)[、.．]\s+", line, re.IGNORECASE)
+    if roman_match:
+        roman_val = _roman_numeral_to_int(roman_match.group(1))
+        if roman_val is not None:
+            return {"kind": "roman", "parts": (roman_val,), "level": 1}
+
+    bracket_number_match = re.match(r"^[\(（](\d+)[\)）]\s*", line)
+    if bracket_number_match:
+        return {
+            "kind": "ordered_numeric",
+            "parts": (int(bracket_number_match.group(1)),),
+            "level": 1,
+        }
+
+    ordered_number_match = re.match(r"^(\d+)[\)）、]\s*", line)
+    if ordered_number_match:
+        return {
+            "kind": "ordered_numeric",
+            "parts": (int(ordered_number_match.group(1)),),
+            "level": 1,
+        }
+
+    chapter_match = re.match(r"^第([0-9一二三四五六七八九十百千两]+)[章节篇卷部]\s*", line)
+    if chapter_match:
+        chapter_no = _chinese_numeral_to_int(chapter_match.group(1))
+        if chapter_no is not None:
+            return {"kind": "cjk_chapter", "parts": (chapter_no,), "level": 1}
+
+    chinese_order_match = re.match(r"^([一二三四五六七八九十百千两]+)[、.．]\s*", line)
+    if chinese_order_match:
+        ordered_no = _chinese_numeral_to_int(chinese_order_match.group(1))
+        if ordered_no is not None:
+            return {"kind": "cjk_ordered", "parts": (ordered_no,), "level": 1}
+
+    bracket_chinese_match = re.match(r"^[\(（]([一二三四五六七八九十百千两]+)[\)）]\s*", line)
+    if bracket_chinese_match:
+        ordered_no = _chinese_numeral_to_int(bracket_chinese_match.group(1))
+        if ordered_no is not None:
+            return {"kind": "cjk_bracket", "parts": (ordered_no,), "level": 2}
+
+    alpha_order_match = re.match(r"^([A-Za-z])[\)）、]\s*", line)
+    if alpha_order_match:
+        token = alpha_order_match.group(1).upper()
+        return {
+            "kind": "alpha_ordered",
+            "parts": (ord(token) - ord("A") + 1,),
+            "level": 1,
+        }
+
+    return None
+
+
+def _numbering_common_prefix_len(prev_parts: Tuple[int, ...], curr_parts: Tuple[int, ...]) -> int:
+    common = 0
+    for prev_part, curr_part in zip(prev_parts, curr_parts):
+        if prev_part != curr_part:
+            break
+        common += 1
+    return common
+
+
+def _score_numbering_transition(prev_info: Dict[str, object], curr_info: Dict[str, object]) -> float:
+    """Score whether adjacent numbering candidates form a coherent document outline."""
+    prev_kind = str(prev_info.get("kind") or "")
+    curr_kind = str(curr_info.get("kind") or "")
+    if prev_kind != curr_kind:
+        return 0.0
+
+    prev_parts = tuple(prev_info.get("parts") or ())
+    curr_parts = tuple(curr_info.get("parts") or ())
+    if not prev_parts or not curr_parts:
+        return 0.0
+
+    common = _numbering_common_prefix_len(prev_parts, curr_parts)
+    if common == len(prev_parts) and len(curr_parts) == len(prev_parts) + 1:
+        return 1.0
+    if len(prev_parts) == len(curr_parts) and common == len(curr_parts) - 1:
+        delta = curr_parts[-1] - prev_parts[-1]
+        if delta == 1:
+            return 1.0
+        if delta > 1:
+            return 0.45
+        if delta == 0:
+            return 0.2
+        return 0.0
+    if len(curr_parts) < len(prev_parts) and common == len(curr_parts) - 1:
+        delta = curr_parts[-1] - prev_parts[common]
+        if delta == 1:
+            return 0.9
+        if delta > 1:
+            return 0.35
+        return 0.0
+    if len(curr_parts) == 1 and curr_parts[0] >= prev_parts[0]:
+        return 0.5
+    return 0.0
+
+
 def _infer_section_level_from_heading(title: str) -> Optional[int]:
     """Infer section level from numbered headings.
 
@@ -133,15 +322,149 @@ def _infer_section_level_from_heading(title: str) -> Optional[int]:
         "11. 服务器负载均衡" -> level 1
         "第11章 服务器负载均衡" -> level 1
     """
-    if not title:
+    info = _parse_heading_numbering_info(title)
+    if not info:
         return None
-    number_match = re.match(r"^(\d+(?:\.\d+)*)\s*[.．]?\s+", title)
-    if number_match:
-        return len(number_match.group(1).split("."))
-    chapter_match = re.match(r"^第\d+[章节]\s+", title)
-    if chapter_match:
-        return 1
-    return None
+    level = info.get("level")
+    return int(level) if isinstance(level, int) else None
+
+
+def _iter_heading_candidate_lines(raw_text: str, clean_text: str) -> List[str]:
+    """Collect candidate heading lines from a MinerU block."""
+    lines: List[str] = []
+    for line in raw_text.split("\n"):
+        normalized = line.strip()
+        if normalized:
+            lines.append(normalized)
+    clean = clean_text.strip()
+    if clean and clean not in lines:
+        lines.append(clean)
+    return lines
+
+
+def _extract_numbering_heading_candidate(
+    raw_text: str,
+    clean_text: str,
+) -> Tuple[Optional[int], str, Optional[Dict[str, object]]]:
+    """Extract heading level/title from explicit document numbering."""
+    lines = _iter_heading_candidate_lines(raw_text, clean_text)
+    for line in lines:
+        numbering_info = _parse_heading_numbering_info(line)
+        if numbering_info:
+            inferred_level = numbering_info.get("level")
+            if isinstance(inferred_level, int) and inferred_level > 0:
+                return inferred_level, line, numbering_info
+    return None, "", None
+
+
+def _extract_mineru_heading_candidate(
+    block_type: str,
+    text_level: object,
+    raw_text: str,
+    clean_text: str,
+) -> Tuple[Optional[int], str]:
+    """Extract heading level/title from MinerU structural hints."""
+    first_line_raw = raw_text.strip().split("\n")[0].strip() if raw_text.strip() else ""
+    heading_title = first_line_raw or clean_text
+    if isinstance(text_level, int) and text_level > 0:
+        return int(text_level), heading_title
+    if block_type in {"title", "heading", "section"} and heading_title:
+        return 1, heading_title
+    return None, ""
+
+
+def _analyze_section_strategy(block_candidates: List[Dict[str, object]]) -> Dict[str, object]:
+    """Analyze numbering health and derive a document-level section strategy."""
+    heading_blocks = sum(
+        1
+        for candidate in block_candidates
+        if candidate.get("numbering_level") or candidate.get("mineru_level")
+    )
+    if heading_blocks == 0:
+        return {
+            "strategy": "empty",
+            "dominant_numbering_kind": "",
+            "numbering_coverage": 0.0,
+            "numbering_consistency": 0.0,
+            "numbering_transition_score": 0.0,
+            "numbering_health_score": 0.0,
+        }
+
+    numbering_candidates = [
+        candidate for candidate in block_candidates if candidate.get("numbering_info")
+    ]
+    numbering_blocks = len(numbering_candidates)
+    if numbering_blocks == 0:
+        return {
+            "strategy": "mineru",
+            "dominant_numbering_kind": "",
+            "numbering_coverage": 0.0,
+            "numbering_consistency": 0.0,
+            "numbering_transition_score": 0.0,
+            "numbering_health_score": 0.0,
+        }
+
+    kind_counts: Dict[str, int] = {}
+    for candidate in numbering_candidates:
+        info = candidate.get("numbering_info") or {}
+        kind = str(info.get("kind") or "")
+        if kind:
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+    dominant_kind = ""
+    dominant_count = 0
+    if kind_counts:
+        dominant_kind, dominant_count = max(kind_counts.items(), key=lambda item: item[1])
+
+    transition_scores: List[float] = []
+    for idx in range(1, len(numbering_candidates)):
+        prev_info = numbering_candidates[idx - 1].get("numbering_info") or {}
+        curr_info = numbering_candidates[idx].get("numbering_info") or {}
+        transition_scores.append(_score_numbering_transition(prev_info, curr_info))
+
+    coverage = numbering_blocks / heading_blocks
+    consistency = dominant_count / numbering_blocks if numbering_blocks else 0.0
+    transition_score = (
+        sum(transition_scores) / len(transition_scores)
+        if transition_scores
+        else 1.0
+    )
+    health_score = (0.45 * coverage) + (0.35 * consistency) + (0.20 * transition_score)
+
+    if numbering_blocks == 1 and coverage == 1.0:
+        strategy = "numbering"
+    elif coverage >= 0.7 and consistency >= 0.7 and transition_score >= 0.5:
+        strategy = "numbering"
+    elif (
+        coverage >= 0.2
+        and health_score >= 0.45
+        and (consistency >= 0.5 or transition_score >= 0.5)
+    ):
+        strategy = "mixed"
+    else:
+        strategy = "mineru"
+
+    return {
+        "strategy": strategy,
+        "dominant_numbering_kind": dominant_kind,
+        "numbering_coverage": round(coverage, 4),
+        "numbering_consistency": round(consistency, 4),
+        "numbering_transition_score": round(transition_score, 4),
+        "numbering_health_score": round(health_score, 4),
+    }
+
+
+def _normalize_heading_candidate(
+    heading_level: Optional[int],
+    heading_title: str,
+) -> Tuple[Optional[int], str]:
+    """Drop candidates that do not look like real headings."""
+    if not heading_level or heading_level <= 0:
+        return None, ""
+    normalized_title = _remove_section_number(heading_title)
+    if not normalized_title or not _is_plausible_heading(normalized_title):
+        return None, ""
+    return heading_level, heading_title
 
 
 # vLLM probing timeouts
@@ -591,7 +914,12 @@ def _iter_pdf_files() -> List[Path]:
 # ============================================================
 # Office 文档（docx/xlsx/doc/xls）处理
 # ============================================================
-OFFICE_EXTENSIONS = {".docx", ".doc", ".xlsx", ".xls"}
+MINERU_OFFICE_EXTENSIONS = {".docx", ".doc", ".pptx", ".ppt"}
+SPREADSHEET_EXTENSIONS = {".xlsx", ".xls"}
+MINERU_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp",
+}
+OFFICE_EXTENSIONS = MINERU_OFFICE_EXTENSIONS | SPREADSHEET_EXTENSIONS
 TEXT_EXTENSIONS = {".txt"}
 
 
@@ -603,6 +931,11 @@ def _iter_office_files() -> List[Path]:
 def _iter_text_files() -> List[Path]:
     """遍历 knowledge_base 目录下的 TXT 文档"""
     return _iter_files_by_ext(TEXT_EXTENSIONS)
+
+
+def _iter_mineru_extra_files() -> List[Path]:
+    """遍历 MinerU 支持的非 PDF 补充格式（仅图片）。"""
+    return _iter_files_by_ext(MINERU_IMAGE_EXTENSIONS)
 
 
 def convert_office_file(file_path: Path) -> None:
@@ -703,6 +1036,7 @@ def convert_office_file(file_path: Path) -> None:
         "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
+        "output_json_sha256": _compute_output_json_sha256(json_path),
     }
     cache_path.write_text(
         json.dumps(cache_payload, ensure_ascii=False, indent=2),
@@ -936,6 +1270,7 @@ def convert_text_file(file_path: Path) -> None:
         "link_stats": link_stats,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
+        "output_json_sha256": _compute_output_json_sha256(json_path),
     }
     cache_path.write_text(
         json.dumps(cache_payload, ensure_ascii=False, indent=2),
@@ -1011,6 +1346,38 @@ def _compute_file_fingerprint(src: Path) -> Dict[str, object]:
     }
 
 
+def _compute_output_json_sha256(json_path: Path) -> str:
+    """Compute SHA256 of an output JSON file (for cache tamper detection)."""
+    sha256 = hashlib.sha256()
+    with json_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def _verify_output_json_unchanged(
+    json_path: Path, cache_meta: Dict, src_name: str = ""
+) -> bool:
+    """Return True if the output JSON matches the SHA256 stored in cache.
+
+    Falls back to True when no hash is stored (old cache format) so existing
+    caches continue to work.  New caches written by this version include the
+    hash, so external modification is detected on the next run.
+    """
+    cached_hash = cache_meta.get("output_json_sha256")
+    if not cached_hash:
+        return True  # Old cache format — assume unchanged
+    try:
+        current_hash = _compute_output_json_sha256(json_path)
+    except Exception:
+        logger.info("[cache] cannot read output json for %s, re-processing.", src_name)
+        return False
+    if current_hash == cached_hash:
+        return True
+    logger.info("[cache] output json modified externally for %s, re-processing.", src_name)
+    return False
+
+
 def _can_skip_office_cached(
     src: Path,
     json_path: Path,
@@ -1035,11 +1402,11 @@ def _can_skip_office_cached(
         cached_fp.get("size") == current.get("size")
         and cached_fp.get("mtime") == current.get("mtime")
     ):
-        return True
+        return _verify_output_json_unchanged(json_path, meta, src.name)
     logger.info("[cache] mtime/size changed for %s, verifying content...", src.name)
     cached_hash = cached_fp.get("sha256")
     if cached_hash and cached_hash == current.get("sha256"):
-        return True
+        return _verify_output_json_unchanged(json_path, meta, src.name)
     logger.info("[cache] content changed for %s, re-processing.", src.name)
     return False
 
@@ -1104,7 +1471,7 @@ def _can_skip_cached(
         cached_fingerprint.get("size") == current_stat.st_size
         and cached_fingerprint.get("mtime") == current_stat.st_mtime
     ):
-        return True
+        return _verify_output_json_unchanged(json_path, meta, pdf.name)
 
     # 3. Slow Path: Content Hash Check
     # If mtime/size changed, we must verify if content actually changed.
@@ -1117,7 +1484,7 @@ def _can_skip_cached(
     if current_fingerprint.get("sha256") == cached_hash:
         # Content is identical! Update cache file with new mtime/size so next check is fast.
         _update_cache_mtime(cache_path, current_fingerprint)
-        return True
+        return _verify_output_json_unchanged(json_path, meta, pdf.name)
 
     logger.info("[cache] content changed for %s, re-processing.", pdf.name)
     return False
@@ -1132,6 +1499,33 @@ def _clean_chunk_text(text: str) -> str:
     # Remove non-printable characters (basic check)
     text = "".join(ch for ch in text if ch.isprintable())
     return text.strip()
+
+
+def _strip_clean_text_heading_number(
+    clean_text: str,
+    section_title: str = "",
+    parent_section: str = "",
+) -> str:
+    """Drop a leading heading number only when it matches section context."""
+    clean = (clean_text or "").strip()
+    if not clean:
+        return clean
+
+    stripped = _remove_section_number(clean)
+    if stripped == clean:
+        return clean
+
+    refs = set()
+    for ref in (section_title, parent_section):
+        ref_clean = str(ref or "").strip()
+        if not ref_clean:
+            continue
+        refs.add(ref_clean)
+        refs.add(_remove_section_number(ref_clean))
+
+    if stripped in refs:
+        return stripped
+    return clean
 
 def _apply_llm_metadata_extraction(text: str, meta: Dict[str, object], config: Dict) -> None:
     """Apply LLM metadata extraction for a single chunk (delegates to batch)."""
@@ -1494,7 +1888,8 @@ def _enhance_metadata_with_function_index(knowledge_blocks: List[Dict[str, any]]
 _PRESERVE_META_FIELDS = (
     "command_prefix", "product_module", "protocol_type", "intent",
     "config_mode", "chunk_type", "function_hierarchy", "document_category",
-    "required_keywords", "description", "tree_level",
+    "required_keywords", "description", "tree_level", "section_strategy",
+    "section_source", "section_health_score",
 )
 
 
@@ -1507,11 +1902,15 @@ def _extract_chunk_metadata(
     config = _load_project_config()
     llm_config = config.get("llm-aided-config", {}).get("metadata_extraction", {})
 
-    clean_text = _clean_chunk_text(text)
+    section_title = str((base_meta or {}).get("section_title") or "").strip()
+    parent_section = str((base_meta or {}).get("parent_section") or "").strip()
+    clean_text = _strip_clean_text_heading_number(
+        _clean_chunk_text(text),
+        section_title,
+        parent_section,
+    )
     meta: Dict[str, object] = {"clean_text": clean_text}
     if base_meta:
-        section_title = str(base_meta.get("section_title") or "").strip()
-        parent_section = str(base_meta.get("parent_section") or "").strip()
         if section_title:
             meta["section_title"] = section_title
         if parent_section:
@@ -1770,61 +2169,106 @@ def _build_section_context_map(blocks: List[Dict]) -> Dict[int, Dict[str, str]]:
     """Build section context (section_title/parent_section/section_path)
     for each block index using MinerU hierarchy or numbered headings.
     """
-    section_stack: List[Tuple[int, str]] = []
-    context_map: Dict[int, Dict[str, str]] = {}
-
-    for idx, block in enumerate(blocks):
+    block_candidates: List[Dict[str, object]] = []
+    for block in blocks:
         raw_text = _extract_text_from_block(block)
         clean_text = _clean_chunk_text(raw_text)
         block_type = str(block.get("type") or "").lower()
         text_level = block.get("text_level")
+        numbering_level, numbering_title, numbering_info = _extract_numbering_heading_candidate(
+            raw_text,
+            clean_text,
+        )
+        numbering_level, numbering_title = _normalize_heading_candidate(
+            numbering_level,
+            numbering_title,
+        )
+        if numbering_level is None:
+            numbering_info = None
+        mineru_level, mineru_title = _extract_mineru_heading_candidate(
+            block_type,
+            text_level,
+            raw_text,
+            clean_text,
+        )
+        mineru_level, mineru_title = _normalize_heading_candidate(
+            mineru_level,
+            mineru_title,
+        )
+        block_candidates.append(
+            {
+                "numbering_level": numbering_level,
+                "numbering_title": numbering_title,
+                "numbering_info": numbering_info,
+                "mineru_level": mineru_level,
+                "mineru_title": mineru_title,
+            }
+        )
 
+    section_analysis = _analyze_section_strategy(block_candidates)
+    section_strategy = str(section_analysis.get("strategy") or "empty")
+    dominant_numbering_kind = str(
+        section_analysis.get("dominant_numbering_kind") or ""
+    )
+    section_stack: List[Tuple[int, str, str]] = []
+    context_map: Dict[int, Dict[str, str]] = {}
+
+    for idx, candidate in enumerate(block_candidates):
         heading_level: Optional[int] = None
         heading_title = ""
 
-        first_line_raw = raw_text.strip().split('\n')[0].strip() if raw_text.strip() else ""
+        heading_source = "empty"
+        numbering_level = candidate.get("numbering_level")
+        numbering_title = str(candidate.get("numbering_title") or "")
+        numbering_info = candidate.get("numbering_info") or {}
+        numbering_kind = str(numbering_info.get("kind") or "")
+        mineru_level = candidate.get("mineru_level")
+        mineru_title = str(candidate.get("mineru_title") or "")
+        has_mineru_heading = isinstance(mineru_level, int) and mineru_level > 0
 
-        if isinstance(text_level, int) and text_level > 0:
-            heading_level = int(text_level)
-            heading_title = first_line_raw or clean_text
-        else:
-            inferred_level = _infer_section_level_from_heading(clean_text)
-            if not inferred_level:
-                # MinerU 常见格式：第一行是纯中文标题，第二行是"章节号. 标题"
-                # clean_text 把换行合并了，所以用 raw_text 逐行尝试
-                for line in raw_text.strip().split('\n'):
-                    line = line.strip()
-                    if line:
-                        inferred_level = _infer_section_level_from_heading(line)
-                        if inferred_level:
-                            break
-            if inferred_level:
-                heading_level = inferred_level
-                heading_title = first_line_raw or clean_text
-            elif block_type in {"title", "heading", "section"} and clean_text:
-                heading_level = 1
-                heading_title = first_line_raw or clean_text
+        use_numbering = False
+        if isinstance(numbering_level, int) and numbering_level > 0:
+            if section_strategy == "numbering":
+                use_numbering = True
+            elif section_strategy == "mixed":
+                use_numbering = numbering_kind == dominant_numbering_kind or not has_mineru_heading
+            elif section_strategy == "mineru":
+                use_numbering = not has_mineru_heading
+
+        if use_numbering:
+            heading_level = numbering_level
+            heading_title = numbering_title
+            heading_source = "numbering"
+        elif has_mineru_heading:
+            heading_level = mineru_level
+            heading_title = mineru_title
+            heading_source = "mineru"
 
         if heading_level and heading_title:
             normalized_title = _remove_section_number(heading_title)
-            if normalized_title and _is_plausible_heading(normalized_title):
+            if normalized_title:
                 while section_stack and section_stack[-1][0] >= heading_level:
                     section_stack.pop()
-                section_stack.append((heading_level, normalized_title))
+                section_stack.append((heading_level, normalized_title, heading_source))
 
         if section_stack:
             section_title = section_stack[-1][1]
             parent_section = section_stack[-2][1] if len(section_stack) > 1 else ""
             section_path = " > ".join([item[1] for item in section_stack])
+            section_source = section_stack[-1][2]
         else:
             section_title = ""
             parent_section = ""
             section_path = ""
+            section_source = "empty"
 
         context_map[idx] = {
             "section_title": section_title,
             "parent_section": parent_section,
             "section_path": section_path,
+            "section_strategy": section_strategy,
+            "section_source": section_source,
+            "section_health_score": section_analysis.get("numbering_health_score", 0.0),
         }
 
     return context_map
@@ -1976,6 +2420,9 @@ def _classify_frontmatter_pages(
 
 
 def _filter_frontmatter_blocks(blocks: List[Dict]) -> Tuple[List[Dict], List[int]]:
+    # AUTO_CONVERT_SKIP_LLM=1 全局禁用所有 LLM 调用（含 frontmatter filter）
+    if os.environ.get("AUTO_CONVERT_SKIP_LLM", "").strip().lower() in {"1", "true", "yes"}:
+        return blocks, []
     frontmatter_cfg = _get_frontmatter_config()
     if not frontmatter_cfg.get("enable", False):
         return blocks, []
@@ -2242,8 +2689,15 @@ async def run_procurement_document_pipeline() -> None:
         )
 
     # LLM Gateway preflight: probe real /chat/completions
-    global _LLM_GATEWAY_AVAILABLE
-    if _LLM_GATEWAY_AVAILABLE is None:
+    # AUTO_CONVERT_SKIP_LLM=1 — 跳过 preflight 并禁用所有 LLM metadata 提取
+    # （用于纯采购测试、CI 等不需要 LLM 的场景）
+    global _LLM_GATEWAY_AVAILABLE, _LLM_METADATA_AVAILABLE
+    _skip_llm = os.environ.get("AUTO_CONVERT_SKIP_LLM", "").strip().lower() in {"1", "true", "yes"}
+    if _skip_llm:
+        _LLM_GATEWAY_AVAILABLE = False
+        _LLM_METADATA_AVAILABLE = False
+        logger.info("[gateway] AUTO_CONVERT_SKIP_LLM=1 — 跳过 LLM preflight，禁用 metadata LLM 提取")
+    elif _LLM_GATEWAY_AVAILABLE is None:
         runtime = _get_llm_gateway_runtime()
         base_url = str(runtime.get("base_url") or "")
         model = str(runtime.get("model") or "")
@@ -2361,17 +2815,14 @@ async def run_procurement_document_pipeline() -> None:
     # MinerU 云端 API 原生支持 pdf/doc/docx/ppt/pptx，输出与 PDF 完全一致（块粒度）。
     # • 可走 MinerU 的格式（文档类）：.docx/.doc/.pptx/.ppt → 必须走 MinerU 云端
     # • 不走 MinerU 的格式（表格类）：.xlsx/.xls → 走 testlist_parser
-    MINERU_OFFICE_EXTS = {".docx", ".doc", ".pptx", ".ppt"}
-    SPREADSHEET_EXTS = {".xlsx", ".xls"}
-
     office_files = office_files_early
     if office_files:
         logger.info("=" * 80)
         logger.info("[office] 发现 %d 个 Office 文档，开始处理...", len(office_files))
 
         # 分流：表格类走 testlist_parser，文档类走 MinerU（无回退）
-        doc_files = [f for f in office_files if f.suffix.lower() in MINERU_OFFICE_EXTS]
-        spreadsheet_files = [f for f in office_files if f.suffix.lower() in SPREADSHEET_EXTS]
+        doc_files = [f for f in office_files if f.suffix.lower() in MINERU_OFFICE_EXTENSIONS]
+        spreadsheet_files = [f for f in office_files if f.suffix.lower() in SPREADSHEET_EXTENSIONS]
 
         # 表格类（xlsx/xls）—— testlist_parser
         for ofile in spreadsheet_files:
@@ -2379,7 +2830,7 @@ async def run_procurement_document_pipeline() -> None:
 
         # 文档类（docx/doc/pptx/ppt）—— 必须走 MinerU 云端，不可用则报错终止
         if doc_files:
-            if not (_use_mineru_cloud() and bool(_mp._mineru_cloud_token())):
+            if not (_mp._use_mineru_cloud() and bool(_mp._mineru_cloud_token())):
                 raise RuntimeError(
                     f"发现 {len(doc_files)} 个文档文件需要 MinerU 云端处理，"
                     "但 MinerU 云端不可用（未配置或 token 为空）。请配置 MINERU_CLOUD_TOKEN。"
@@ -2393,6 +2844,22 @@ async def run_procurement_document_pipeline() -> None:
         logger.info("[office] Office 文档处理完成")
     else:
         logger.info("[office] 未发现 Office 文档，跳过")
+
+    # ============================================================
+    # MinerU 额外格式（仅图片）
+    # ============================================================
+    mineru_extra_files = _iter_mineru_extra_files()
+    if mineru_extra_files:
+        logger.info("=" * 80)
+        logger.info(
+            "[mineru-extra] 发现 %d 个图片文档，开始处理...",
+            len(mineru_extra_files),
+        )
+        extra_tasks = [_protected_convert(f) for f in mineru_extra_files]
+        await asyncio.gather(*extra_tasks)
+        logger.info("[mineru-extra] 图片文档处理完成")
+    else:
+        logger.info("[mineru-extra] 未发现图片文档，跳过")
 
     # ============================================================
     # TXT 文档处理

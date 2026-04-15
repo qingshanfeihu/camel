@@ -1,18 +1,23 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-"""农场主独立流程：质量门控后的通过项增强与销售员交接。"""
+"""农场主独立流程：质量门控后完整分类（规则+LLM）与农民/质检员交接。"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict
 import json
 import logging
+import math
+import re
 import sys
-from datetime import datetime, timezone
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, field as dc_field
 from dataclasses import fields as dc_fields
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from INAGENT.data_tools.quality_feedback_loop import (
     FEEDBACK_INBOX_SCHEMA_VERSION,
@@ -47,6 +52,70 @@ _PASSTHROUGH_LLM_META_FIELDS = (
     "chunk_type",
     "override_commands",
 )
+
+# ── Classification constants ─────────────────────────────────────────
+_CLASSIFY_BATCH_SIZE = 20       # chunks per LLM classification call
+_CLASSIFY_TEXT_LIMIT = 800      # chars per chunk snippet in classification prompt
+_CLASSIFY_TOKEN_BUDGET = 8000   # token budget per sub-batch
+_CLASSIFY_CHARS_PER_TOKEN = 3.5
+_CLASSIFY_MAX_WORKERS = 8
+
+_VALID_CLASSIFICATION_ACTIONS = frozenset({
+    "discard",
+    "merge_into_existing",
+    "tree_create_leaf",
+    "tree_create_branch",
+    "tree_create_trunk",
+    "tree_create_root",
+    "needs_tree_session",
+})
+
+_ACTION_RANK: Dict[str, int] = {
+    "tree_create_leaf": 1,
+    "tree_create_branch": 2,
+    "tree_create_trunk": 3,
+    "tree_create_root": 4,
+}
+
+_TREE_CREATE_TO_LEVEL: Dict[str, str] = {
+    "tree_create_leaf": "leaf",
+    "tree_create_branch": "branch",
+    "tree_create_trunk": "trunk",
+    "tree_create_root": "root",
+}
+
+_CMD_LIKE_KEYWORDS = re.compile(
+    r"(?i)\b(command|cmd|cli|show\s|no\s|display\s|设置|配置命令|"
+    r"命令参数|命令格式|command\s+reference)\b"
+)
+
+_SECTION_NUMBER_RE = re.compile(r"^\s*[\d.]+\s*")
+_MIN_USEFUL_CONTENT_LEN = 10  # chunks with < 10 useful chars (after stripping title/number) are thin headers
+
+
+def _useful_content_length(text: str, section_title: str) -> int:
+    """Return the length of actual content after stripping first-line title and section numbers."""
+    lines = text.strip().split("\n")
+    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    body = _SECTION_NUMBER_RE.sub("", body).strip()
+    if section_title:
+        body = body.replace(section_title, "").strip()
+    return len(body)
+
+
+@dataclass
+class _ChunkTreeContext:
+    """Lightweight tree context for a chunk (no GraphRAG dependency)."""
+
+    chunk_key: str  # "source_file::block_id"
+    exists_in_tree: bool = False
+    tree_level: str = ""  # root|trunk|branch|leaf|""
+    matched_node_id: str = ""
+    parent_candidate_id: str = ""
+    similar_commands: List[str] = dc_field(default_factory=list)
+    skeleton_module_id: str = ""
+    skeleton_artifact_exists: bool = False
+    hierarchy_prefix: str = ""
 
 
 def _setup_logging() -> None:
@@ -241,58 +310,968 @@ def _build_quality_passed_llm_patches(
     return patches
 
 
-def _build_passthrough_decisions(
-    gate: Dict[str, Dict[str, object]],
-    passed_chunks: List[Dict[str, object]],
-) -> tuple[List[Dict[str, object]], Dict[str, int]]:
-    rows: List[Dict[str, object]] = []
-    llm_patches = _build_quality_passed_llm_patches(passed_chunks)
+# ── Stage 1: Rules-based pre-filter ──────────────────────────────────
 
-    llm_enhanced = 0
-    for chunk in passed_chunks:
+
+def _chunk_key(chunk: Dict[str, object]) -> str:
+    meta = chunk.get("metadata") or {}
+    if not isinstance(meta, dict):
+        return ""
+    sf = str(meta.get("source_file") or "")
+    bid = str(meta.get("block_id") or "")
+    return f"{sf}::{bid}" if sf and bid else ""
+
+
+def _stage1_rules_prefilter(
+    chunks: List[Dict[str, object]],
+) -> Tuple[
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+]:
+    """Separate chunks into: candidates, garbage, non_knowledge, wrong_product."""
+    from INAGENT.utils.chunk_text_quality import is_garbage_page_content
+    from INAGENT.utils.non_product_section_patterns import (
+        NON_KNOWLEDGE_CONTENT_KEYWORDS,
+        non_product_section_title_regex,
+    )
+
+    title_re = non_product_section_title_regex()
+    body_kws = NON_KNOWLEDGE_CONTENT_KEYWORDS
+
+    candidates: List[Dict[str, object]] = []
+    garbage: List[Dict[str, object]] = []
+    non_knowledge: List[Dict[str, object]] = []
+
+    for chunk in chunks:
+        text = str(chunk.get("page_content") or chunk.get("text") or "").strip()
         meta = chunk.get("metadata") or {}
         if not isinstance(meta, dict):
-            continue
-        source_file = str(meta.get("source_file") or "")
-        block_id = str(meta.get("block_id") or "")
-        if not source_file or not block_id:
-            continue
-        key = f"{source_file}::{block_id}"
-        gate_item = gate.get(key, {})
-        if gate_item and not bool(gate_item.get("is_product_knowledge", False)):
+            meta = {}
+        section_title = str(meta.get("section_title") or "").strip()
+
+        if is_garbage_page_content(text):
+            garbage.append(chunk)
             continue
 
+        if section_title and title_re.search(section_title):
+            non_knowledge.append(chunk)
+            continue
+
+        body_prefix = text[:500].lower()
+        is_non_kw = any(kw.lower() in body_prefix for kw in body_kws)
+        if is_non_kw:
+            non_knowledge.append(chunk)
+            continue
+
+        # ── Thin content filter: pure section headers with no real body ──
+        if _useful_content_length(text, section_title) < _MIN_USEFUL_CONTENT_LEN:
+            garbage.append(chunk)
+            continue
+
+        candidates.append(chunk)
+
+    # ── Product filter: reject competitor product knowledge ──
+    wrong_product: List[Dict[str, object]] = []
+    try:
+        from INAGENT.agents._farm_owner_product_filter import analyze_product_match
+        feedback = analyze_product_match(candidates)
+        if feedback:
+            rejected_keys = {
+                f"{r['source_file']}::{r['block_id']}" for r in feedback
+            }
+            filtered_candidates = []
+            for chunk in candidates:
+                key = _chunk_key(chunk)
+                if key in rejected_keys:
+                    wrong_product.append(chunk)
+                else:
+                    filtered_candidates.append(chunk)
+            candidates = filtered_candidates
+            logger.info(
+                "[farm-owner] product filter: rejected %d competitor chunks",
+                len(wrong_product),
+            )
+    except Exception as exc:
+        logger.warning("[farm-owner] product filter unavailable: %s", exc)
+
+    logger.info(
+        "[farm-owner] stage1: %d candidates, %d garbage, %d non_knowledge, %d wrong_product",
+        len(candidates), len(garbage), len(non_knowledge), len(wrong_product),
+    )
+    return candidates, garbage, non_knowledge, wrong_product
+
+
+# ── Stage 2: Tree context lookup (CLIGraphStore + SkeletonIndex) ─────
+
+
+def _stage2_tree_context_lookup(
+    chunks: List[Dict[str, object]],
+) -> Dict[str, _ChunkTreeContext]:
+    """Look up tree context for each candidate chunk using read-only stores."""
+    cli_graph = None
+    skeleton = None
+
+    try:
+        from INAGENT.rag.cli_graph_store import get_cli_graph_store
+        cli_graph = get_cli_graph_store()
+    except Exception as exc:
+        logger.warning("[farm-owner] CLIGraphStore not available: %s", exc)
+
+    try:
+        from INAGENT.rag.skeleton_index import get_skeleton_index
+        skeleton = get_skeleton_index()
+    except Exception as exc:
+        logger.warning("[farm-owner] SkeletonIndex not available: %s", exc)
+
+    contexts: Dict[str, _ChunkTreeContext] = {}
+
+    for chunk in chunks:
+        key = _chunk_key(chunk)
+        if not key:
+            continue
+
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+
+        ctx = _ChunkTreeContext(chunk_key=key)
+
+        # Derive entity title candidates for tree lookup
+        entity_hints: List[str] = []
+        cmd_prefix = str(meta.get("command_prefix") or "").strip()
+        if cmd_prefix:
+            entity_hints.append(cmd_prefix)
+        section_title = str(meta.get("section_title") or "").strip()
+        if section_title and section_title not in entity_hints:
+            entity_hints.append(section_title)
+        tree_node_id = str(meta.get("tree_node_id") or "").strip()
+        if tree_node_id and tree_node_id not in entity_hints:
+            entity_hints.append(tree_node_id)
+
+        # CLI graph existence check
+        if cli_graph and entity_hints:
+            for hint in entity_hints:
+                try:
+                    exists, similar = cli_graph.command_exists(hint)
+                except Exception:
+                    exists, similar = False, []
+                if exists:
+                    ctx.exists_in_tree = True
+                    ctx.matched_node_id = similar[0] if similar else hint
+                    ctx.similar_commands = similar
+                    ctx.tree_level = "leaf"
+                    break
+                if similar:
+                    ctx.similar_commands = similar
+
+            # Prefix-truncation parent search if not found
+            if not ctx.exists_in_tree and entity_hints:
+                best_hint = entity_hints[0]
+                tokens = best_hint.split()
+                for length in range(len(tokens) - 1, 0, -1):
+                    prefix = " ".join(tokens[:length])
+                    try:
+                        exists, similar = cli_graph.command_exists(prefix)
+                    except Exception:
+                        exists, similar = False, []
+                    if exists:
+                        ctx.parent_candidate_id = similar[0] if similar else prefix
+                        break
+
+            # Hierarchy prefix
+            if ctx.exists_in_tree or ctx.parent_candidate_id:
+                h_hint = ctx.matched_node_id or ctx.parent_candidate_id
+                try:
+                    ctx.hierarchy_prefix = cli_graph.get_hierarchy_prefix(h_hint)
+                except Exception:
+                    pass
+
+        # Skeleton module lookup
+        if skeleton and entity_hints:
+            for hint in entity_hints:
+                try:
+                    mod_id = skeleton.resolve_module(hint)
+                except Exception:
+                    mod_id = None
+                if mod_id:
+                    ctx.skeleton_module_id = mod_id
+                    try:
+                        ctx.skeleton_artifact_exists = skeleton.artifact_count(mod_id) > 0
+                    except Exception:
+                        pass
+                    break
+
+        # Infer tree_level from existing metadata
+        tp = meta.get("tree_position")
+        if isinstance(tp, dict) and tp.get("tree_level"):
+            meta_level = str(tp["tree_level"]).strip().lower()
+            if meta_level in ("root", "trunk", "branch", "leaf"):
+                if not ctx.tree_level:
+                    ctx.tree_level = meta_level
+
+        contexts[key] = ctx
+
+    found = sum(1 for c in contexts.values() if c.exists_in_tree)
+    parent = sum(1 for c in contexts.values() if c.parent_candidate_id and not c.exists_in_tree)
+    logger.info(
+        "[farm-owner] stage2: %d contexts built, %d exact tree match, %d parent match",
+        len(contexts), found, parent,
+    )
+    return contexts
+
+
+# ── Stage 3: Rules-based classification ──────────────────────────────
+
+
+def _stage3_rules_classification(
+    chunks: List[Dict[str, object]],
+    tree_contexts: Dict[str, _ChunkTreeContext],
+    llm_patches: Dict[str, Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Classify chunks where tree context is sufficient. Returns (decided_rows, undecided_chunks)."""
+    decided: List[Dict[str, object]] = []
+    undecided: List[Dict[str, object]] = []
+
+    for chunk in chunks:
+        key = _chunk_key(chunk)
+        if not key:
+            undecided.append(chunk)
+            continue
+
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        ctx = tree_contexts.get(key, _ChunkTreeContext(chunk_key=key))
+        patch = llm_patches.get(key) or {}
+        text = str(chunk.get("page_content") or "").strip()
+
+        source_file = str(meta.get("source_file") or "")
+        block_id = str(meta.get("block_id") or "")
+        section_title = str(meta.get("section_title") or "")
+
+        # Build chunk_meta_patch from LLM enrichment
         chunk_meta_patch: Dict[str, object] = {
             "source_file": source_file,
             "document_category": str(meta.get("document_category") or ""),
         }
-        llm_patch = llm_patches.get(key) or {}
-        if llm_patch:
-            chunk_meta_patch.update(llm_patch)
-            llm_enhanced += 1
+        if patch:
+            chunk_meta_patch.update(patch)
 
-        action = "merge_into_existing"
-        rows.append(
-            {
+        # Rule 1: Exact tree match → merge_into_existing
+        if ctx.exists_in_tree:
+            evidence = "tree_exact_match"
+            if ctx.skeleton_artifact_exists:
+                evidence = "tree_exact_match_with_artifact"
+            decided.append({
                 "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
                 "source_file": source_file,
-                "entity_title": str(meta.get("section_title") or f"{source_file}#{block_id}"),
-                "action": action,
-                "target_node_id": str(meta.get("tree_node_id") or ""),
+                "entity_title": section_title or ctx.matched_node_id,
+                "action": "merge_into_existing",
+                "target_node_id": ctx.matched_node_id,
                 "target_block_id": block_id,
-                "tree_level": str(chunk_meta_patch.get("tree_level") or ""),
+                "tree_level": ctx.tree_level or "leaf",
                 "fill_fields": {},
                 "enrich_fields": {},
                 "chunk_meta_patch": chunk_meta_patch,
-                "source_evidence": "quality_gate_pass_with_farm_owner_enhancement",
+                "source_evidence": evidence,
                 "resolved_value": {},
-            }
+            })
+            continue
+
+        # Rule 2: Parent found via prefix truncation → tree_create_*
+        if ctx.parent_candidate_id:
+            is_cmd = bool(_CMD_LIKE_KEYWORDS.search(text[:300]) or
+                          _CMD_LIKE_KEYWORDS.search(section_title))
+            action = "tree_create_leaf" if is_cmd else "tree_create_branch"
+            decided.append({
+                "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+                "source_file": source_file,
+                "entity_title": section_title or f"{source_file}#{block_id}",
+                "action": action,
+                "target_node_id": ctx.parent_candidate_id,
+                "target_block_id": block_id,
+                "tree_level": "leaf" if is_cmd else "branch",
+                "fill_fields": {},
+                "enrich_fields": {"parent_candidate": ctx.parent_candidate_id},
+                "chunk_meta_patch": chunk_meta_patch,
+                "source_evidence": f"parent_prefix_match:{ctx.parent_candidate_id}",
+                "resolved_value": {},
+            })
+            continue
+
+        # Rule 3: LLM-enriched command_prefix matches CLI graph
+        enriched_cp = str(patch.get("command_prefix") or "").strip()
+        if enriched_cp and key in tree_contexts:
+            # Re-check with enriched command_prefix (may not have been used in stage2)
+            try:
+                from INAGENT.rag.cli_graph_store import get_cli_graph_store
+                cg = get_cli_graph_store()
+                exists, similar = cg.command_exists(enriched_cp)
+            except Exception:
+                exists, similar = False, []
+            if exists:
+                decided.append({
+                    "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+                    "source_file": source_file,
+                    "entity_title": section_title or enriched_cp,
+                    "action": "merge_into_existing",
+                    "target_node_id": similar[0] if similar else enriched_cp,
+                    "target_block_id": block_id,
+                    "tree_level": "leaf",
+                    "fill_fields": {},
+                    "enrich_fields": {},
+                    "chunk_meta_patch": chunk_meta_patch,
+                    "source_evidence": "llm_enriched_command_prefix_match",
+                    "resolved_value": {},
+                })
+                continue
+
+        # No rule matched → undecided
+        undecided.append(chunk)
+
+    logger.info(
+        "[farm-owner] stage3: %d rules-decided, %d undecided -> LLM",
+        len(decided), len(undecided),
+    )
+    return decided, undecided
+
+
+# ── Stage 4: LLM batch classification ────────────────────────────────
+
+_CLASSIFICATION_SYSTEM_PROMPT = """\
+你是一个网络产品CLI知识库的知识分类器。知识树有4层：
+- root（系统架构/产品总览）
+- trunk（功能模块，如SLB、GSLB）
+- branch（功能子组，如SLB > Cookie持久化）
+- leaf（具体CLI命令）
+
+对每个文本块，判断其归属：
+1. "discard" — 无用知识：
+   - 样板文字、目录页、版权页、纯章节标题/编号
+   - 物理环境规格（机房温湿度、通风散热、电源要求、防静电、空气质量、机柜安装）
+   - 硬件部署准备（物理布线、接地、散热栅、设备开箱）
+   - 营销口号、厂商水印、重复前言
+   - 内容不含任何CLI命令、配置参数或功能行为描述的纯概述/导言
+2. "merge_into_existing" — 内容包含实质性CLI配置/命令/参数描述，属于已有树节点，可直接补充信息。target_node_id填已有节点名
+3. "tree_create_leaf" — 包含新CLI命令或配置项的实质性内容，树中不存在。target_node_id填建议的**父节点**名
+4. "tree_create_branch" — 包含完整功能子组描述的实质性内容。target_node_id填建议的**父模块/父节点**名（如 "SLB"、"基础网络 > VLAN"）
+5. "tree_create_trunk" — 包含完整功能模块描述的实质性内容，树中不存在。target_node_id填建议的**父root节点**或留空
+6. "tree_create_root" — 新系统架构文档（极少见）
+7. "needs_tree_session" — 无法判断，需人工审阅
+
+注意：
+- 只有包含实质性技术内容（CLI命令/配置步骤/功能行为描述/参数说明）的chunk才应归入2-6类。
+- 仅有标题+章节号、概述性导语、或物理环境相关说明的chunk应归为discard。
+- target_node_id对于tree_create_*类action必须填写建议的父节点路径（如"SLB"、"基础网络 > VXLAN"），不可为空。
+- tree_level要与action匹配：tree_create_leaf→"leaf"，tree_create_branch→"branch"，tree_create_trunk→"trunk"。
+
+返回JSON对象，包含 "results" 数组，每个元素必须包含 chunk_index 字段与输入对应。
+结果数组长度必须与输入chunk数量严格一致，不可省略任何chunk。
+{"results": [{"chunk_index": 0, "action": "...", "tree_level": "root|trunk|branch|leaf", "target_node_id": "", "reason": "...", "confidence": 0.0}]}
+
+只返回JSON，不要markdown、不要解释。"""
+
+
+def _stage4_llm_batch_classification(
+    undecided_chunks: List[Dict[str, object]],
+    tree_contexts: Dict[str, _ChunkTreeContext],
+    llm_patches: Dict[str, Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Classify remaining undecided chunks via LLM batch calls."""
+    if not undecided_chunks:
+        return []
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        OpenAI = None  # type: ignore[misc]
+
+    try:
+        import json_repair as _json_repair
+    except ImportError:
+        _json_repair = None
+
+    if OpenAI is None:
+        logger.warning("[farm-owner] openai not available; marking all undecided as needs_tree_session")
+        return _fallback_all_undecided(undecided_chunks, llm_patches)
+
+    try:
+        from INAGENT.data_tools.auto_convert import (
+            _get_llm_gateway_runtime,
+            _call_llm_with_retry_and_fallback,
         )
-    return rows, {
-        "llm_enhanced": llm_enhanced,
-        "classified": 0,
-        "discarded": 0,
+        runtime = _get_llm_gateway_runtime()
+    except Exception as exc:
+        logger.warning("[farm-owner] LLM gateway not available: %s; fallback", exc)
+        return _fallback_all_undecided(undecided_chunks, llm_patches)
+
+    api_key = str(runtime.get("api_key") or "")
+    base_url = str(runtime.get("base_url") or "")
+    model = str(runtime.get("model") or "")
+    if not api_key or not base_url:
+        logger.warning("[farm-owner] LLM credentials missing; fallback")
+        return _fallback_all_undecided(undecided_chunks, llm_patches)
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=runtime.get("timeout", 120))
+
+    # Build sub-batches (token-aware)
+    sub_batches: List[List[Dict[str, object]]] = []
+    sub_batch: List[Dict[str, object]] = []
+    token_count = 0
+    for chunk in undecided_chunks:
+        text = str(chunk.get("page_content") or "")[:_CLASSIFY_TEXT_LIMIT]
+        item_tokens = math.ceil(len(text) / _CLASSIFY_CHARS_PER_TOKEN)
+        if sub_batch and (
+            token_count + item_tokens > _CLASSIFY_TOKEN_BUDGET
+            or len(sub_batch) >= _CLASSIFY_BATCH_SIZE
+        ):
+            sub_batches.append(sub_batch)
+            sub_batch = []
+            token_count = 0
+        sub_batch.append(chunk)
+        token_count += item_tokens
+    if sub_batch:
+        sub_batches.append(sub_batch)
+
+    all_decided: List[Dict[str, object]] = []
+    lock = __import__("threading").Lock()
+
+    def _process_sub_batch(batch: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        chunk_lines = []
+        batch_keys = []
+        for idx, chunk in enumerate(batch):
+            meta = chunk.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            key = _chunk_key(chunk)
+            batch_keys.append(key)
+            text = str(chunk.get("page_content") or "")[:_CLASSIFY_TEXT_LIMIT]
+            sec = str(meta.get("section_title") or "")
+            src = str(meta.get("source_file") or "")
+            ctx = tree_contexts.get(key, _ChunkTreeContext(chunk_key=key))
+            patch = llm_patches.get(key, {})
+
+            header = f"[CHUNK {idx}]"
+            if sec:
+                header += f" section={sec}"
+            if src:
+                header += f" source={src}"
+            if ctx.similar_commands:
+                sc_str = ",".join(ctx.similar_commands[:3])
+                header += f" similar_nodes={sc_str}"
+            if patch.get("product_module"):
+                header += f" module={patch['product_module']}"
+            if patch.get("command_prefix"):
+                header += f" cmd_prefix={patch['command_prefix']}"
+            chunk_lines.append(f"{header}\n{text}")
+
+        user_content = f"共 {len(batch)} 个chunk，请逐一返回分类结果。\n\n" + "\n---\n".join(chunk_lines)
+
+        try:
+            response = _call_llm_with_retry_and_fallback(
+                client=client,
+                base_url=base_url,
+                model=model,
+                messages=[
+                    {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                allow_fallback=False,
+                fallback_config=None,
+                max_retries=3,
+            )
+            content = response.choices[0].message.content or "[]"
+            if "```" in content:
+                match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
+                if match:
+                    content = match.group(1).strip()
+            if _json_repair:
+                parsed = _json_repair.loads(content)
+            else:
+                parsed = json.loads(content)
+
+            if isinstance(parsed, dict):
+                for arr_key in ("results", "chunks", "data", "items"):
+                    if arr_key in parsed and isinstance(parsed[arr_key], list):
+                        parsed = parsed[arr_key]
+                        break
+                else:
+                    parsed = [parsed]
+
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected list, got {type(parsed)}")
+
+        except Exception as exc:
+            logger.warning("[farm-owner] LLM classification batch failed: %s", exc)
+            return _fallback_batch(batch, llm_patches)
+
+        # Build index map: chunk_index -> parsed item (prefer explicit index)
+        parsed_by_idx: Dict[int, Dict[str, object]] = {}
+        for pi, item in enumerate(parsed):
+            if isinstance(item, dict):
+                ci = item.get("chunk_index")
+                if isinstance(ci, int) and 0 <= ci < len(batch):
+                    parsed_by_idx[ci] = item
+                elif pi < len(batch):
+                    parsed_by_idx.setdefault(pi, item)
+
+        rows: List[Dict[str, object]] = []
+        for idx, chunk in enumerate(batch):
+            key = batch_keys[idx]
+            meta = chunk.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            source_file = str(meta.get("source_file") or "")
+            block_id = str(meta.get("block_id") or "")
+            section_title = str(meta.get("section_title") or "")
+            patch = llm_patches.get(key, {})
+
+            chunk_meta_patch: Dict[str, object] = {
+                "source_file": source_file,
+                "document_category": str(meta.get("document_category") or ""),
+            }
+            if patch:
+                chunk_meta_patch.update(patch)
+
+            llm_item = parsed_by_idx.get(idx)
+            if llm_item is not None:
+                action = str(llm_item.get("action") or "needs_tree_session")
+                if action not in _VALID_CLASSIFICATION_ACTIONS:
+                    action = "needs_tree_session"
+                tree_level = str(llm_item.get("tree_level") or "")
+                target_id = str(llm_item.get("target_node_id") or "")
+                reason = str(llm_item.get("reason") or "")
+                # Fallback: infer target_node_id from product_module for tree_create
+                if not target_id and action.startswith("tree_create"):
+                    pm = str(patch.get("product_module") or "")
+                    if pm and pm != "unknown":
+                        target_id = pm
+            else:
+                action = "needs_tree_session"
+                tree_level = ""
+                target_id = ""
+                reason = "llm_response_missing"
+
+            rows.append({
+                "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+                "source_file": source_file,
+                "entity_title": section_title or f"{source_file}#{block_id}",
+                "action": action,
+                "target_node_id": target_id,
+                "target_block_id": block_id,
+                "tree_level": tree_level,
+                "fill_fields": {},
+                "enrich_fields": {},
+                "chunk_meta_patch": chunk_meta_patch,
+                "source_evidence": f"llm_classification:{reason}",
+                "resolved_value": {},
+            })
+        return rows
+
+    total_sub = len(sub_batches)
+    workers = min(_CLASSIFY_MAX_WORKERS, total_sub) if total_sub else 1
+    logger.info(
+        "[farm-owner] stage4: %d undecided chunks, %d sub-batches, workers=%d",
+        len(undecided_chunks), total_sub, workers,
+    )
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_process_sub_batch, sb): i
+            for i, sb in enumerate(sub_batches)
+        }
+        for future in as_completed(futures):
+            completed += 1
+            idx = futures[future]
+            try:
+                rows = future.result()
+                with lock:
+                    all_decided.extend(rows)
+                logger.info(
+                    "[farm-owner] stage4 sub-batch %d/%d done (%d/%d)",
+                    idx + 1, total_sub, completed, total_sub,
+                )
+            except Exception as exc:
+                logger.warning("[farm-owner] stage4 sub-batch %d failed: %s", idx + 1, exc)
+
+    return all_decided
+
+
+def _fallback_all_undecided(
+    chunks: List[Dict[str, object]],
+    llm_patches: Dict[str, Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Fallback: mark all undecided as needs_tree_session."""
+    return _fallback_batch(chunks, llm_patches)
+
+
+def _fallback_batch(
+    chunks: List[Dict[str, object]],
+    llm_patches: Dict[str, Dict[str, object]],
+) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for chunk in chunks:
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        key = _chunk_key(chunk)
+        source_file = str(meta.get("source_file") or "")
+        block_id = str(meta.get("block_id") or "")
+        section_title = str(meta.get("section_title") or "")
+        patch = llm_patches.get(key, {})
+        chunk_meta_patch: Dict[str, object] = {
+            "source_file": source_file,
+            "document_category": str(meta.get("document_category") or ""),
+        }
+        if patch:
+            chunk_meta_patch.update(patch)
+        rows.append({
+            "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+            "source_file": source_file,
+            "entity_title": section_title or f"{source_file}#{block_id}",
+            "action": "needs_tree_session",
+            "target_node_id": "",
+            "target_block_id": block_id,
+            "tree_level": "",
+            "fill_fields": {},
+            "enrich_fields": {},
+            "chunk_meta_patch": chunk_meta_patch,
+            "source_evidence": "llm_unavailable_fallback",
+            "resolved_value": {},
+        })
+    return rows
+
+
+# ── Reconciliation: resolve conflicting tree levels ───────────────────
+
+
+def _reconcile_decisions(
+    rules_decided: List[Dict[str, object]],
+    llm_decided: List[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Reconcile conflicting tree-level decisions for the same entity.
+
+    Two passes:
+    1. Same-key pass: group by (entity_title, target_node_id) — when multiple
+       chunks target the exact same parent with different tree_create_* actions,
+       promote all to the highest level.
+    2. Cross-parent pass: group by entity_title alone — the same entity may
+       appear under different parents at different levels (e.g. "系统健康检查"
+       as branch under "基础网络" AND as leaf under "基础网络 > 系统健康检查").
+       Promote all to the highest level across all parents so the entity has
+       a single consistent tree level.
+
+    Mutates rows in place. merge_into_existing rows are left unchanged.
+    """
+    all_rows = list(rules_decided) + list(llm_decided)
+    tree_create_rows = [
+        r for r in all_rows
+        if str(r.get("action") or "") in _ACTION_RANK
+    ]
+
+    # ── Pass 1: same (entity_title, target_node_id) ──
+    groups: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+    for row in tree_create_rows:
+        key = (str(row.get("entity_title") or ""), str(row.get("target_node_id") or ""))
+        groups.setdefault(key, []).append(row)
+
+    pass1_promoted = _promote_group_rows(groups)
+
+    # ── Pass 2: same entity_title across all parents ──
+    entity_groups: Dict[str, List[Dict[str, object]]] = {}
+    for row in tree_create_rows:
+        et = str(row.get("entity_title") or "")
+        entity_groups.setdefault(et, []).append(row)
+
+    pass2_promoted = _promote_group_rows(entity_groups)
+
+    logger.info(
+        "[farm-owner] reconcile: pass1 (same-key) promoted %d rows, "
+        "pass2 (cross-parent) promoted %d rows",
+        pass1_promoted, pass2_promoted,
+    )
+    return rules_decided, llm_decided
+
+
+def _promote_group_rows(
+    groups: Dict[object, List[Dict[str, object]]],
+) -> int:
+    """Promote all rows in each group to the highest tree_create level.
+
+    Returns count of promoted rows.
+    """
+    promoted_count = 0
+    for group_rows in groups.values():
+        ranks = [_ACTION_RANK[str(r["action"])] for r in group_rows]
+        max_rank = max(ranks)
+        if max_rank == min(ranks):
+            continue
+
+        max_action = ""
+        for act, rank in _ACTION_RANK.items():
+            if rank == max_rank:
+                max_action = act
+                break
+        new_level = _TREE_CREATE_TO_LEVEL[max_action]
+
+        for row in group_rows:
+            old_action = str(row["action"])
+            old_rank = _ACTION_RANK[old_action]
+            if old_rank < max_rank:
+                old_level = _TREE_CREATE_TO_LEVEL[old_action]
+                row["action"] = max_action
+                row["tree_level"] = new_level
+                evidence = str(row.get("source_evidence") or "")
+                row["source_evidence"] = (
+                    f"{evidence}+promoted_from_{old_level}_to_{new_level}"
+                )
+                promoted_count += 1
+    return promoted_count
+
+
+# ── Stage 5: Decision assembly ────────────────────────────────────────
+
+
+def _build_discard_row(
+    chunk: Dict[str, object],
+    reason: str,
+    llm_patches: Dict[str, Dict[str, object]],
+) -> Dict[str, object]:
+    meta = chunk.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    key = _chunk_key(chunk)
+    source_file = str(meta.get("source_file") or "")
+    block_id = str(meta.get("block_id") or "")
+    section_title = str(meta.get("section_title") or "")
+    patch = llm_patches.get(key, {})
+
+    chunk_meta_patch: Dict[str, object] = {
+        "source_file": source_file,
+        "document_category": str(meta.get("document_category") or ""),
+        "owner_excluded": True,
     }
+    if patch:
+        chunk_meta_patch.update(patch)
+
+    return {
+        "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+        "source_file": source_file,
+        "entity_title": section_title or f"{source_file}#{block_id}",
+        "action": "discard",
+        "target_node_id": "",
+        "target_block_id": block_id,
+        "tree_level": "",
+        "fill_fields": {},
+        "enrich_fields": {},
+        "chunk_meta_patch": chunk_meta_patch,
+        "source_evidence": reason,
+        "resolved_value": {},
+    }
+
+
+def _build_discard_quality_feedback(
+    discarded_chunks: List[Dict[str, object]],
+    reason_code: str,
+) -> List[Dict[str, object]]:
+    """Build quality feedback records for inspector to learn from discards."""
+    records: List[Dict[str, object]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for idx, chunk in enumerate(discarded_chunks):
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        source_file = str(meta.get("source_file") or "").strip()
+        block_id = str(meta.get("block_id") or "").strip()
+        section_title = str(meta.get("section_title") or "").strip()
+        if not source_file or not block_id:
+            continue
+        suggested_rule: Dict[str, object] = {
+            "rule_source": "farm_owner_classification",
+            "reason_code": reason_code,
+            "match": {
+                "source_file_glob": source_file,
+                "block_id": block_id,
+            },
+            "action": {"verdict": "reject"},
+        }
+        if section_title:
+            suggested_rule["match"]["section_title"] = section_title
+        records.append({
+            "schema_version": FEEDBACK_INBOX_SCHEMA_VERSION,
+            "feedback_id": f"farm-owner-discard-{reason_code}-{idx}",
+            "source_file": source_file,
+            "block_id": block_id,
+            "gate_key": feedback_gate_key(source_file, block_id),
+            "verdict": "reject",
+            "reason_code": reason_code,
+            "source_run_id": "farm_owner_classification",
+            "notes": f"generated_at={now}",
+            "suggested_rule": suggested_rule,
+        })
+    return records
+
+
+def _stage5_assemble_decisions(
+    garbage_chunks: List[Dict[str, object]],
+    non_knowledge_chunks: List[Dict[str, object]],
+    wrong_product_chunks: List[Dict[str, object]],
+    rules_decided: List[Dict[str, object]],
+    llm_decided: List[Dict[str, object]],
+    llm_patches: Dict[str, Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], Dict[str, int], List[Dict[str, object]]]:
+    """Assemble final decision rows, stats, and quality rule feedback."""
+    all_rows: List[Dict[str, object]] = []
+
+    # Garbage → discard
+    garbage_rows = [
+        _build_discard_row(c, "garbage_detected", llm_patches) for c in garbage_chunks
+    ]
+    all_rows.extend(garbage_rows)
+
+    # Non-knowledge → discard
+    non_kw_rows = [
+        _build_discard_row(c, "non_product_knowledge", llm_patches)
+        for c in non_knowledge_chunks
+    ]
+    all_rows.extend(non_kw_rows)
+
+    # Wrong product → discard
+    wrong_product_rows = [
+        _build_discard_row(c, "wrong_product", llm_patches)
+        for c in wrong_product_chunks
+    ]
+    all_rows.extend(wrong_product_rows)
+
+    # Rules-decided
+    all_rows.extend(rules_decided)
+
+    # LLM-decided
+    llm_discarded = [r for r in llm_decided if r.get("action") == "discard"]
+    all_rows.extend(llm_decided)
+
+    # Compute stats
+    action_counts: Dict[str, int] = {}
+    for row in all_rows:
+        act = str(row.get("action") or "unknown")
+        action_counts[act] = action_counts.get(act, 0) + 1
+
+    direct_fill = action_counts.get("merge_into_existing", 0)
+    structural = sum(
+        action_counts.get(a, 0)
+        for a in ("tree_create_leaf", "tree_create_branch",
+                   "tree_create_trunk", "tree_create_root")
+    )
+    stats = {
+        "llm_enhanced": sum(1 for key, p in llm_patches.items() if p),
+        "classified": len(all_rows),
+        "discarded": len(garbage_rows) + len(non_kw_rows) + len(wrong_product_rows) + len(llm_discarded),
+        "direct_fill": direct_fill,
+        "structural": structural,
+        "rules_decided": len(garbage_rows) + len(non_kw_rows) + len(wrong_product_rows) + len(rules_decided),
+        "llm_decided": len(llm_decided),
+        "needs_tree_session": action_counts.get("needs_tree_session", 0),
+        "wrong_product": len(wrong_product_rows),
+        "action_breakdown": action_counts,
+    }
+
+    # Quality feedback proposals for discarded chunks
+    feedback_records: List[Dict[str, object]] = []
+    if garbage_chunks:
+        feedback_records.extend(
+            _build_discard_quality_feedback(garbage_chunks, "garbage_content")
+        )
+    if non_knowledge_chunks:
+        feedback_records.extend(
+            _build_discard_quality_feedback(non_knowledge_chunks, "non_product_section")
+        )
+    if wrong_product_chunks:
+        feedback_records.extend(
+            _build_discard_quality_feedback(wrong_product_chunks, "wrong_product")
+        )
+    # LLM-discarded chunks (extract originals from llm_decided)
+    llm_discard_chunks = []
+    for row in llm_discarded:
+        sf = str(row.get("source_file") or "")
+        bid = str(row.get("target_block_id") or "")
+        sec = str(row.get("entity_title") or "")
+        llm_discard_chunks.append({
+            "metadata": {
+                "source_file": sf,
+                "block_id": bid,
+                "section_title": sec,
+            }
+        })
+    if llm_discard_chunks:
+        feedback_records.extend(
+            _build_discard_quality_feedback(llm_discard_chunks, "llm_classified_useless")
+        )
+
+    logger.info(
+        "[farm-owner] stage5: %d total rows, %d discard (garbage=%d, non_kw=%d, "
+        "wrong_product=%d, llm=%d), %d direct_fill, %d structural, "
+        "%d needs_tree_session, %d feedback records",
+        len(all_rows), stats["discarded"],
+        len(garbage_rows), len(non_kw_rows), len(wrong_product_rows),
+        len(llm_discarded), direct_fill,
+        structural, stats["needs_tree_session"], len(feedback_records),
+    )
+    return all_rows, stats, feedback_records
+
+
+# ── Top-level classification orchestrator ─────────────────────────────
+
+
+def _classify_quality_passed_chunks(
+    gate: Dict[str, Dict[str, object]],
+    passed_chunks: List[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], Dict[str, int], List[Dict[str, object]]]:
+    """Classify all quality-passed chunks into actionable decisions.
+
+    Returns:
+        (decision_rows, stats_dict, quality_feedback_records)
+    """
+    # Stage 1: Rules-based pre-filter (includes product filter)
+    candidates, garbage, non_knowledge, wrong_product = _stage1_rules_prefilter(passed_chunks)
+
+    # Stage 2 + LLM enrichment in parallel (no data dependency between them)
+    llm_patches: Dict[str, Dict[str, object]] = {}
+    tree_contexts: Dict[str, _ChunkTreeContext] = {}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_llm = executor.submit(_build_quality_passed_llm_patches, candidates)
+        future_tree = executor.submit(_stage2_tree_context_lookup, candidates)
+        try:
+            llm_patches = future_llm.result()
+        except Exception as exc:
+            logger.warning("[farm-owner] LLM enrichment failed: %s", exc)
+        try:
+            tree_contexts = future_tree.result()
+        except Exception as exc:
+            logger.warning("[farm-owner] tree context lookup failed: %s", exc)
+
+    # Stage 3: Rules-based classification
+    rules_decided, undecided = _stage3_rules_classification(
+        candidates, tree_contexts, llm_patches,
+    )
+
+    # Stage 4: LLM batch classification for undecided
+    llm_decided = _stage4_llm_batch_classification(
+        undecided, tree_contexts, llm_patches,
+    )
+
+    # Reconcile conflicting tree-level decisions across chunks
+    rules_decided, llm_decided = _reconcile_decisions(rules_decided, llm_decided)
+
+    # Stage 5: Assemble
+    return _stage5_assemble_decisions(
+        garbage, non_knowledge, wrong_product, rules_decided, llm_decided, llm_patches,
+    )
 
 
 def _infer_source_file_for_request(
@@ -476,70 +1455,75 @@ def run_farm_owner_pipeline(reference_dir: Path | None = None) -> Dict[str, obje
         _load_quality_filtered_reference(reference_dir),
         gate,
     )
-    passthrough_rows, passthrough_stats = _build_passthrough_decisions(
-        gate,
-        validated_chunks,
+
+    # ── Full classification pipeline (replaces blind passthrough) ──
+    classified_rows, classification_stats, discard_feedback = (
+        _classify_quality_passed_chunks(gate, validated_chunks)
     )
 
+    # ── Gap entries (schema_gaps.jsonl) ──
     entries: List[SchemaGapEntry] = []
     if gaps_file.exists() and gaps_file.stat().st_size > 0:
         entries = _load_gap_entries(gaps_file)
     entries = _filter_entries_by_quality_gate(entries, gate)
     deferred_rows = _build_quality_deferred_decisions(entries, gate, validated_chunks)
-    quality_rule_proposals_file = _write_quality_rule_proposals(reference_dir, entries)
 
-    if not entries:
-        owner_decisions_file = _write_owner_decisions(
-            reference_dir,
-            passthrough_rows,
-            deferred_rows,
-            gate,
+    # ── Quality rule proposals: from gap entries + discard feedback ──
+    gap_proposals_file = _write_quality_rule_proposals(reference_dir, entries)
+
+    # Write discard feedback as additional rule proposals
+    discard_proposals_file: Optional[Path] = None
+    if discard_feedback:
+        discard_proposals_file = reference_dir / QUALITY_RULE_PROPOSALS_FILE
+        doc = build_rule_proposals_from_inbox(
+            discard_feedback,
+            inbox_path="farm_owner_classification_discards",
         )
-        result = {
-            "processed": bool(passthrough_rows),
-            "reason": "no valid gap entries after quality gate",
-            "decision_schema_version": _OWNER_DECISION_SCHEMA_VERSION,
-            "owner_decisions_file": str(owner_decisions_file),
-            "quality_passed_blocks": len(passthrough_rows),
-            "llm_enhanced_blocks": passthrough_stats.get("llm_enhanced", 0),
-            "classified_blocks": passthrough_stats.get("classified", 0),
-            "discarded_blocks": passthrough_stats.get("discarded", 0),
-            "quality_rule_proposals_file": (
-                str(quality_rule_proposals_file) if quality_rule_proposals_file else None
-            ),
-        }
-        logger.info("[farm-owner] done: %s", json.dumps(result, ensure_ascii=False))
-        return result
+        # Merge with existing gap proposals if present
+        if gap_proposals_file and gap_proposals_file.exists():
+            try:
+                existing = json.loads(
+                    gap_proposals_file.read_text(encoding="utf-8")
+                )
+                gap_rules = existing.get("rules", [])
+                doc["rules"] = doc.get("rules", []) + gap_rules
+            except Exception:
+                pass
+        discard_proposals_file.write_text(
+            json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
 
+    proposals_file = discard_proposals_file or gap_proposals_file
+
+    # ── Write decisions ──
     owner_decisions_file = _write_owner_decisions(
         reference_dir,
-        passthrough_rows,
+        classified_rows,
         deferred_rows,
         gate,
     )
 
-    result = {
-        "processed": bool(passthrough_rows or deferred_rows),
+    result: Dict[str, object] = {
+        "processed": bool(classified_rows or deferred_rows),
         "decision_schema_version": _OWNER_DECISION_SCHEMA_VERSION,
+        "owner_decisions_file": str(owner_decisions_file),
+        "quality_passed_blocks": len(validated_chunks),
+        "classified_blocks": classification_stats.get("classified", 0),
+        "llm_enhanced_blocks": classification_stats.get("llm_enhanced", 0),
+        "discarded_blocks": classification_stats.get("discarded", 0),
+        "direct_fill_blocks": classification_stats.get("direct_fill", 0),
+        "structural_blocks": classification_stats.get("structural", 0),
+        "wrong_product_blocks": classification_stats.get("wrong_product", 0),
+        "rules_decided_blocks": classification_stats.get("rules_decided", 0),
+        "llm_decided_blocks": classification_stats.get("llm_decided", 0),
+        "needs_tree_session_blocks": classification_stats.get("needs_tree_session", 0),
+        "action_breakdown": classification_stats.get("action_breakdown", {}),
         "gap_entries": len(entries),
         "delegated_gap_entries": len(deferred_rows),
-        "quality_passed_blocks": len(passthrough_rows),
-        "llm_enhanced_blocks": passthrough_stats.get("llm_enhanced", 0),
-        "classified_blocks": passthrough_stats.get("classified", 0),
-        "discarded_blocks": passthrough_stats.get("discarded", 0),
-        "entities_added": 0,
-        "discarded_count": 0,
-        "fill_requests": 0,
-        "deferred": len(deferred_rows),
-        "errors": [],
-        "snapshot_dir": None,
-        "processed_file": None,
-        "quality_gate_file": str(gate_file),
-        "owner_decisions_file": str(owner_decisions_file),
         "quality_rule_proposals_file": (
-            str(quality_rule_proposals_file) if quality_rule_proposals_file else None
+            str(proposals_file) if proposals_file else None
         ),
-        "delegated_to": "quality_inspector",
     }
     logger.info("[farm-owner] done: %s", json.dumps(result, ensure_ascii=False))
     return result

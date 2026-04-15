@@ -504,6 +504,13 @@ context_files/
 # Claude config
 .claude/
 
+# Local scratch: *.tmp files and .tmp directories (do not sync)
+*.tmp
+.tmp/
+**/.tmp/
+# Hidden dirs like INAGENT/.tmp_farm_owner_harness (local harness / scratch)
+**/.tmp_*/
+
 # Root temp files (development only)
 _*.log
 _*.txt

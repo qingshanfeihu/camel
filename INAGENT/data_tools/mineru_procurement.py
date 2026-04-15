@@ -157,6 +157,55 @@ def _find_existing_mineru_output(task_id: str) -> Optional[Path]:
     return None
 
 
+def _find_existing_mineru_sidecars(task_id: str) -> Dict[str, Optional[Path]]:
+    r"""Find content_list / middle_json / markdown sidecars for a MinerU task."""
+    task_dir = MINERU_OUTPUT_DIR / task_id
+    if not task_dir.exists():
+        return {
+            "content_list": None,
+            "middle_json": None,
+            "markdown": None,
+        }
+
+    content_list = _find_existing_mineru_output(task_id)
+    preferred_middle = task_dir / "hybrid_auto" / f"{task_id}_middle.json"
+    preferred_md = task_dir / "hybrid_auto" / f"{task_id}.md"
+
+    middle_json = preferred_middle if preferred_middle.exists() else None
+    markdown = preferred_md if preferred_md.exists() else None
+
+    if middle_json is None:
+        for candidate in task_dir.rglob("*_middle.json"):
+            middle_json = candidate
+            break
+
+    if markdown is None:
+        for candidate in task_dir.rglob("*.md"):
+            markdown = candidate
+            break
+
+    return {
+        "content_list": content_list,
+        "middle_json": middle_json,
+        "markdown": markdown,
+    }
+
+
+def _artifact_path_for_metadata(path: Optional[Path]) -> str:
+    """Return a stable relative artifact path for downstream stages."""
+    if path is None:
+        return ""
+    try:
+        return str(path.relative_to(_INAGENT_ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
+def _build_mineru_block_snapshot(block: Dict[str, object]) -> Dict[str, object]:
+    """Preserve the original MinerU block so later stages can rehydrate structure."""
+    return json.loads(json.dumps(block, ensure_ascii=False))
+
+
 def _can_reuse_mineru_output(pdf: Path, content_list_path: Path) -> bool:
     r"""Return True if existing MinerU output is newer than the input PDF."""
     try:
@@ -322,6 +371,13 @@ async def convert_one(
         mineru_elapsed_s,
     )
 
+    mineru_sidecars = _find_existing_mineru_sidecars(task_id)
+    artifact_meta = {
+        "content_list_path": _artifact_path_for_metadata(mineru_sidecars.get("content_list")),
+        "middle_json_path": _artifact_path_for_metadata(mineru_sidecars.get("middle_json")),
+        "markdown_path": _artifact_path_for_metadata(mineru_sidecars.get("markdown")),
+    }
+
     # 1) 读取结构化 JSON（如果没有就跳过，保持 blocks 为空）
     blocks: Dict | List[Dict] | List = []
     try:
@@ -381,9 +437,14 @@ async def convert_one(
                 "block_type": block.get("type"),
                 "block_id": idx,
                 "mineru_task_id": task_id,
+                "mineru_artifacts": artifact_meta,
+                "mineru_block": _build_mineru_block_snapshot(block),
                 "section_title": section_context.get("section_title", ""),
                 "parent_section": section_context.get("parent_section", ""),
                 "section_path": section_context.get("section_path", ""),
+                "section_strategy": section_context.get("section_strategy", "empty"),
+                "section_source": section_context.get("section_source", "empty"),
+                "section_health_score": section_context.get("section_health_score", 0.0),
                 "document_category": _infer_pdf_document_category(pdf),
                 "is_frontmatter": block.get("page_idx") in frontmatter_page_set,
                 "frontmatter_confidence": (
@@ -416,10 +477,14 @@ async def convert_one(
                 # 规则抽取：采购只做无副作用的基础元数据整理。
                 rule_results = []
                 for text, base in items:
-                    clean_text = ac._clean_chunk_text(text)
-                    meta_out: Dict[str, object] = {"clean_text": clean_text}
                     section_title = str(base.get("section_title") or "").strip()
                     parent_section = str(base.get("parent_section") or "").strip()
+                    clean_text = ac._strip_clean_text_heading_number(
+                        ac._clean_chunk_text(text),
+                        section_title,
+                        parent_section,
+                    )
+                    meta_out: Dict[str, object] = {"clean_text": clean_text}
                     if section_title:
                         meta_out["section_title"] = section_title
                     if parent_section:
@@ -427,6 +492,15 @@ async def convert_one(
                     section_path = base.get("section_path")
                     if section_path:
                         meta_out["section_path"] = section_path
+                    section_strategy = str(base.get("section_strategy") or "").strip()
+                    if section_strategy:
+                        meta_out["section_strategy"] = section_strategy
+                    section_source = str(base.get("section_source") or "").strip()
+                    if section_source:
+                        meta_out["section_source"] = section_source
+                    section_health_score = base.get("section_health_score")
+                    if isinstance(section_health_score, (int, float)):
+                        meta_out["section_health_score"] = float(section_health_score)
                     lower_text = clean_text.lower()
                     for intent, keywords in meta_rules.get("intents", {}).items():
                         if any(k.lower() in lower_text for k in keywords):
@@ -557,6 +631,7 @@ async def convert_one(
         "frontmatter_pages": frontmatter_pages,
         "record_count": len(knowledge_blocks),
         "output_json": str(json_path),
+        "output_json_sha256": ac._compute_output_json_sha256(json_path),
         "link_stats": link_stats,
         "document_metadata": document_metadata,
     }

@@ -1,11 +1,10 @@
-"""Knowledge base ingestion validator — 4-rule quality gate.
+"""Knowledge base ingestion validator.
 
-Rules:
-1. MinLength — reject chunks with <20 chars of content
-2. TreePositionCheck — quarantine chunks without tree_position
-3. SimHashDedup — cross-source near-duplicate detection (64-bit SimHash)
-4. HierarchyEnrich — backfill function_hierarchy + product_module
-   from CLI graph
+Responsibilities:
+1. Respect explicit owner-side exclusion marks
+2. Ensure tree_position exists or add a placeholder for downstream owner flow
+3. Backfill function_hierarchy + product_module from CLI graph when possible
+4. Attach accepted chunks to the skeleton tree when enough signals exist
 """
 from __future__ import annotations
 
@@ -18,29 +17,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from INAGENT.rag.knowledge_schema import CAT_TO_LEVEL
 
 logger = logging.getLogger(__name__)
-
-_MIN_CONTENT_LENGTH = 20
-_SIMHASH_BITS = 64
-_SIMHASH_THRESHOLD = 3
-
-
-def _simhash(text: str, bits: int = _SIMHASH_BITS) -> int:
-    tokens = text.lower().split()
-    if not tokens:
-        return 0
-    v = [0] * bits
-    for token in tokens:
-        h = hash(token) & ((1 << bits) - 1)
-        for i in range(bits):
-            if h & (1 << i):
-                v[i] += 1
-            else:
-                v[i] -= 1
-    return sum(1 << i for i in range(bits) if v[i] > 0)
-
-
-def _hamming_distance(a: int, b: int) -> int:
-    return bin(a ^ b).count("1")
 
 
 @dataclass
@@ -119,23 +95,10 @@ class IngestValidator:
         if "metadata" not in chunk:
             chunk["metadata"] = meta
 
-        content = str(chunk.get("page_content") or chunk.get("text") or "")
-
         # Rule 0: OwnerExcluded — 农场主明确排除的块
         if meta.get("owner_excluded"):
             self._report.rejected_excluded += 1
             return "reject", "owner_excluded"
-
-        # Rule 1: MinLength
-        if len(content.strip()) < _MIN_CONTENT_LENGTH:
-            self._report.rejected_short += 1
-            return "reject", "short_content"
-
-        # Rule 1b: HeadingOnly — content 基本上只是 section_title 本身
-        section_title = meta.get("section_title", "")
-        if section_title and len(content.strip()) <= len(section_title.strip()) + 15:
-            self._report.rejected_short += 1
-            return "reject", "heading_only"
 
         # Rule 2: TreePositionCheck — tree_position 必须存在且有效
         tp = meta.get("tree_position")
@@ -171,14 +134,7 @@ class IngestValidator:
                     self._quarantine.append(chunk)
                     return "quarantine", "no_tree_position"
 
-        # Rule 3: SimHash dedup
-        h = _simhash(content[:500])
-        if h != 0:
-            for existing_h in self._simhash_set:
-                if _hamming_distance(h, existing_h) <= _SIMHASH_THRESHOLD:
-                    self._report.duplicates += 1
-                    return "duplicate", "simhash_near_duplicate"
-            self._simhash_set.add(h)
+        content = str(chunk.get("page_content") or chunk.get("text") or "")
 
         # Rule 4a: infer product_module if missing (before hierarchy)
         if not meta.get("product_module") and self._cli_graph:

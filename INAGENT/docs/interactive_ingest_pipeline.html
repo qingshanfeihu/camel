@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>INAGENT 流程图与决策树</title>
+  <style>
+    :root { --bg:#f4f8ff; --panel:#fff; --line:#d6e2f6; --text:#1d2b3d; --muted:#5b6d82; --pri:#2f6fed; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(180deg,#eef4ff,#f8fbff);color:var(--text)}
+    .page{max-width:1380px;margin:14px auto;padding:0 14px}
+    .top{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:0 8px 20px rgba(33,71,133,.08)}
+    .top h1{margin:0 0 4px;font-size:22px}
+    .top p{margin:0;color:var(--muted);font-size:13px}
+    .tabs{margin-top:10px;display:flex;gap:8px}
+    .tab{border:1px solid #c4d7f4;background:#fff;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;color:#274a78}
+    .tab.active{background:var(--pri);border-color:var(--pri);color:#fff}
+    .view{display:none}
+    .view.active{display:block}
+    .toolbar{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
+    .btn{border:1px solid #c4d7f4;background:#fff;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;color:#274a78}
+    .btn.active{background:var(--pri);border-color:var(--pri);color:#fff}
+    .layout{margin-top:12px;display:grid;grid-template-columns:1fr 420px;gap:12px}
+    .graph{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;min-height:560px}
+    .flowline{position:absolute;left:52px;right:52px;top:250px;height:2px;background:#c9daf6}
+    .flowline::after{content:"";position:absolute;left:0;top:-1px;width:90px;height:4px;background:linear-gradient(90deg,rgba(47,111,237,0),rgba(47,111,237,.95),rgba(47,111,237,0));animation:run 3.4s linear infinite}
+    @keyframes run{0%{transform:translateX(-60px)}100%{transform:translateX(calc(100vw - 500px))}}
+    .nodes{position:relative;display:grid;grid-template-columns:repeat(6,1fr);gap:10px;align-items:start}
+    .node{position:relative;background:linear-gradient(180deg,#fff,#f7faff);border:1px solid #ccdcf7;border-radius:12px;padding:12px;min-height:190px;cursor:pointer;transition:.15s}
+    .node:hover{transform:translateY(-2px);box-shadow:0 10px 18px rgba(44,88,160,.14)}
+    .node.active{border-color:var(--pri);box-shadow:0 0 0 2px rgba(47,111,237,.2),0 12px 24px rgba(47,111,237,.2)}
+    .node h3{margin:0 0 4px;font-size:15px}
+    .sub{margin:0 0 8px;color:#5e7390;font-size:12px}
+    .kv{font-size:11px;line-height:1.35;color:#264566}
+    .kv b{display:block;color:#1f3b5f;margin-top:4px}
+    .arrow{position:absolute;right:-9px;top:78px;color:#2f6fed;font-size:18px}
+    .side,.tree-panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;min-height:560px}
+    .side h2,.tree-panel h2{margin:0 0 8px;font-size:18px}
+    .meta{font-size:12px;color:var(--muted);margin-bottom:8px}
+    .card{border:1px solid #d6e3f7;border-radius:10px;padding:10px;margin-bottom:8px;background:#fbfdff}
+    .card h4{margin:0 0 6px;font-size:13px;color:#294a77}
+    .card ul{margin:0;padding-left:18px;font-size:12px;line-height:1.45}
+    .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+    .chip{background:#f1f6ff;border:1px solid #d8e5fb;color:#2f5688;font-size:11px;border-radius:999px;padding:4px 8px}
+    .extra{margin-top:8px;border:1px dashed #bcd0ef;border-radius:10px;padding:8px;font-size:12px;color:#325684;background:#f7fbff}
+    .tree-layout{margin-top:12px;display:grid;grid-template-columns:380px 1fr;gap:12px}
+    .source-box{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
+    .source-input{border:1px solid #c7daf5;background:#fff;border-radius:8px;padding:5px 8px;font-size:12px;color:#2b4f7e}
+    .stat{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+    .stat .box{border:1px solid #d7e4f8;background:#fbfdff;border-radius:10px;padding:8px;font-size:12px}
+    .bar{height:9px;background:#e7effd;border-radius:999px;overflow:hidden;margin-top:6px}
+    .bar i{display:block;height:100%;background:linear-gradient(90deg,#77a6ff,#2f6fed)}
+    .tree{margin-top:8px;max-height:480px;overflow:auto;padding-right:4px}
+    details{border:1px solid #d9e5f8;background:#fcfeff;border-radius:10px;padding:6px 8px;margin-bottom:7px}
+    summary{cursor:pointer;font-weight:600;font-size:13px;color:#294d7d}
+    .leaf{font-size:12px;color:#334c6d;padding:3px 0 3px 14px}
+    .hint{font-size:12px;color:#5a6f8f}
+    .svg-wrap{margin-top:8px;border:1px solid #d9e5f8;border-radius:10px;background:#fcfeff;overflow:auto}
+    #treeSvg{width:100%;height:520px;display:block}
+    .svg-tools{display:flex;gap:8px;align-items:center;margin-top:8px}
+    .svg-btn{border:1px solid #c7daf5;background:#fff;border-radius:8px;padding:4px 9px;font-size:12px;cursor:pointer;color:#2b4f7e}
+    .svg-tip{font-size:12px;color:#5a6f8f}
+    .legend{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .legend span{font-size:11px;border:1px solid #d8e5fb;background:#f1f6ff;color:#2f5688;border-radius:999px;padding:3px 8px}
+    @media (max-width:1200px){ .layout,.tree-layout{grid-template-columns:1fr}.flowline{display:none}.nodes{grid-template-columns:repeat(3,1fr)} .arrow{display:none} }
+    @media (max-width:760px){ .nodes{grid-template-columns:repeat(2,1fr)} }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="top">
+      <h1>INAGENT 流程图主页 + 决策树页</h1>
+      <p>第 1 页是字段流转流程图；第 2 页是根据 <code>_owner_decisions_for_farmer.jsonl</code> 生成的决策树。</p>
+      <div class="tabs">
+        <button class="tab active" data-tab="flow">流程图主页</button>
+        <button class="tab" data-tab="tree">决策树（JSONL）</button>
+      </div>
+    </div>
+
+    <section class="view active" id="view-flow">
+      <div class="toolbar">
+        <button id="play" class="btn active" type="button">动画：播放</button>
+        <button id="prev" class="btn" type="button">上一步</button>
+        <button id="next" class="btn" type="button">下一步</button>
+        <button id="speed" class="btn" type="button">速度：正常</button>
+      </div>
+      <div class="layout">
+        <div class="graph">
+          <div class="flowline"></div>
+          <div class="nodes" id="nodes"></div>
+        </div>
+        <div class="side">
+          <h2 id="dTitle"></h2>
+          <div class="meta" id="dBrief"></div>
+          <div class="card"><h4>消费字段</h4><ul id="dConsume"></ul></div>
+          <div class="card"><h4>生成字段</h4><ul id="dProduce"></ul></div>
+          <div class="card"><h4>关键工件</h4><ul id="dArtifacts"></ul></div>
+          <div class="card"><h4>关键实现入口</h4><ul id="dCode"></ul></div>
+          <div class="extra" id="dCharter"></div>
+          <div class="chips" id="dChips"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-tree">
+      <div class="tree-layout">
+        <div class="tree-panel">
+          <h2 id="treeTitle">决策树统计（来自 farm_owner_20260414_185227）</h2>
+          <div class="source-box">
+            <label class="meta" style="margin:0;">选择数据文件：</label>
+            <input id="filePicker" class="source-input" type="file" accept=".json,.jsonl,.txt" />
+          </div>
+          <div class="meta">建议从目录选择：<code>C:\SynologyDrive\INFOAGEN\INAGENT\test_data\农场主输出\farm_owner_20260414_185227\给农民</code></div>
+          <div class="meta">当前源文件：<code id="sourcePath">test_data/农场主输出/farm_owner_20260414_185227/给农民/_owner_decisions_for_farmer.jsonl</code></div>
+          <div class="stat" id="stats"></div>
+          <div class="hint" style="margin-top:8px;">树生成口径：按 <code>action</code> 分叉；对 <code>tree_create_*</code> 将 <code>enrich_fields.parent_candidate</code> 与 <code>target_node_id</code> 合并为<strong>完整父路径</strong>（取长路径、多段路径优先）；其余 action 按 <code>target_node_id</code> 聚合。</div>
+        </div>
+        <div class="tree-panel">
+          <h2>按 action → 父路径（完整）聚合树</h2>
+          <div class="svg-tools">
+            <button class="svg-btn" id="zoomInBtn" type="button">放大 +</button>
+            <button class="svg-btn" id="zoomOutBtn" type="button">缩小 -</button>
+            <button class="svg-btn" id="resetViewBtn" type="button">重置视图</button>
+            <span class="svg-tip">支持：滚轮缩放 + 鼠标拖拽平移</span>
+          </div>
+          <div class="svg-wrap">
+            <svg id="treeSvg" viewBox="0 0 1200 520" preserveAspectRatio="xMinYMin meet"></svg>
+          </div>
+          <div class="legend">
+            <span>根节点：本批总决策</span>
+            <span>二层：action</span>
+            <span>三层：父路径（parent_candidate ∪ target_node_id，不截断）</span>
+            <span>圆越大计数越高</span>
+          </div>
+          <div class="tree" id="decisionTree"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const NODES = [
+      {name:"原始文档", brief:"PDF / Word / TXT 输入", consume:["人工上传文档","路径/文件名信息（原始）"], produce:["source_pdf（后续映射）","可解析文本块"], artifacts:["input 文档目录"], code:["INAGENT/knowledge_base/input/"], charter:"作为链路起点，不承担 metadata 结构裁决。", chips:["source_pdf","raw_text"]},
+      {name:"采购", brief:"解析 / 分块 / 预清理", consume:["raw_text","签名字典（模块/协议）"], produce:["source_file, page_idx, block_id, section_title, parent_section, section_path","protocol_type, command_prefix, chunk_type","document_category=unknown（占位）"], artifacts:["reference/*.json","schema_gaps.jsonl"], code:["data_tools/auto_convert.py","data_tools/procurement_ingest.py"], charter:"采购负责结构化落盘，不负责最终树结构裁决。", chips:["source_file","block_id","section_title","chunk_type"]},
+      {name:"审计（质检）", brief:"质量门控 / 回归", consume:["reference metadata","_owner_quality_rules.json","_owner_quality_overrides.jsonl"], produce:["_quality_gate_for_owner.jsonl: is_product_knowledge, quality_reason, decision_source","_quality_reference_for_owner.json"], artifacts:["_quality_gate_for_owner.jsonl","_quality_reference_for_owner.json","_quality_rule_proposals.json(可选)"], code:["data_tools/quality_ingest.py","agents/knowledge_quality_inspector_agent.py"], charter:"质检负责门控和可回归性，不改农场主/农民核心执行算法。", chips:["is_product_knowledge","quality_reason","decision_source"]},
+      {name:"农场主", brief:"结构裁决 / action 生成", consume:["gate: is_product_knowledge, quality_reason","chunk: source_file, block_id, section_title, command_prefix, chunk_type"], produce:["_owner_decisions_for_farmer.jsonl: action,target_node_id,target_block_id,tree_level,chunk_meta_patch,source_evidence","chunk_meta_patch: document_category,owner_excluded,product_module,protocol_type,step_type 等"], artifacts:["_owner_decisions_for_farmer.jsonl","_quality_rule_proposals.json(可选)"], code:["data_tools/farm_owner_ingest.py","agents/knowledge_farm_owner_agent.py"], charter:"农场主做结构意图裁决；执行落盘交给农民。", chips:["action","target_block_id","chunk_meta_patch","source_evidence"]},
+      {name:"农民", brief:"执行决策 / 回填", consume:["_owner_decisions_for_farmer.jsonl","reference/*.json"], produce:["回填: document_category,product_module,protocol_type,command_prefix","树挂载: tree_node_id, tree_position","排除标记: owner_excluded"], artifacts:["更新后的 reference/*.json","scenarios_synthesized.json(可选)"], code:["data_tools/farmer_ingest.py","agents/knowledge_farmer_agent.py"], charter:"农民执行决策并落盘，维护树挂载字段。", chips:["tree_node_id","tree_position","owner_excluded"]},
+      {name:"树 / 检索", brief:"merge / 图谱 / 索引", consume:["reference metadata","knowledge_base.json"], produce:["knowledge_base.json","GraphRAG reload","Hybrid 索引刷新(可选)"], artifacts:["knowledge_base.json","graphrag index","hybrid index"], code:["data_tools/merge_knowledge_base.py","workflow_config_generator.py","rag/unified_rag.py"], charter:"消费最终字段用于检索语义与树结构对齐。", chips:["document_category","product_module","function_hierarchy","command_prefix"]}
+    ];
+
+    // 默认数据（来自指定 JSONL 的快照统计）
+    let TREE_DATA = {
+      total: 4092,
+      actions: {
+        discard: 1737,
+        merge_into_existing: 1706,
+        tree_create_branch: 218,
+        tree_create_leaf: 426,
+        tree_create_trunk: 5
+      },
+      levels: {"":1737, leaf:2107, branch:241, trunk:7},
+      groups: {
+        discard: [{"target":"(none)","count":1737}],
+        merge_into_existing: [
+          {"target":"rip version","count":309},{"target":"monitor system disk system","count":198},{"target":"clear interface management","count":89},
+          {"target":"restapi port","count":88},{"target":"clear cache filter hostname","count":69},{"target":"vxlan port","count":63},
+          {"target":"show aaa","count":60},{"target":"nat itcpopt","count":54},{"target":"ip statistics","count":48},{"target":"clear lldp","count":48},
+          {"target":"IP packet(total byte in/total byte out): 100764/100764","count":41},{"target":"interface name","count":37}
+        ],
+        tree_create_branch: [
+          {"target":"(none)","count":190},{"target":"基础网络 > 系统健康检查","count":5},{"target":"ustack","count":5},
+          {"target":"SLB","count":4},{"target":"基础网络","count":3},{"target":"HA > 系统健康检查","count":2},
+          {"target":"NAT","count":1},{"target":"CLI_Syntax","count":1},{"target":"security.port-mirroring","count":1}
+        ],
+        tree_create_leaf: [{"target":"(none)","count":425},{"target":"基础网络 > DNS64/NAT64","count":1}],
+        tree_create_trunk: [{"target":"(none)","count":5}]
+      }
+    };
+
+    const nodesEl = document.getElementById("nodes");
+    const dTitle = document.getElementById("dTitle");
+    const dBrief = document.getElementById("dBrief");
+    const dConsume = document.getElementById("dConsume");
+    const dProduce = document.getElementById("dProduce");
+    const dArtifacts = document.getElementById("dArtifacts");
+    const dCode = document.getElementById("dCode");
+    const dCharter = document.getElementById("dCharter");
+    const dChips = document.getElementById("dChips");
+    const playBtn = document.getElementById("play");
+    const prevBtn = document.getElementById("prev");
+    const nextBtn = document.getElementById("next");
+    const speedBtn = document.getElementById("speed");
+    const tabs = document.querySelectorAll(".tab");
+    const views = { flow: document.getElementById("view-flow"), tree: document.getElementById("view-tree") };
+    const filePicker = document.getElementById("filePicker");
+    const treeTitle = document.getElementById("treeTitle");
+    const sourcePath = document.getElementById("sourcePath");
+    let idx = 0, playing = true, speed = 1800, timer = null;
+    const nodeEls = [];
+
+    function list(el, arr){ el.innerHTML=""; arr.forEach(t=>{const li=document.createElement("li");li.textContent=t;el.appendChild(li);}); }
+    function chips(arr){ dChips.innerHTML=""; arr.forEach(t=>{const s=document.createElement("span");s.className="chip";s.textContent=t;dChips.appendChild(s);}); }
+    function renderDetail(i){
+      const n=NODES[i]; dTitle.textContent=n.name; dBrief.textContent=n.brief;
+      list(dConsume,n.consume); list(dProduce,n.produce); list(dArtifacts,n.artifacts); list(dCode,n.code);
+      dCharter.textContent="宪章边界："+n.charter; chips(n.chips);
+      nodeEls.forEach((e,k)=>e.classList.toggle("active",k===i));
+    }
+    function set(i){ idx=(i+NODES.length)%NODES.length; renderDetail(idx); }
+    function tick(){ if(playing) set(idx+1); }
+    function reset(){ if(timer) clearInterval(timer); timer=setInterval(tick,speed); }
+
+    NODES.forEach((n,i)=>{
+      const b=document.createElement("button"); b.className="node"; b.type="button";
+      b.innerHTML=`<h3>${n.name}</h3><p class="sub">${n.brief}</p><div class="kv"><b>消费</b>${n.consume.slice(0,2).join("；")}<b>生成</b>${n.produce[0]}</div>${i<NODES.length-1?'<div class="arrow">→</div>':''}`;
+      b.addEventListener("click",()=>set(i));
+      nodeEls.push(b); nodesEl.appendChild(b);
+    });
+    set(0); reset();
+
+    playBtn.onclick=()=>{ playing=!playing; playBtn.classList.toggle("active",playing); playBtn.textContent=playing?"动画：播放":"动画：暂停"; if(playing) reset(); else if(timer) clearInterval(timer); };
+    prevBtn.onclick=()=>set(idx-1); nextBtn.onclick=()=>set(idx+1);
+    speedBtn.onclick=()=>{ if(speed===1800){speed=1100;speedBtn.textContent="速度：快速"} else if(speed===1100){speed=2600;speedBtn.textContent="速度：慢速"} else {speed=1800;speedBtn.textContent="速度：正常"} if(playing) reset(); };
+
+    tabs.forEach(btn=>{
+      btn.addEventListener("click",()=>{
+        tabs.forEach(t=>t.classList.remove("active"));
+        btn.classList.add("active");
+        const tab = btn.dataset.tab;
+        Object.entries(views).forEach(([k,v])=>v.classList.toggle("active",k===tab));
+      });
+    });
+
+    /** tree_create_*：合并 parent_candidate 与 target_node_id，展示/聚合用「完整父路径」 */
+    function mergeTreeCreateParentPath(r) {
+      const tid = String((r.target_node_id || "").trim());
+      const enrich = (r.enrich_fields && typeof r.enrich_fields === "object") ? r.enrich_fields : {};
+      const pc = String((enrich.parent_candidate || "").trim());
+      if (!tid && !pc) return "(none)";
+      if (!tid) return pc;
+      if (!pc) return tid;
+      if (tid === pc) return tid;
+      const segCount = (s) => s.split(/\s*>\s*/).filter(Boolean).length;
+      const st = segCount(tid);
+      const sp = segCount(pc);
+      if (st !== sp) return st > sp ? tid : pc;
+      if (tid.length !== pc.length) return tid.length > pc.length ? tid : pc;
+      return tid;
+    }
+
+    function summarizeFromRecords(records) {
+      const actions = {};
+      const levels = {};
+      const groupsMap = {};
+      let total = 0;
+      for (const r of records) {
+        if (!r || typeof r !== "object") continue;
+        const action = String(r.action || "unknown");
+        const targetNodeId = String((r.target_node_id || "").trim());
+        let target = "";
+        if (action.startsWith("tree_create_")) {
+          target = mergeTreeCreateParentPath(r);
+        } else {
+          target = targetNodeId || "(none)";
+        }
+        const lv = String(r.tree_level || "");
+        total += 1;
+        actions[action] = (actions[action] || 0) + 1;
+        levels[lv] = (levels[lv] || 0) + 1;
+        if (!groupsMap[action]) groupsMap[action] = {};
+        groupsMap[action][target] = (groupsMap[action][target] || 0) + 1;
+      }
+      const groups = {};
+      Object.entries(groupsMap).forEach(([action, mp]) => {
+        groups[action] = Object.entries(mp)
+          .map(([target, count]) => ({ target, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 20);
+      });
+      return { total, actions, levels, groups };
+    }
+
+    function renderTreePage(){
+      const statsEl = document.getElementById("stats");
+      const treeEl = document.getElementById("decisionTree");
+      const svg = document.getElementById("treeSvg");
+      const zoomInBtn = document.getElementById("zoomInBtn");
+      const zoomOutBtn = document.getElementById("zoomOutBtn");
+      const resetViewBtn = document.getElementById("resetViewBtn");
+      const total = TREE_DATA.total;
+      const actionEntries = Object.entries(TREE_DATA.actions);
+      statsEl.innerHTML = actionEntries.map(([k,v]) => `
+        <div class="box">
+          <div><b>${k}</b>：${v}</div>
+          <div class="bar"><i style="width:${Math.max(2, (v/total)*100)}%"></i></div>
+        </div>
+      `).join("");
+
+      treeEl.innerHTML = actionEntries.map(([action,count])=>{
+        const groups = TREE_DATA.groups[action] || [];
+        const detail = groups.map(g=>`<div class="leaf">• ${g.target}（${g.count}）</div>`).join("");
+        return `<details open><summary>${action}（${count}）</summary>${detail}</details>`;
+      }).join("");
+
+      // --- SVG tree rendering ---
+      const ns = "http://www.w3.org/2000/svg";
+      svg.innerHTML = "";
+      const gRoot = document.createElementNS(ns, "g");
+      svg.appendChild(gRoot);
+      const rootX = 130;
+      const actionX = 460, targetX = 880;
+      const rowGap = 30;
+      const blockPadding = 24;
+      const blockGap = 28;
+      const gapBetweenTargets = 12;
+      const targetTextWidth = 420;
+      const actions = actionEntries.map(([name,count])=>({ name, count, x: actionX, y: 0 }));
+      const maxAction = Math.max(1, ...actions.map(a=>a.count));
+
+      function addLine(x1,y1,x2,y2,op=0.45){
+        const l = document.createElementNS(ns, "line");
+        l.setAttribute("x1", x1); l.setAttribute("y1", y1);
+        l.setAttribute("x2", x2); l.setAttribute("y2", y2);
+        l.setAttribute("stroke", "#86a9e8");
+        l.setAttribute("stroke-width", "2");
+        l.setAttribute("opacity", String(op));
+        gRoot.appendChild(l);
+      }
+      function addNode(x,y,r,label,sub,color){
+        const g = document.createElementNS(ns, "g");
+        const c = document.createElementNS(ns, "circle");
+        c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", r);
+        c.setAttribute("fill", color); c.setAttribute("stroke", "#2f6fed"); c.setAttribute("stroke-width", "1.4");
+        const t1 = document.createElementNS(ns, "text");
+        t1.setAttribute("x", x + r + 8); t1.setAttribute("y", y - 2);
+        t1.setAttribute("font-size", "12"); t1.setAttribute("fill", "#1f3e6a");
+        t1.textContent = label;
+        const t2 = document.createElementNS(ns, "text");
+        t2.setAttribute("x", x + r + 8); t2.setAttribute("y", y + 13);
+        t2.setAttribute("font-size", "11"); t2.setAttribute("fill", "#55729e");
+        t2.textContent = sub;
+        g.appendChild(c); g.appendChild(t1); g.appendChild(t2);
+        gRoot.appendChild(g);
+      }
+
+      function targetLabelBlockHeight(pathStr) {
+        if (!pathStr || pathStr === "(none)") return 28;
+        const charsPerLine = 36;
+        const lines = Math.max(1, Math.ceil(pathStr.length / charsPerLine));
+        return Math.min(200, 16 + lines * 13);
+      }
+      function rowHeightForTarget(pathStr) {
+        return Math.max(40, targetLabelBlockHeight(pathStr) + 18);
+      }
+      function addTargetNode(x, y, pathStr, count, cMax) {
+        const g = document.createElementNS(ns, "g");
+        const cr = 5 + Math.round((count / cMax) * 8);
+        const c = document.createElementNS(ns, "circle");
+        c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", cr);
+        c.setAttribute("fill", "#f7fbff"); c.setAttribute("stroke", "#2f6fed"); c.setAttribute("stroke-width", "1.4");
+        g.appendChild(c);
+        const foH = targetLabelBlockHeight(pathStr);
+        const fo = document.createElementNS(ns, "foreignObject");
+        fo.setAttribute("x", x + cr + 6);
+        fo.setAttribute("y", y - foH / 2);
+        fo.setAttribute("width", targetTextWidth);
+        fo.setAttribute("height", foH);
+        const div = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+        div.style.fontSize = "11px";
+        div.style.color = "#1f3e6a";
+        div.style.lineHeight = "1.3";
+        div.style.overflowWrap = "break-word";
+        div.style.wordBreak = "break-word";
+        div.style.fontFamily = "Segoe UI, Microsoft YaHei, sans-serif";
+        div.textContent = pathStr;
+        fo.appendChild(div);
+        g.appendChild(fo);
+        const t2 = document.createElementNS(ns, "text");
+        t2.setAttribute("x", x + cr + 6);
+        t2.setAttribute("y", y + foH / 2 + 14);
+        t2.setAttribute("font-size", "11");
+        t2.setAttribute("fill", "#55729e");
+        t2.textContent = `count=${count}`;
+        g.appendChild(t2);
+        gRoot.appendChild(g);
+      }
+
+      // Compute non-overlapping block layout per action（第三层高度随完整路径长度变化）
+      let cursorY = 28;
+      const laidOut = actions.map(a => {
+        const children = (TREE_DATA.groups[a.name] || []).slice(0, 8);
+        const heights = children.length
+          ? children.map(c => rowHeightForTarget(c.target))
+          : [rowGap];
+        const innerH = heights.reduce((s, h) => s + h, 0) + Math.max(0, children.length - 1) * gapBetweenTargets;
+        const blockHeight = innerH + blockPadding * 2;
+        const actionY = cursorY + blockHeight / 2;
+        let yAcc = actionY - innerH / 2;
+        const childPos = children.map((c, ci) => {
+          const h = heights[ci];
+          const cy = yAcc + h / 2;
+          yAcc += h + (ci < children.length - 1 ? gapBetweenTargets : 0);
+          return { c, cy };
+        });
+        cursorY += blockHeight + blockGap;
+        return { ...a, y: actionY, children, childPos, blockHeight };
+      });
+
+      const totalHeight = Math.max(520, cursorY + 24);
+      const svgW = targetX + 30 + targetTextWidth + 40;
+      svg.setAttribute("viewBox", `0 0 ${svgW} ${totalHeight}`);
+      svg.style.height = `${Math.min(900, totalHeight)}px`;
+      const rootY = totalHeight / 2;
+
+      // root
+      addNode(rootX, rootY, 18, "farm_owner_20260414_185227", `total=${total}`, "#e8f1ff");
+
+      laidOut.forEach((a) => {
+        addLine(rootX + 18, rootY, a.x - 18, a.y, 0.55);
+        const ar = 8 + Math.round((a.count / maxAction) * 10);
+        addNode(a.x, a.y, ar, a.name, `count=${a.count}`, "#eef5ff");
+
+        const cMax = Math.max(1, ...a.children.map(c => c.count));
+        (a.childPos || []).forEach(({ c, cy }) => {
+          addLine(a.x + ar, a.y, targetX - 14, cy, 0.38);
+          addTargetNode(targetX, cy, c.target, c.count, cMax);
+        });
+      });
+
+      // --- zoom / pan ---
+      let scale = 1;
+      let tx = 0;
+      let ty = 0;
+      let dragging = false;
+      let startX = 0;
+      let startY = 0;
+      let startTx = 0;
+      let startTy = 0;
+      const MIN_SCALE = 0.45;
+      const MAX_SCALE = 3.2;
+      const ZOOM_STEP = 1.18;
+
+      function applyTransform() {
+        gRoot.setAttribute("transform", `translate(${tx} ${ty}) scale(${scale})`);
+      }
+      function clampScale(v) {
+        return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v));
+      }
+      function zoomAt(clientX, clientY, factor) {
+        const rect = svg.getBoundingClientRect();
+        const px = clientX - rect.left;
+        const py = clientY - rect.top;
+        const prev = scale;
+        const next = clampScale(scale * factor);
+        if (next === prev) return;
+        tx = px - ((px - tx) * (next / prev));
+        ty = py - ((py - ty) * (next / prev));
+        scale = next;
+        applyTransform();
+      }
+
+      svg.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? ZOOM_STEP : (1 / ZOOM_STEP));
+      }, { passive: false });
+
+      svg.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startTx = tx;
+        startTy = ty;
+        svg.style.cursor = "grabbing";
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        tx = startTx + (e.clientX - startX);
+        ty = startTy + (e.clientY - startY);
+        applyTransform();
+      });
+      window.addEventListener("mouseup", () => {
+        dragging = false;
+        svg.style.cursor = "default";
+      });
+
+      zoomInBtn.onclick = () => zoomAt(svg.getBoundingClientRect().left + 40, svg.getBoundingClientRect().top + 40, ZOOM_STEP);
+      zoomOutBtn.onclick = () => zoomAt(svg.getBoundingClientRect().left + 40, svg.getBoundingClientRect().top + 40, 1 / ZOOM_STEP);
+      resetViewBtn.onclick = () => { scale = 1; tx = 0; ty = 0; applyTransform(); };
+      applyTransform();
+    }
+
+    function parseDecisionText(text) {
+      const raw = text.trim();
+      if (!raw) return [];
+      // try JSON array/object first
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && Array.isArray(parsed.records)) return parsed.records;
+      } catch (_) {}
+      // fallback JSONL
+      const rows = [];
+      for (const line of raw.split(/\r?\n/)) {
+        const s = line.trim();
+        if (!s) continue;
+        try { rows.push(JSON.parse(s)); } catch (_) {}
+      }
+      return rows;
+    }
+
+    filePicker.addEventListener("change", async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const text = await f.text();
+      const records = parseDecisionText(text);
+      if (!records.length) {
+        alert("未解析到有效 JSON 记录，请选择 owner_decisions 的 json/jsonl 文件。");
+        return;
+      }
+      TREE_DATA = summarizeFromRecords(records);
+      treeTitle.textContent = `决策树统计（来自 ${f.name}）`;
+      sourcePath.textContent = f.name;
+      renderTreePage();
+    });
+    renderTreePage();
+  </script>
+</body>
+</html>

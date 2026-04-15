@@ -1,5 +1,5 @@
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-"""Tests for IngestValidator and run_quality_pipeline (IV-01 to IV-05)."""
+"""Tests for IngestValidator and run_quality_pipeline."""
 
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ def _accept_chunk(page: str, **meta_extra: object) -> dict:
     return {"page_content": page, "metadata": meta}
 
 
-# IV-01: MinLength / short content
-def test_iv01_rejected_short() -> None:
+# IV-01: 短文本不再由 ingest_validator 硬拦截
+def test_iv01_short_content_not_rejected_by_default() -> None:
     v = IngestValidator(cli_graph_store=None)
     chunk = _accept_chunk("short")
     verdict, reason = v.validate_chunk(chunk)
-    assert verdict == "reject"
-    assert reason == "short_content"
-    assert v.report.rejected_short >= 1
+    assert verdict == "accept"
+    assert reason == ""
+    assert v.report.rejected_short == 0
 
 
 # IV-02: non-product-like section_title is no longer rejected by keyword rule
@@ -63,17 +63,17 @@ def test_iv03_quarantine_no_tree_position() -> None:
     assert v.report.quarantined >= 1
 
 
-# IV-04: SimHash near-duplicate
-def test_iv04_duplicate_simhash() -> None:
+# IV-04: 近重复不再由 ingest_validator 硬拦截
+def test_iv04_duplicate_simhash_not_filtered_by_default() -> None:
     v = IngestValidator(cli_graph_store=None)
     body = "duplicate body for simhash " * 5
     c1 = _accept_chunk(body)
     c2 = _accept_chunk(body)
     assert v.validate_chunk(c1)[0] == "accept"
     verdict, reason = v.validate_chunk(c2)
-    assert verdict == "duplicate"
-    assert reason == "simhash_near_duplicate"
-    assert v.report.duplicates >= 1
+    assert verdict == "accept"
+    assert reason == ""
+    assert v.report.duplicates == 0
 
 
 # IV-05: run_quality_pipeline writes _quality_report.json (ingest path)

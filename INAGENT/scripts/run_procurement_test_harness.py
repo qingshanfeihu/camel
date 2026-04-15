@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
 import traceback
@@ -33,7 +34,7 @@ logger = logging.getLogger("procurement_test_harness")
 
 TEST_DATA_ROOT = REPO_ROOT / "INAGENT" / "test_data"
 DEFAULT_INPUT_DIR = REPO_ROOT / "INAGENT" / "knowledge_base" / "input"
-DEFAULT_OUTPUT_ROOT = TEST_DATA_ROOT / "runs"
+DEFAULT_OUTPUT_ROOT = TEST_DATA_ROOT / "采购输出"
 AUTO_CONVERT_LOG = REPO_ROOT / "INAGENT" / "knowledge_base" / "logs" / "auto_convert.log"
 
 
@@ -52,6 +53,59 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _build_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _clear_procurement_data(repo_root: Path) -> None:
+    """Clear all cached procurement data so the pipeline runs from scratch.
+
+    Clears:
+    - knowledge_base/reference/*.json  (except reserved files)
+    - knowledge_base/doc_local_reference/  (entire directory)
+    - knowledge_base/logs/*.cache.json
+    - knowledge_base/mineru_output/  (all task subdirectories)
+    """
+    kb_root = repo_root / "INAGENT" / "knowledge_base"
+    reserved_files = {"knowledge_base.json", "commandtree_base.json"}
+
+    # 1. reference/*.json
+    reference_dir = kb_root / "reference"
+    if reference_dir.exists():
+        removed = 0
+        for f in reference_dir.glob("*.json"):
+            if f.name not in reserved_files:
+                f.unlink()
+                removed += 1
+        logger.info("[clear] removed %d reference JSON files", removed)
+
+    # 2. doc_local_reference/
+    doc_ref_dir = kb_root / "doc_local_reference"
+    if doc_ref_dir.exists():
+        shutil.rmtree(doc_ref_dir)
+        logger.info("[clear] removed doc_local_reference/")
+
+    # 3. logs/*.cache.json
+    logs_dir = kb_root / "logs"
+    if logs_dir.exists():
+        removed = sum(
+            1 for f in logs_dir.glob("*.cache.json")
+            if not f.unlink() or True  # unlink returns None, always True
+        )
+        logger.info("[clear] removed %d cache files from logs/", removed)
+
+    # 4. mineru_output task subdirectories (keep the directory itself)
+    mineru_output_dir = kb_root / "mineru_output"
+    if mineru_output_dir.exists():
+        removed = 0
+        for item in mineru_output_dir.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+                removed += 1
+            elif item.is_file() and item.name != "mineru.json":
+                item.unlink()
+                removed += 1
+        logger.info("[clear] removed %d items from mineru_output/", removed)
+
+    logger.info("[clear] procurement cache cleared")
 
 
 def _validate_input_dir(input_dir: Path) -> None:
@@ -83,6 +137,15 @@ async def _run(args: argparse.Namespace) -> int:
     logger.info("输入目录(校验): %s", args.input_dir.resolve())
     logger.info("run_id: %s", run_id)
 
+    logger.info("[clear] 清空旧采购数据和cache，确保与事实源文件一致再处理...")
+    _clear_procurement_data(REPO_ROOT)
+
+    # 采购测试不需要 LLM — 直接跳过 gateway preflight 和 metadata LLM 提取，
+    # 避免产生无意义的 HTTP 重试延迟（AUTO_CONVERT_SKIP_LLM=1）。
+    os.environ["AUTO_CONVERT_SKIP_LLM"] = "1"
+    os.environ["AUTO_CONVERT_ASSUME_YES"] = "1"
+    logger.info("[test] AUTO_CONVERT_SKIP_LLM=1：跳过 LLM gateway preflight 及 metadata 提取")
+
     try:
         await procurement_ingest_main()
     except Exception as exc:
@@ -95,6 +158,26 @@ async def _run(args: argparse.Namespace) -> int:
     if AUTO_CONVERT_LOG.exists():
         copied_log = run_dir / "auto_convert.log"
         shutil.copy2(AUTO_CONVERT_LOG, copied_log)
+
+    # Copy reference output files to run_dir/reference/
+    ref_src = REPO_ROOT / "INAGENT" / "knowledge_base" / "reference"
+    if ref_src.exists():
+        ref_dst = run_dir / "reference"
+        ref_dst.mkdir(parents=True, exist_ok=True)
+        copied_refs = 0
+        for json_file in ref_src.glob("*.json"):
+            shutil.copy2(json_file, ref_dst / json_file.name)
+            copied_refs += 1
+        logger.info("[output] copied %d reference JSON files -> %s", copied_refs, ref_dst)
+
+    # Copy doc_local_reference snapshot if present
+    doc_ref_src = REPO_ROOT / "INAGENT" / "knowledge_base" / "doc_local_reference"
+    if doc_ref_src.exists():
+        doc_ref_dst = run_dir / "doc_local_reference"
+        if doc_ref_dst.exists():
+            shutil.rmtree(doc_ref_dst)
+        shutil.copytree(doc_ref_src, doc_ref_dst)
+        logger.info("[output] copied doc_local_reference/ -> %s", doc_ref_dst)
 
     manifest: Dict[str, Any] = {
         "run_id": run_id,
