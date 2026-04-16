@@ -8,7 +8,7 @@
     :root { --bg:#f4f8ff; --panel:#fff; --line:#d6e2f6; --text:#1d2b3d; --muted:#5b6d82; --pri:#2f6fed; }
     *{box-sizing:border-box}
     body{margin:0;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(180deg,#eef4ff,#f8fbff);color:var(--text)}
-    .page{max-width:1380px;margin:14px auto;padding:0 14px}
+    .page{max-width:1480px;margin:14px auto;padding:0 14px}
     .top{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:0 8px 20px rgba(33,71,133,.08)}
     .top h1{margin:0 0 4px;font-size:22px}
     .top p{margin:0;color:var(--muted);font-size:13px}
@@ -43,37 +43,102 @@
     .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
     .chip{background:#f1f6ff;border:1px solid #d8e5fb;color:#2f5688;font-size:11px;border-radius:999px;padding:4px 8px}
     .extra{margin-top:8px;border:1px dashed #bcd0ef;border-radius:10px;padding:8px;font-size:12px;color:#325684;background:#f7fbff}
-    .tree-layout{margin-top:12px;display:grid;grid-template-columns:380px 1fr;gap:12px}
+    .tree-layout{margin-top:12px;display:grid;grid-template-columns:390px minmax(0,1fr);gap:12px}
     .source-box{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
     .source-input{border:1px solid #c7daf5;background:#fff;border-radius:8px;padding:5px 8px;font-size:12px;color:#2b4f7e}
     .stat{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
     .stat .box{border:1px solid #d7e4f8;background:#fbfdff;border-radius:10px;padding:8px;font-size:12px}
     .bar{height:9px;background:#e7effd;border-radius:999px;overflow:hidden;margin-top:6px}
     .bar i{display:block;height:100%;background:linear-gradient(90deg,#77a6ff,#2f6fed)}
-    .tree{margin-top:8px;max-height:480px;overflow:auto;padding-right:4px}
-    details{border:1px solid #d9e5f8;background:#fcfeff;border-radius:10px;padding:6px 8px;margin-bottom:7px}
-    summary{cursor:pointer;font-weight:600;font-size:13px;color:#294d7d}
-    .leaf{font-size:12px;color:#334c6d;padding:3px 0 3px 14px}
     .hint{font-size:12px;color:#5a6f8f}
+    .tree-caption{font-size:12px;color:#5a6f8f;line-height:1.45;margin-top:8px}
+    .schema-map{margin-top:12px;display:grid;gap:8px}
+    .schema-card{border:1px solid #d7e4f8;background:#fbfdff;border-radius:12px;padding:10px}
+    .schema-card h3{margin:0 0 6px;font-size:13px;color:#294a77}
+    .schema-card p{margin:0 0 8px;font-size:12px;color:#5a6f8f;line-height:1.45}
+    .field-grid{display:grid;gap:8px}
+    .field-row{display:grid;grid-template-columns:minmax(106px,126px) 1fr;gap:8px;align-items:start;padding:8px;border:1px solid #e0eafb;border-radius:10px;background:#fff}
+    .field-key{display:inline-flex;justify-content:center;align-items:center;padding:5px 8px;border-radius:8px;background:#eef4ff;border:1px solid #d6e3f7;color:#214979;font-family:"Consolas","SFMono-Regular",monospace;font-size:11px;line-height:1.2}
+    .field-desc{font-size:12px;line-height:1.45;color:#355579}
+    .field-desc b{display:block;color:#203d63;margin-bottom:2px}
     .svg-wrap{margin-top:8px;border:1px solid #d9e5f8;border-radius:10px;background:#fcfeff;overflow:auto}
-    #treeSvg{width:100%;height:520px;display:block}
-    .svg-tools{display:flex;gap:8px;align-items:center;margin-top:8px}
+    #treeSvg{width:100%;height:540px;display:block}
+    .svg-tools{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
     .svg-btn{border:1px solid #c7daf5;background:#fff;border-radius:8px;padding:4px 9px;font-size:12px;cursor:pointer;color:#2b4f7e}
     .svg-tip{font-size:12px;color:#5a6f8f}
     .legend{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .legend span{font-size:11px;border:1px solid #d8e5fb;background:#f1f6ff;color:#2f5688;border-radius:999px;padding:3px 8px}
+    .decision-workspace{margin-top:12px;display:grid;grid-template-columns:minmax(0,1fr) 430px;gap:12px;align-items:start}
+    .tree-list-panel{min-width:0}
+    .tree{margin-top:8px;max-height:560px;overflow:auto;padding-right:4px}
+    .action-block{border:1px solid #d9e5f8;background:#fcfeff;border-radius:12px;padding:8px 10px;margin-bottom:9px}
+    .action-block.active{border-color:var(--pri);box-shadow:0 0 0 2px rgba(47,111,237,.12)}
+    .action-summary{cursor:pointer;font-weight:600;font-size:13px;color:#294d7d;display:flex;justify-content:space-between;align-items:center;gap:10px}
+    .summary-count{display:inline-flex;align-items:center;justify-content:center;min-width:34px;padding:3px 8px;border-radius:999px;background:#eef4ff;border:1px solid #d6e3f7;color:#224876;font-size:11px}
+    .action-note{margin-top:8px;font-size:11px;line-height:1.45;color:#5b7090}
+    .bucket-list{display:grid;gap:8px;margin-top:10px}
+    .bucket-btn{width:100%;border:1px solid #dbe7f9;background:#fff;border-radius:10px;padding:9px 10px;text-align:left;cursor:pointer;transition:.15s}
+    .bucket-btn:hover{transform:translateY(-1px);box-shadow:0 8px 16px rgba(44,88,160,.08)}
+    .bucket-btn.active{border-color:var(--pri);background:#f2f7ff;box-shadow:0 0 0 2px rgba(47,111,237,.12)}
+    .bucket-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+    .bucket-key{font-size:13px;font-weight:600;color:#203d63;line-height:1.35;word-break:break-word}
+    .bucket-count{display:inline-flex;align-items:center;justify-content:center;min-width:34px;padding:2px 8px;border-radius:999px;background:#eef4ff;border:1px solid #d6e3f7;color:#224876;font-size:11px}
+    .bucket-field{margin-top:6px;font-size:11px;line-height:1.4;color:#5b7090}
+    .inspector-panel{background:#f8fbff;border:1px solid #d7e4f8;border-radius:12px;padding:12px;position:sticky;top:12px;max-height:760px;overflow:auto}
+    .inspector-panel h3{margin:0 0 4px;font-size:17px;color:#203d63}
+    .inspect-subtitle{font-size:12px;color:#5a6f8f;line-height:1.45}
+    .inspect-rule{margin-top:8px;border:1px dashed #bfd2f0;border-radius:10px;background:#fafdff;padding:10px;font-size:12px;line-height:1.55;color:#31537f}
+    .inspect-rule b{color:#203d63}
+    .inspect-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
+    .inspect-box{border:1px solid #dbe7f9;border-radius:10px;background:#fff;padding:8px;font-size:12px;color:#294a77;line-height:1.45}
+    .inspect-box b{display:block;font-size:11px;color:#5a6f8f;margin-bottom:4px}
+    .record-list{display:grid;gap:10px;margin-top:10px}
+    .record-card{border:1px solid #dbe7f9;border-radius:12px;background:#fff;padding:10px}
+    .record-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px}
+    .record-file{font-size:12px;font-weight:600;color:#203d63;line-height:1.4;word-break:break-word}
+    .sample-badge{display:inline-flex;align-items:center;justify-content:center;min-width:44px;padding:2px 8px;border-radius:999px;background:#eef4ff;border:1px solid #d6e3f7;color:#224876;font-size:11px}
+    .record-title{font-size:13px;color:#2d4f7b;line-height:1.45;margin-bottom:8px;word-break:break-word}
+    .record-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .record-item{border:1px solid #e1eafb;border-radius:10px;padding:8px;background:#fcfeff}
+    .record-item.wide{grid-column:1 / -1}
+    .record-item b{display:block;font-size:11px;color:#58708f;margin-bottom:4px}
+    .plain{font-size:12px;line-height:1.5;color:#264566;word-break:break-word;white-space:pre-wrap}
+    .mono{font-family:"Consolas","SFMono-Regular",monospace}
+    .muted{color:#8ba0bd}
+    .empty-state{border:1px dashed #c7d9f5;border-radius:10px;background:#fbfdff;padding:12px;font-size:12px;line-height:1.5;color:#5a6f8f}
+    .inline-code{display:inline-block;padding:1px 6px;border-radius:999px;background:#eef4ff;border:1px solid #d6e3f7;color:#214979;font-family:"Consolas","SFMono-Regular",monospace;font-size:11px}
+    .code-block{margin:8px 0 0;padding:10px;border-radius:10px;background:#f6f9ff;border:1px solid #e0eafb;font-size:11px;line-height:1.5;color:#23446d;overflow:auto;white-space:pre-wrap;word-break:break-word}
+    .record-card details{margin-top:10px;border:1px solid #e1eafb;background:#f9fbff;border-radius:10px;padding:8px}
+    .record-card summary{cursor:pointer;font-size:12px;font-weight:600;color:#294d7d}
+    .level-grid,.compare-grid{display:grid;gap:8px}
+    .level-card,.compare-card{border:1px solid #dbe7f9;border-radius:12px;background:#fff;padding:10px}
+    .level-card h4,.compare-card h4{margin:0 0 6px;font-size:13px;color:#203d63}
+    .level-line,.compare-line{font-size:12px;line-height:1.5;color:#31537f;margin-top:6px}
+    .level-line b,.compare-line b{color:#203d63}
+    .level-tags,.child-node-list{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+    .node-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;background:#eef4ff;border:1px solid #d6e3f7;color:#214979;font-size:11px}
+    .sapling-source-box{align-items:flex-start}
+    .sapling-source-box .source-input{min-width:220px}
+    .sapling-search{min-width:260px}
+    .child-node-btn{border:1px solid #dbe7f9;background:#fff;border-radius:999px;padding:5px 10px;font-size:11px;color:#23446d;cursor:pointer}
+    .child-node-btn:hover{transform:translateY(-1px);box-shadow:0 6px 12px rgba(44,88,160,.08)}
+    .bucket-subline{margin-top:6px;font-size:11px;line-height:1.45;color:#5b7090}
+    .bucket-subline .inline-code{margin-right:4px}
+    @media (max-width:1320px){ .decision-workspace{grid-template-columns:1fr} .inspector-panel{position:static;max-height:none} }
     @media (max-width:1200px){ .layout,.tree-layout{grid-template-columns:1fr}.flowline{display:none}.nodes{grid-template-columns:repeat(3,1fr)} .arrow{display:none} }
+    @media (max-width:860px){ .record-grid,.inspect-stats,.stat{grid-template-columns:1fr} .field-row{grid-template-columns:1fr} }
     @media (max-width:760px){ .nodes{grid-template-columns:repeat(2,1fr)} }
   </style>
 </head>
 <body>
   <div class="page">
     <div class="top">
-      <h1>INAGENT 流程图主页 + 决策树页</h1>
-      <p>第 1 页是字段流转流程图；第 2 页是根据 <code>_owner_decisions_for_farmer.jsonl</code> 生成的决策树。</p>
+      <h1>INAGENT 流程图主页 + 决策树页 + 树苗树页</h1>
+      <p>第 1 页是字段流转流程图；第 2 页是根据 <code>_owner_decisions_for_farmer.jsonl</code> 生成的决策树；第 3 页用来观察原始树苗节点结构，并和农场主 schema 对照。</p>
       <div class="tabs">
         <button class="tab active" data-tab="flow">流程图主页</button>
         <button class="tab" data-tab="tree">决策树（JSONL）</button>
+        <button class="tab" data-tab="sapling">原始树苗树</button>
       </div>
     </div>
 
@@ -105,34 +170,140 @@
     <section class="view" id="view-tree">
       <div class="tree-layout">
         <div class="tree-panel">
-          <h2 id="treeTitle">决策树统计（来自 farm_owner_20260414_185227）</h2>
+          <h2 id="treeTitle">决策树统计（来自 farm_owner_20260415_220409）</h2>
           <div class="source-box">
             <label class="meta" style="margin:0;">选择数据文件：</label>
             <input id="filePicker" class="source-input" type="file" accept=".json,.jsonl,.txt" />
           </div>
-          <div class="meta">建议从目录选择：<code>C:\SynologyDrive\INFOAGEN\INAGENT\test_data\农场主输出\farm_owner_20260414_185227\给农民</code></div>
-          <div class="meta">当前源文件：<code id="sourcePath">test_data/农场主输出/farm_owner_20260414_185227/给农民/_owner_decisions_for_farmer.jsonl</code></div>
+          <div class="meta">建议从目录选择：<code>C:\SynologyDrive\INFOAGEN\INAGENT\test_data\农场主输出\farm_owner_20260415_220409\给农民</code></div>
+          <div class="meta">当前源文件：<code id="sourcePath">test_data/农场主输出/farm_owner_20260415_220409/给农民/_owner_decisions_for_farmer.jsonl</code></div>
           <div class="stat" id="stats"></div>
-          <div class="hint" style="margin-top:8px;">树生成口径：按 <code>action</code> 分叉；对 <code>tree_create_*</code> 将 <code>enrich_fields.parent_candidate</code> 与 <code>target_node_id</code> 合并为<strong>完整父路径</strong>（取长路径、多段路径优先）；其余 action 按 <code>target_node_id</code> 聚合。</div>
+          <div class="hint" style="margin-top:8px;"><strong>聚合键与 <code>entity_title</code> 不同：</strong>第三层按 action 选用 JSONL 字段分桶——<code>merge_into_existing</code> / <code>needs_tree_session</code> 用 <code>target_node_id</code>；<code>tree_create_*</code> 用 <code>parent_candidate</code> ∪ <code>target_node_id</code> 合并父路径；<code>discard</code> 无树挂载。</div>
+          <div class="tree-caption">载入真实 JSONL 后，右侧 Inspector 会直接展示样例 row 的 <code>action</code>、<code>target_node_id</code>、<code>tree_level</code>、<code>enrich_fields.parent_candidate</code>、<code>chunk_meta_patch</code> 与 <code>source_evidence</code>。</div>
+          <div class="schema-map">
+            <div class="schema-card">
+              <h3>1. 主决策字段</h3>
+              <p>这几项决定一条记录最终被归到哪类 action，以及要挂到哪条树路径。</p>
+              <div class="field-grid">
+                <div class="field-row"><span class="field-key">action</span><div class="field-desc"><b>最终动作</b>决定落在第二层哪一支：discard / merge / needs_tree_session / tree_create_*。</div></div>
+                <div class="field-row"><span class="field-key">target_node_id</span><div class="field-desc"><b>目标节点或父路径</b>merge 直接并入已有节点；tree_create_* 里通常表示建议父路径。</div></div>
+                <div class="field-row"><span class="field-key">target_block_id</span><div class="field-desc"><b>源块定位</b>用于回到原始 chunk，对照具体哪一段文档被裁决。</div></div>
+                <div class="field-row"><span class="field-key">tree_level</span><div class="field-desc"><b>树层级</b>leaf / branch / trunk，帮助判断 action 与层级是否一致。</div></div>
+              </div>
+            </div>
+            <div class="schema-card">
+              <h3>2. 聚合辅助字段</h3>
+              <p>这些字段不一定是最终落盘目标，但会影响“第三层桶”怎么显示。</p>
+              <div class="field-grid">
+                <div class="field-row"><span class="field-key">enrich_fields.parent_candidate</span><div class="field-desc"><b>父路径候选</b>tree_create_* 会把它和 <code>target_node_id</code> 合并，取更完整的父路径作为聚合键。</div></div>
+                <div class="field-row"><span class="field-key">entity_title</span><div class="field-desc"><b>块标题</b>便于人读，但不是决策树第三层分桶键。</div></div>
+                <div class="field-row"><span class="field-key">source_file</span><div class="field-desc"><b>文档来源</b>Inspector 里会统计一个 bucket 来自哪些文件。</div></div>
+                <div class="field-row"><span class="field-key">source_evidence</span><div class="field-desc"><b>裁决理由</b>能直接看出是 LLM 决策、规则命中，还是 validator 重写。</div></div>
+              </div>
+            </div>
+            <div class="schema-card">
+              <h3>3. 扩展补丁字段</h3>
+              <p><code>chunk_meta_patch</code> 里是后续农民真正要消费的结构信号，Inspector 会把常用子字段展开给你看。</p>
+              <div class="field-grid">
+                <div class="field-row"><span class="field-key">product_module</span><div class="field-desc"><b>产品模块</b>例如 SLB / 基础网络 / 安全，是树父路径判断的重要旁证。</div></div>
+                <div class="field-row"><span class="field-key">command_prefix</span><div class="field-desc"><b>命令前缀</b>帮助判断 leaf 是否真是 CLI 命令，而不是功能说明。</div></div>
+                <div class="field-row"><span class="field-key">chunk_type / step_type</span><div class="field-desc"><b>块类型</b>single_command / narrative / health_checks 等，辅助判断 leaf/branch。</div></div>
+                <div class="field-row"><span class="field-key">function_hierarchy</span><div class="field-desc"><b>功能层级信号</b>若能推出 branch 路径，validator 会优先把 leaf 修正到具体父节点下。</div></div>
+              </div>
+            </div>
+          </div>
         </div>
+
         <div class="tree-panel">
-          <h2>按 action → 父路径（完整）聚合树</h2>
+          <h2>按 action → 聚合键 → 样例字段</h2>
           <div class="svg-tools">
             <button class="svg-btn" id="zoomInBtn" type="button">放大 +</button>
             <button class="svg-btn" id="zoomOutBtn" type="button">缩小 -</button>
             <button class="svg-btn" id="resetViewBtn" type="button">重置视图</button>
-            <span class="svg-tip">支持：滚轮缩放 + 鼠标拖拽平移</span>
+            <span class="svg-tip">支持：滚轮缩放 + 鼠标拖拽平移；点击 action / 聚合键节点可同步刷新 Inspector</span>
           </div>
           <div class="svg-wrap">
             <svg id="treeSvg" viewBox="0 0 1200 520" preserveAspectRatio="xMinYMin meet"></svg>
           </div>
           <div class="legend">
-            <span>根节点：本批总决策</span>
-            <span>二层：action</span>
-            <span>三层：父路径（parent_candidate ∪ target_node_id，不截断）</span>
-            <span>圆越大计数越高</span>
+            <span>根：当前源文件总条数</span>
+            <span>二层：action 分支</span>
+            <span>三层：真正分桶字段（不是 entity_title）</span>
+            <span>Inspector：展示 bucket 内样例记录的字段结构</span>
           </div>
-          <div class="tree" id="decisionTree"></div>
+          <div class="decision-workspace">
+            <div class="tree-list-panel">
+              <div class="tree-caption">点击 action 标题查看该分支的分桶规则；点击下方 bucket 卡片查看这个桶里真实 row 的字段长什么样。</div>
+              <div class="tree" id="decisionTree"></div>
+            </div>
+            <aside class="inspector-panel">
+              <h3 id="inspectTitle">字段 Inspector</h3>
+              <div class="inspect-subtitle" id="inspectMeta">当前是默认快照。载入真实 JSONL 后点击 action 或 bucket，可展开样例记录字段。</div>
+              <div class="inspect-rule" id="inspectRule">这里会显示：<b>分桶字段</b>、<b>分桶公式</b>、<b>tree_level 分布</b>、<b>样例 row</b>。如果还没加载 JSONL，则只显示静态说明。</div>
+              <div class="inspect-stats" id="inspectStats"></div>
+              <div class="record-list" id="inspectRecords">
+                <div class="empty-state">尚未选择节点。建议先从左侧加载最新 <code>_owner_decisions_for_farmer.jsonl</code>，然后点击右侧的 action 或 bucket 卡片。</div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-sapling">
+      <div class="tree-layout">
+        <div class="tree-panel">
+          <h2 id="saplingTitle">原始树苗结构（推荐载入 commandtree_base.json）</h2>
+          <div class="source-box sapling-source-box">
+            <label class="meta" style="margin:0;">树苗文件：</label>
+            <input id="saplingPicker" class="source-input" type="file" accept=".json,.jsonl,.txt" />
+            <label class="meta" style="margin:0;">图谱文件：</label>
+            <input id="saplingGraphPicker" class="source-input" type="file" accept=".json" />
+            <input id="saplingSearch" class="source-input sapling-search" type="search" placeholder="按 node_id / command_prefix / knowledge_role 搜索节点" />
+          </div>
+          <div class="meta">建议树苗文件：<code>C:\SynologyDrive\INFOAGEN\INAGENT\knowledge_base\reference\commandtree_base.json</code>；若选 <code>knowledge_base.json</code>，页面会自动过滤出带树字段的记录。</div>
+          <div class="meta">建议图谱文件：<code>C:\SynologyDrive\INFOAGEN\INAGENT\knowledge_base\cli_keyword_graph.json</code>（可选；用于更稳地恢复父子关系）。</div>
+          <div class="meta">当前树苗源：<code id="saplingSourcePath">(未加载)</code></div>
+          <div class="meta">当前图谱源：<code id="saplingGraphPath">(未加载，先用 node_id 前缀回退)</code></div>
+          <div class="stat" id="saplingStats"></div>
+          <div class="tree-caption" id="saplingParentNote">树苗页关心的是“节点长什么样”，不是 owner decision 的 action。root 默认为页面合成层；原始树苗通常只落 trunk / branch / leaf。</div>
+          <div class="schema-map">
+            <div class="schema-card">
+              <h3>1. 各层级真实字段</h3>
+              <p>这里统计原始树苗在 root / trunk / branch / leaf 上实际出现的字段，重点看 <code>metadata</code> 和 <code>tree_position</code> 子字段。</p>
+              <div class="level-grid" id="saplingLevelCards"></div>
+            </div>
+            <div class="schema-card">
+              <h3>2. 与农场主实现的对照</h3>
+              <p>树苗是“节点结构”；农场主是“动作结构”。这里展示二者在各层级上的对应关系与不一致点。</p>
+              <div class="compare-grid" id="saplingCompareCards"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tree-panel">
+          <h2>树苗 Explorer（root → 分组 → 节点）</h2>
+          <div class="legend">
+            <span>root：页面合成层</span>
+            <span>Trunk 节点：原始树苗主干</span>
+            <span>Root 直挂 branch / leaf：暂未恢复到父节点的节点</span>
+            <span>Inspector：展示 metadata / tree_position / raw JSON</span>
+          </div>
+          <div class="decision-workspace">
+            <div class="tree-list-panel">
+              <div class="tree-caption">左侧不是 owner action 分桶，而是 root 下的 3 个顶层分组。点击节点后，右侧会展开它的字段、父节点恢复方式和子节点。</div>
+              <div class="tree" id="saplingTree"></div>
+            </div>
+            <aside class="inspector-panel">
+              <h3 id="saplingInspectTitle">树苗 Inspector</h3>
+              <div class="inspect-subtitle" id="saplingInspectMeta">当前是预览态。载入树苗文件后点击分组或节点，可展开 metadata / tree_position / page_content。</div>
+              <div class="inspect-rule" id="saplingInspectRule">这里会显示：<b>层级</b>、<b>父节点恢复方式</b>、<b>稳定字段</b>、<b>子节点</b> 与 <b>样例 raw JSON</b>。</div>
+              <div class="inspect-stats" id="saplingInspectStats"></div>
+              <div class="record-list" id="saplingInspectRecords">
+                <div class="empty-state">建议先加载 <code>commandtree_base.json</code>；如需更稳的父子关系，再补选 <code>cli_keyword_graph.json</code>。</div>
+              </div>
+            </aside>
+          </div>
         </div>
       </div>
     </section>
@@ -148,34 +319,160 @@
       {name:"树 / 检索", brief:"merge / 图谱 / 索引", consume:["reference metadata","knowledge_base.json"], produce:["knowledge_base.json","GraphRAG reload","Hybrid 索引刷新(可选)"], artifacts:["knowledge_base.json","graphrag index","hybrid index"], code:["data_tools/merge_knowledge_base.py","workflow_config_generator.py","rag/unified_rag.py"], charter:"消费最终字段用于检索语义与树结构对齐。", chips:["document_category","product_module","function_hierarchy","command_prefix"]}
     ];
 
-    // 默认数据（来自指定 JSONL 的快照统计）
+    const ACTION_ORDER = [
+      "discard",
+      "merge_into_existing",
+      "needs_tree_session",
+      "tree_create_branch",
+      "tree_create_leaf",
+      "tree_create_trunk",
+      "tree_create_root",
+    ];
+
     let TREE_DATA = {
       total: 4092,
       actions: {
-        discard: 1737,
-        merge_into_existing: 1706,
-        tree_create_branch: 218,
-        tree_create_leaf: 426,
-        tree_create_trunk: 5
+        discard: 2070,
+        merge_into_existing: 1105,
+        needs_tree_session: 818,
+        tree_create_branch: 90,
+        tree_create_leaf: 8,
+        tree_create_trunk: 1,
       },
-      levels: {"":1737, leaf:2107, branch:241, trunk:7},
+      levels: {"": 2892, leaf: 1083, branch: 114, trunk: 3},
       groups: {
-        discard: [{"target":"(none)","count":1737}],
+        discard: [{target: "(discard：无挂载目标)", count: 2070}],
         merge_into_existing: [
-          {"target":"rip version","count":309},{"target":"monitor system disk system","count":198},{"target":"clear interface management","count":89},
-          {"target":"restapi port","count":88},{"target":"clear cache filter hostname","count":69},{"target":"vxlan port","count":63},
-          {"target":"show aaa","count":60},{"target":"nat itcpopt","count":54},{"target":"ip statistics","count":48},{"target":"clear lldp","count":48},
-          {"target":"IP packet(total byte in/total byte out): 100764/100764","count":41},{"target":"interface name","count":37}
+          {target: "rip version", count: 309},
+          {target: "monitor system disk system", count: 198},
+          {target: "restapi port", count: 88},
+          {target: "vxlan port", count: 63},
+          {target: "nat itcpopt", count: 54},
+          {target: "ip statistics", count: 48},
+          {target: "interface name", count: 37},
+          {target: "ip route", count: 18},
+          {target: "no ipv6 pmtu timeout", count: 17},
+          {target: "基础网络 > 网桥", count: 17},
+          {target: "基础网络 > NAT64", count: 11},
+          {target: "ipregion geoip", count: 10},
         ],
+        needs_tree_session: [{target: "(none：缺 target_node_id)", count: 818}],
         tree_create_branch: [
-          {"target":"(none)","count":190},{"target":"基础网络 > 系统健康检查","count":5},{"target":"ustack","count":5},
-          {"target":"SLB","count":4},{"target":"基础网络","count":3},{"target":"HA > 系统健康检查","count":2},
-          {"target":"NAT","count":1},{"target":"CLI_Syntax","count":1},{"target":"security.port-mirroring","count":1}
+          {target: "SLB", count: 80},
+          {target: "LLB", count: 7},
+          {target: "ACL > acl rule", count: 2},
+          {target: "monitor system disk system", count: 1},
         ],
-        tree_create_leaf: [{"target":"(none)","count":425},{"target":"基础网络 > DNS64/NAT64","count":1}],
-        tree_create_trunk: [{"target":"(none)","count":5}]
-      }
+        tree_create_leaf: [
+          {target: "ACL > acl rule", count: 3},
+          {target: "SLB > PMTU 功能基本原理", count: 3},
+          {target: "HA > ha ssf", count: 2},
+        ],
+        tree_create_trunk: [{target: "(none)", count: 1}],
+      },
+      actionDetails: {},
+      recordsLoaded: false,
     };
+
+    let CURRENT_RECORDS = [];
+    let currentSelection = { type: "none", action: "", target: "" };
+    let currentTreeLabel = "farm_owner_20260415_220409";
+
+    const SAPLING_LEVEL_ORDER = ["root", "trunk", "branch", "leaf"];
+    const SAPLING_LEVEL_LABELS = {
+      root: "Root（页面合成层）",
+      trunk: "Trunk（主干）",
+      branch: "Branch（树枝）",
+      leaf: "Leaf（叶子）",
+    };
+    const SAPLING_GROUP_CONFIG = [
+      {
+        key: "trunk_roots",
+        label: "Trunk 节点",
+        desc: "tree_level=trunk 的原始树苗节点，会直接挂到页面合成 root 下。",
+        level: "trunk",
+      },
+      {
+        key: "root_branches",
+        label: "Root 直挂 Branch",
+        desc: "无法恢复到 trunk 父节点的 branch 节点，先挂到 root 便于观察。",
+        level: "branch",
+      },
+      {
+        key: "root_leaves",
+        label: "Root 直挂 Leaf",
+        desc: "无法恢复到 branch / trunk 父节点的 leaf 节点，先挂到 root 便于对照。",
+        level: "leaf",
+      },
+    ];
+    const SAPLING_COMPARE_DEFS = [
+      {
+        level: "root",
+        sapling: "原始树苗当前通常不落盘 root 记录；root 是这个页面合成出来的浏览层。",
+        owner: "农场主侧对应 tree_create_root / merge_into_existing(tree_level=root)，属于结构意图，不是既有节点快照。",
+        consistency: "不直接一一对应：树苗 root 是展示根；农场主 root 是变更动作。",
+      },
+      {
+        level: "trunk",
+        sapling: "稳定看 metadata.node_id、command_prefix、scope、document_category，以及 tree_position.tree_level / knowledge_role / confidence。",
+        owner: "主要看 action=tree_create_trunk 或 merge_into_existing，外加 target_node_id、tree_level=trunk、chunk_meta_patch.command_prefix / product_module。",
+        consistency: "半一致：tree_level 能对齐，但农场主没有最终 node_id，只描述要并入哪里或要在哪个父层建节点。",
+      },
+      {
+        level: "branch",
+        sapling: "稳定看 metadata.node_id、command_prefix、func，以及 tree_position.knowledge_role=command_group / feature_doc。",
+        owner: "主要看 action=tree_create_branch 或 merge_into_existing(tree_level=branch)，并借助 target_node_id / enrich_fields.parent_candidate / chunk_meta_patch.function_hierarchy。",
+        consistency: "半一致：branch 在树苗里是已存在节点；在农场主里还是待落盘的结构决策。",
+      },
+      {
+        level: "leaf",
+        sapling: "稳定看 metadata.node_id、command_prefix、func，以及 tree_position.knowledge_role=command_attribute。",
+        owner: "主要看 action=tree_create_leaf 或 merge_into_existing(tree_level=leaf)，再配合 chunk_meta_patch.command_prefix / step_type / chunk_type。",
+        consistency: "语义最接近，但仍不完全一致：树苗 leaf 是最终命令节点；农场主 leaf 只是“应生成/应归并为 leaf”的决策。",
+      },
+    ];
+
+    function createPreviewLevelStat(count, metaFields, tpFields, roles) {
+      const metaObj = {};
+      const tpObj = {};
+      (metaFields || []).forEach((key) => { metaObj[key] = count; });
+      (tpFields || []).forEach((key) => { tpObj[key] = count; });
+      return {
+        count,
+        metaFields: metaObj,
+        treePositionFields: tpObj,
+        roles: roles || {},
+        samples: [],
+      };
+    }
+
+    function createSaplingPreviewData() {
+      return {
+        total: 3671,
+        levels: { root: 0, trunk: 97, branch: 181, leaf: 3393 },
+        levelStats: {
+          root: createPreviewLevelStat(0, [], [], {}),
+          trunk: createPreviewLevelStat(97, ["document_category", "source_file", "command_prefix", "scope", "node_id", "is_variant", "tree_position", "scenario_id"], ["tree_level", "confidence", "knowledge_role", "linked_nodes"], { module_overview: 79, scenario_doc: 18 }),
+          branch: createPreviewLevelStat(181, ["document_category", "source_file", "command_prefix", "scope", "node_id", "is_variant", "tree_position", "scenario_id", "func"], ["tree_level", "confidence", "knowledge_role", "linked_nodes"], { command_group: 179, feature_doc: 2 }),
+          leaf: createPreviewLevelStat(3393, ["document_category", "source_file", "command_prefix", "scope", "node_id", "is_variant", "tree_position", "scenario_id", "func"], ["tree_level", "confidence", "knowledge_role", "linked_nodes"], { command_attribute: 3393 }),
+        },
+        parentStats: { graph: 1362, prefix: 395, root: 1877 },
+        graphLoaded: false,
+        recordsLoaded: false,
+        treeFileLabel: "commandtree_base.json（预览统计）",
+        graphFileLabel: "(未加载，预览统计来自本地基线分析)",
+        groups: { trunk_roots: [], root_branches: [], root_leaves: [] },
+        nodesById: {},
+        childrenByParent: {},
+      };
+    }
+
+    let SAPLING_DATA = createSaplingPreviewData();
+    let CURRENT_SAPLING_RECORDS = [];
+    let CURRENT_SAPLING_GRAPH = null;
+    let CURRENT_SAPLING_GRAPH_LABEL = "";
+    let saplingSelection = { type: "group", key: "trunk_roots", nodeId: "" };
+    let saplingSearchQuery = "";
 
     const nodesEl = document.getElementById("nodes");
     const dTitle = document.getElementById("dTitle");
@@ -191,56 +488,228 @@
     const nextBtn = document.getElementById("next");
     const speedBtn = document.getElementById("speed");
     const tabs = document.querySelectorAll(".tab");
-    const views = { flow: document.getElementById("view-flow"), tree: document.getElementById("view-tree") };
+    const views = {
+      flow: document.getElementById("view-flow"),
+      tree: document.getElementById("view-tree"),
+      sapling: document.getElementById("view-sapling"),
+    };
     const filePicker = document.getElementById("filePicker");
     const treeTitle = document.getElementById("treeTitle");
     const sourcePath = document.getElementById("sourcePath");
+    const statsEl = document.getElementById("stats");
+    const treeEl = document.getElementById("decisionTree");
+    const svg = document.getElementById("treeSvg");
+    const zoomInBtn = document.getElementById("zoomInBtn");
+    const zoomOutBtn = document.getElementById("zoomOutBtn");
+    const resetViewBtn = document.getElementById("resetViewBtn");
+    const inspectTitle = document.getElementById("inspectTitle");
+    const inspectMeta = document.getElementById("inspectMeta");
+    const inspectRule = document.getElementById("inspectRule");
+    const inspectStats = document.getElementById("inspectStats");
+    const inspectRecords = document.getElementById("inspectRecords");
+    const saplingPicker = document.getElementById("saplingPicker");
+    const saplingGraphPicker = document.getElementById("saplingGraphPicker");
+    const saplingSearch = document.getElementById("saplingSearch");
+    const saplingTitle = document.getElementById("saplingTitle");
+    const saplingSourcePath = document.getElementById("saplingSourcePath");
+    const saplingGraphPath = document.getElementById("saplingGraphPath");
+    const saplingStats = document.getElementById("saplingStats");
+    const saplingParentNote = document.getElementById("saplingParentNote");
+    const saplingLevelCards = document.getElementById("saplingLevelCards");
+    const saplingCompareCards = document.getElementById("saplingCompareCards");
+    const saplingTree = document.getElementById("saplingTree");
+    const saplingInspectTitle = document.getElementById("saplingInspectTitle");
+    const saplingInspectMeta = document.getElementById("saplingInspectMeta");
+    const saplingInspectRule = document.getElementById("saplingInspectRule");
+    const saplingInspectStats = document.getElementById("saplingInspectStats");
+    const saplingInspectRecords = document.getElementById("saplingInspectRecords");
+
     let idx = 0, playing = true, speed = 1800, timer = null;
     const nodeEls = [];
 
-    function list(el, arr){ el.innerHTML=""; arr.forEach(t=>{const li=document.createElement("li");li.textContent=t;el.appendChild(li);}); }
-    function chips(arr){ dChips.innerHTML=""; arr.forEach(t=>{const s=document.createElement("span");s.className="chip";s.textContent=t;dChips.appendChild(s);}); }
-    function renderDetail(i){
-      const n=NODES[i]; dTitle.textContent=n.name; dBrief.textContent=n.brief;
-      list(dConsume,n.consume); list(dProduce,n.produce); list(dArtifacts,n.artifacts); list(dCode,n.code);
-      dCharter.textContent="宪章边界："+n.charter; chips(n.chips);
-      nodeEls.forEach((e,k)=>e.classList.toggle("active",k===i));
+    let treeSvgRoot = null;
+    let treeInteractionBound = false;
+    let treeScale = 1;
+    let treeTx = 0;
+    let treeTy = 0;
+    let treeDragging = false;
+    let treeStartX = 0;
+    let treeStartY = 0;
+    let treeStartTx = 0;
+    let treeStartTy = 0;
+    let suppressNextContextMenu = false;
+    let panButton = null;
+    let rmbDragAnchorX = 0;
+    let rmbDragAnchorY = 0;
+    let rmbExceededDragThreshold = false;
+    const RMB_DRAG_THRESHOLD_PX = 5;
+    const MIN_SCALE = 0.45;
+    const MAX_SCALE = 3.2;
+    const ZOOM_STEP = 1.18;
+
+    function list(el, arr) {
+      el.innerHTML = "";
+      arr.forEach((t) => {
+        const li = document.createElement("li");
+        li.textContent = t;
+        el.appendChild(li);
+      });
     }
-    function set(i){ idx=(i+NODES.length)%NODES.length; renderDetail(idx); }
-    function tick(){ if(playing) set(idx+1); }
-    function reset(){ if(timer) clearInterval(timer); timer=setInterval(tick,speed); }
 
-    NODES.forEach((n,i)=>{
-      const b=document.createElement("button"); b.className="node"; b.type="button";
-      b.innerHTML=`<h3>${n.name}</h3><p class="sub">${n.brief}</p><div class="kv"><b>消费</b>${n.consume.slice(0,2).join("；")}<b>生成</b>${n.produce[0]}</div>${i<NODES.length-1?'<div class="arrow">→</div>':''}`;
-      b.addEventListener("click",()=>set(i));
-      nodeEls.push(b); nodesEl.appendChild(b);
+    function chips(arr) {
+      dChips.innerHTML = "";
+      arr.forEach((t) => {
+        const s = document.createElement("span");
+        s.className = "chip";
+        s.textContent = t;
+        dChips.appendChild(s);
+      });
+    }
+
+    function renderDetail(i) {
+      const n = NODES[i];
+      dTitle.textContent = n.name;
+      dBrief.textContent = n.brief;
+      list(dConsume, n.consume);
+      list(dProduce, n.produce);
+      list(dArtifacts, n.artifacts);
+      list(dCode, n.code);
+      dCharter.textContent = "宪章边界：" + n.charter;
+      chips(n.chips);
+      nodeEls.forEach((e, k) => e.classList.toggle("active", k === i));
+    }
+
+    function set(i) {
+      idx = (i + NODES.length) % NODES.length;
+      renderDetail(idx);
+    }
+
+    function tick() {
+      if (playing) set(idx + 1);
+    }
+
+    function reset() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(tick, speed);
+    }
+
+    NODES.forEach((n, i) => {
+      const b = document.createElement("button");
+      b.className = "node";
+      b.type = "button";
+      b.innerHTML = `<h3>${n.name}</h3><p class="sub">${n.brief}</p><div class="kv"><b>消费</b>${n.consume.slice(0, 2).join("；")}<b>生成</b>${n.produce[0]}</div>${i < NODES.length - 1 ? '<div class="arrow">→</div>' : ""}`;
+      b.addEventListener("click", () => set(i));
+      nodeEls.push(b);
+      nodesEl.appendChild(b);
     });
-    set(0); reset();
 
-    playBtn.onclick=()=>{ playing=!playing; playBtn.classList.toggle("active",playing); playBtn.textContent=playing?"动画：播放":"动画：暂停"; if(playing) reset(); else if(timer) clearInterval(timer); };
-    prevBtn.onclick=()=>set(idx-1); nextBtn.onclick=()=>set(idx+1);
-    speedBtn.onclick=()=>{ if(speed===1800){speed=1100;speedBtn.textContent="速度：快速"} else if(speed===1100){speed=2600;speedBtn.textContent="速度：慢速"} else {speed=1800;speedBtn.textContent="速度：正常"} if(playing) reset(); };
+    set(0);
+    reset();
 
-    tabs.forEach(btn=>{
-      btn.addEventListener("click",()=>{
-        tabs.forEach(t=>t.classList.remove("active"));
+    playBtn.onclick = () => {
+      playing = !playing;
+      playBtn.classList.toggle("active", playing);
+      playBtn.textContent = playing ? "动画：播放" : "动画：暂停";
+      if (playing) reset();
+      else if (timer) clearInterval(timer);
+    };
+    prevBtn.onclick = () => set(idx - 1);
+    nextBtn.onclick = () => set(idx + 1);
+    speedBtn.onclick = () => {
+      if (speed === 1800) {
+        speed = 1100;
+        speedBtn.textContent = "速度：快速";
+      } else if (speed === 1100) {
+        speed = 2600;
+        speedBtn.textContent = "速度：慢速";
+      } else {
+        speed = 1800;
+        speedBtn.textContent = "速度：正常";
+      }
+      if (playing) reset();
+    };
+
+    tabs.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        tabs.forEach((t) => t.classList.remove("active"));
         btn.classList.add("active");
         const tab = btn.dataset.tab;
-        Object.entries(views).forEach(([k,v])=>v.classList.toggle("active",k===tab));
+        Object.entries(views).forEach(([k, v]) => v.classList.toggle("active", k === tab));
       });
     });
 
-    /** tree_create_*：合并 parent_candidate 与 target_node_id，展示/聚合用「完整父路径」 */
-    function mergeTreeCreateParentPath(r) {
-      const tid = String((r.target_node_id || "").trim());
-      const enrich = (r.enrich_fields && typeof r.enrich_fields === "object") ? r.enrich_fields : {};
-      const pc = String((enrich.parent_candidate || "").trim());
+    function escapeHtml(text) {
+      return String(text == null ? "" : text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function safeText(value) {
+      return String(value == null ? "" : value).trim();
+    }
+
+    function actionSortIndex(action) {
+      const idx = ACTION_ORDER.indexOf(action);
+      return idx === -1 ? ACTION_ORDER.length + 1 : idx;
+    }
+
+    function orderedActionEntries(actionsObj) {
+      return Object.entries(actionsObj || {}).sort((a, b) => {
+        const ai = actionSortIndex(a[0]);
+        const bi = actionSortIndex(b[0]);
+        if (ai !== bi) return ai - bi;
+        return a[0].localeCompare(b[0], "zh-CN");
+      });
+    }
+
+    function bucketRule(action) {
+      if (action === "discard") {
+        return {
+          fieldLine: "无树挂载目标（固定桶）",
+          formula: "bucket = (discard：无挂载目标)",
+          desc: "discard 不参与树挂载；无论 entity_title / target_node_id 是什么，都统一落入同一个无挂载桶。",
+        };
+      }
+      if (action === "merge_into_existing") {
+        return {
+          fieldLine: "target_node_id",
+          formula: "bucket = target_node_id",
+          desc: "merge_into_existing 直接按已有节点 ID 分桶；第三层看的是 merge 到哪，不是 chunk 标题。",
+        };
+      }
+      if (action === "needs_tree_session") {
+        return {
+          fieldLine: "target_node_id（常为空）",
+          formula: "bucket = target_node_id || (none：缺 target_node_id)",
+          desc: "needs_tree_session 往往没有稳定父路径，所以大量记录会聚到空 target 桶，表示还未确定挂载位置。",
+        };
+      }
+      if (String(action).startsWith("tree_create_")) {
+        return {
+          fieldLine: "parent_candidate ∪ target_node_id",
+          formula: "bucket = 取层级更完整的父路径",
+          desc: "tree_create_* 会同时参考 enrich_fields.parent_candidate 与 target_node_id，取更完整、更深的父路径作为第三层桶键。",
+        };
+      }
+      return {
+        fieldLine: "target_node_id",
+        formula: "bucket = target_node_id",
+        desc: "默认按 target_node_id 分桶。",
+      };
+    }
+
+    function mergeTreeCreateParentPath(record) {
+      const tid = safeText(record.target_node_id);
+      const enrich = record.enrich_fields && typeof record.enrich_fields === "object" ? record.enrich_fields : {};
+      const pc = safeText(enrich.parent_candidate);
       if (!tid && !pc) return "(none)";
       if (!tid) return pc;
       if (!pc) return tid;
       if (tid === pc) return tid;
-      const segCount = (s) => s.split(/\s*>\s*/).filter(Boolean).length;
+      const segCount = (text) => text.split(/\s*>\s*/).filter(Boolean).length;
       const st = segCount(tid);
       const sp = segCount(pc);
       if (st !== sp) return st > sp ? tid : pc;
@@ -248,216 +717,358 @@
       return tid;
     }
 
+    function groupingInfoForRecord(record) {
+      const action = safeText(record.action) || "unknown";
+      const targetNodeId = safeText(record.target_node_id);
+      const enrich = record.enrich_fields && typeof record.enrich_fields === "object" ? record.enrich_fields : {};
+      const parentCandidate = safeText(enrich.parent_candidate);
+      const rule = bucketRule(action);
+      let bucket = "";
+      if (action === "discard") {
+        bucket = "(discard：无挂载目标)";
+      } else if (action.startsWith("tree_create_")) {
+        bucket = mergeTreeCreateParentPath(record);
+      } else {
+        bucket = targetNodeId || "(none：缺 target_node_id)";
+      }
+      return { action, targetNodeId, parentCandidate, bucket, rule };
+    }
+
     function summarizeFromRecords(records) {
       const actions = {};
       const levels = {};
       const groupsMap = {};
+      const actionDetails = {};
       let total = 0;
-      for (const r of records) {
-        if (!r || typeof r !== "object") continue;
-        const action = String(r.action || "unknown");
-        const targetNodeId = String((r.target_node_id || "").trim());
-        let target = "";
-        if (action.startsWith("tree_create_")) {
-          target = mergeTreeCreateParentPath(r);
-        } else {
-          target = targetNodeId || "(none)";
-        }
-        const lv = String(r.tree_level || "");
+
+      records.forEach((record) => {
+        if (!record || typeof record !== "object") return;
+        const info = groupingInfoForRecord(record);
+        const action = info.action;
+        const level = safeText(record.tree_level);
+        const sourceFile = safeText(record.source_file);
+
         total += 1;
         actions[action] = (actions[action] || 0) + 1;
-        levels[lv] = (levels[lv] || 0) + 1;
+        levels[level] = (levels[level] || 0) + 1;
+
+        if (!actionDetails[action]) {
+          actionDetails[action] = {
+            action,
+            count: 0,
+            groupCount: 0,
+            sampleRecords: [],
+            levels: {},
+            files: {},
+            rule: info.rule,
+            topGroups: [],
+          };
+        }
+        const actionEntry = actionDetails[action];
+        actionEntry.count += 1;
+        actionEntry.levels[level] = (actionEntry.levels[level] || 0) + 1;
+        if (sourceFile) actionEntry.files[sourceFile] = (actionEntry.files[sourceFile] || 0) + 1;
+        if (actionEntry.sampleRecords.length < 4) actionEntry.sampleRecords.push(record);
+
         if (!groupsMap[action]) groupsMap[action] = {};
-        groupsMap[action][target] = (groupsMap[action][target] || 0) + 1;
-      }
-      const groups = {};
-      Object.entries(groupsMap).forEach(([action, mp]) => {
-        groups[action] = Object.entries(mp)
-          .map(([target, count]) => ({ target, count }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 20);
+        if (!groupsMap[action][info.bucket]) {
+          groupsMap[action][info.bucket] = {
+            action,
+            target: info.bucket,
+            count: 0,
+            rule: info.rule,
+            sampleRecords: [],
+            levels: {},
+            files: {},
+          };
+        }
+        const groupEntry = groupsMap[action][info.bucket];
+        groupEntry.count += 1;
+        groupEntry.levels[level] = (groupEntry.levels[level] || 0) + 1;
+        if (sourceFile) groupEntry.files[sourceFile] = (groupEntry.files[sourceFile] || 0) + 1;
+        if (groupEntry.sampleRecords.length < 5) groupEntry.sampleRecords.push(record);
       });
-      return { total, actions, levels, groups };
+
+      const orderedActions = orderedActionEntries(actions);
+      const groups = {};
+      orderedActions.forEach(([action]) => {
+        const allGroups = Object.values(groupsMap[action] || {}).sort((a, b) => {
+          if (b.count !== a.count) return b.count - a.count;
+          return String(a.target).localeCompare(String(b.target), "zh-CN");
+        });
+        groups[action] = allGroups.slice(0, 20);
+        actionDetails[action].groupCount = allGroups.length;
+        actionDetails[action].topGroups = allGroups.slice(0, 20);
+      });
+
+      return {
+        total,
+        actions: Object.fromEntries(orderedActions),
+        levels,
+        groups,
+        actionDetails,
+        recordsLoaded: true,
+      };
     }
 
-    function renderTreePage(){
-      const statsEl = document.getElementById("stats");
-      const treeEl = document.getElementById("decisionTree");
-      const svg = document.getElementById("treeSvg");
-      const zoomInBtn = document.getElementById("zoomInBtn");
-      const zoomOutBtn = document.getElementById("zoomOutBtn");
-      const resetViewBtn = document.getElementById("resetViewBtn");
-      const total = TREE_DATA.total;
-      const actionEntries = Object.entries(TREE_DATA.actions);
-      statsEl.innerHTML = actionEntries.map(([k,v]) => `
-        <div class="box">
-          <div><b>${k}</b>：${v}</div>
-          <div class="bar"><i style="width:${Math.max(2, (v/total)*100)}%"></i></div>
-        </div>
-      `).join("");
+    function parseDecisionText(text) {
+      const raw = text.trim();
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && Array.isArray(parsed.records)) return parsed.records;
+      } catch (_) {}
+      const rows = [];
+      raw.split(/\r?\n/).forEach((line) => {
+        const s = line.trim();
+        if (!s) return;
+        try { rows.push(JSON.parse(s)); } catch (_) {}
+      });
+      return rows;
+    }
 
-      treeEl.innerHTML = actionEntries.map(([action,count])=>{
-        const groups = TREE_DATA.groups[action] || [];
-        const detail = groups.map(g=>`<div class="leaf">• ${g.target}（${g.count}）</div>`).join("");
-        return `<details open><summary>${action}（${count}）</summary>${detail}</details>`;
+    function formatMultiline(value, mono = false) {
+      const text = safeText(value);
+      if (!text) return '<span class="muted">—</span>';
+      return `<div class="plain${mono ? " mono" : ""}">${escapeHtml(text).replace(/\n/g, "<br/>")}</div>`;
+    }
+
+    function topPairs(counter, limit = 4, emptyLabel = "—") {
+      const entries = Object.entries(counter || {}).sort((a, b) => b[1] - a[1]).slice(0, limit);
+      if (!entries.length) return emptyLabel;
+      return entries.map(([key, count]) => `${escapeHtml(key || "(empty)")} × ${count}`).join("<br/>");
+    }
+
+    function renderRecordCard(record, idx) {
+      const enrich = record.enrich_fields && typeof record.enrich_fields === "object" ? record.enrich_fields : {};
+      const patch = record.chunk_meta_patch && typeof record.chunk_meta_patch === "object" ? record.chunk_meta_patch : {};
+      const info = groupingInfoForRecord(record);
+      const corePatch = [
+        `document_category: ${safeText(patch.document_category) || "—"}`,
+        `product_module: ${safeText(patch.product_module) || "—"}`,
+        `command_prefix: ${safeText(patch.command_prefix) || "—"}`,
+        `chunk_type: ${safeText(patch.chunk_type) || "—"}`,
+        `step_type: ${safeText(patch.step_type) || "—"}`,
+        `function_hierarchy: ${safeText(patch.function_hierarchy) || "—"}`,
+      ].join("\n");
+
+      const fieldHtml = [
+        { label: "action", value: safeText(record.action) || "—" },
+        { label: "tree_level", value: safeText(record.tree_level) || "—" },
+        { label: "target_node_id", value: safeText(record.target_node_id) || "—" },
+        { label: "enrich.parent_candidate", value: safeText(enrich.parent_candidate) || "—" },
+        { label: "entity_title", value: safeText(record.entity_title) || "—" },
+        { label: "当前聚合键", value: info.bucket || "—" },
+        { label: "chunk_meta_patch（核心）", value: corePatch, wide: true, mono: true },
+        { label: "source_evidence", value: safeText(record.source_evidence) || "—", wide: true },
+      ].map((field) => {
+        return `<div class="record-item${field.wide ? " wide" : ""}"><b>${escapeHtml(field.label)}</b>${formatMultiline(field.value, !!field.mono)}</div>`;
       }).join("");
 
-      // --- SVG tree rendering ---
-      const ns = "http://www.w3.org/2000/svg";
-      svg.innerHTML = "";
-      const gRoot = document.createElementNS(ns, "g");
-      svg.appendChild(gRoot);
-      const rootX = 130;
-      const actionX = 460, targetX = 880;
-      const rowGap = 30;
-      const blockPadding = 24;
-      const blockGap = 28;
-      const gapBetweenTargets = 12;
-      const targetTextWidth = 420;
-      const actions = actionEntries.map(([name,count])=>({ name, count, x: actionX, y: 0 }));
-      const maxAction = Math.max(1, ...actions.map(a=>a.count));
+      const fileLabel = `${safeText(record.source_file) || "—"} :: ${safeText(record.target_block_id) || "—"}`;
+      const rawJson = escapeHtml(JSON.stringify(record, null, 2));
+      return `
+        <div class="record-card">
+          <div class="record-head">
+            <div class="record-file">${escapeHtml(fileLabel)}</div>
+            <span class="sample-badge">sample ${idx + 1}</span>
+          </div>
+          <div class="record-title">${escapeHtml(safeText(record.entity_title) || "(无 entity_title)")}</div>
+          <div class="record-grid">${fieldHtml}</div>
+          <details>
+            <summary>raw JSON</summary>
+            <pre class="code-block">${rawJson}</pre>
+          </details>
+        </div>
+      `;
+    }
 
-      function addLine(x1,y1,x2,y2,op=0.45){
-        const l = document.createElementNS(ns, "line");
-        l.setAttribute("x1", x1); l.setAttribute("y1", y1);
-        l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-        l.setAttribute("stroke", "#86a9e8");
-        l.setAttribute("stroke-width", "2");
-        l.setAttribute("opacity", String(op));
-        gRoot.appendChild(l);
-      }
-      function addNode(x,y,r,label,sub,color){
-        const g = document.createElementNS(ns, "g");
-        const c = document.createElementNS(ns, "circle");
-        c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", r);
-        c.setAttribute("fill", color); c.setAttribute("stroke", "#2f6fed"); c.setAttribute("stroke-width", "1.4");
-        const t1 = document.createElementNS(ns, "text");
-        t1.setAttribute("x", x + r + 8); t1.setAttribute("y", y - 2);
-        t1.setAttribute("font-size", "12"); t1.setAttribute("fill", "#1f3e6a");
-        t1.textContent = label;
-        const t2 = document.createElementNS(ns, "text");
-        t2.setAttribute("x", x + r + 8); t2.setAttribute("y", y + 13);
-        t2.setAttribute("font-size", "11"); t2.setAttribute("fill", "#55729e");
-        t2.textContent = sub;
-        g.appendChild(c); g.appendChild(t1); g.appendChild(t2);
-        gRoot.appendChild(g);
-      }
+    function renderInspectBoxesInto(targetEl, items) {
+      targetEl.innerHTML = items.map((item) => {
+        return `<div class="inspect-box"><b>${escapeHtml(item.label)}</b><div>${item.value}</div></div>`;
+      }).join("");
+    }
 
-      function targetLabelBlockHeight(pathStr) {
-        if (!pathStr || pathStr === "(none)") return 28;
-        const charsPerLine = 36;
-        const lines = Math.max(1, Math.ceil(pathStr.length / charsPerLine));
-        return Math.min(200, 16 + lines * 13);
-      }
-      function rowHeightForTarget(pathStr) {
-        return Math.max(40, targetLabelBlockHeight(pathStr) + 18);
-      }
-      function addTargetNode(x, y, pathStr, count, cMax) {
-        const g = document.createElementNS(ns, "g");
-        const cr = 5 + Math.round((count / cMax) * 8);
-        const c = document.createElementNS(ns, "circle");
-        c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", cr);
-        c.setAttribute("fill", "#f7fbff"); c.setAttribute("stroke", "#2f6fed"); c.setAttribute("stroke-width", "1.4");
-        g.appendChild(c);
-        const foH = targetLabelBlockHeight(pathStr);
-        const fo = document.createElementNS(ns, "foreignObject");
-        fo.setAttribute("x", x + cr + 6);
-        fo.setAttribute("y", y - foH / 2);
-        fo.setAttribute("width", targetTextWidth);
-        fo.setAttribute("height", foH);
-        const div = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
-        div.style.fontSize = "11px";
-        div.style.color = "#1f3e6a";
-        div.style.lineHeight = "1.3";
-        div.style.overflowWrap = "break-word";
-        div.style.wordBreak = "break-word";
-        div.style.fontFamily = "Segoe UI, Microsoft YaHei, sans-serif";
-        div.textContent = pathStr;
-        fo.appendChild(div);
-        g.appendChild(fo);
-        const t2 = document.createElementNS(ns, "text");
-        t2.setAttribute("x", x + cr + 6);
-        t2.setAttribute("y", y + foH / 2 + 14);
-        t2.setAttribute("font-size", "11");
-        t2.setAttribute("fill", "#55729e");
-        t2.textContent = `count=${count}`;
-        g.appendChild(t2);
-        gRoot.appendChild(g);
+    function renderInspectBoxes(items) {
+      renderInspectBoxesInto(inspectStats, items);
+    }
+
+    function renderEmptyInspector() {
+      inspectTitle.textContent = "字段 Inspector";
+      inspectMeta.textContent = TREE_DATA.recordsLoaded
+        ? "已加载真实 JSONL。点击 action 或 bucket，可展开样例记录字段。"
+        : "当前是默认快照。载入真实 JSONL 后点击 action 或 bucket，可展开样例记录字段。";
+      inspectRule.innerHTML = TREE_DATA.recordsLoaded
+        ? "这里会展示当前选中节点的 <b>分桶字段</b>、<b>分桶公式</b>、<b>来源文件</b>、<b>tree_level 分布</b> 与 <b>样例 row</b>。"
+        : "这里会展示当前选中节点的 <b>分桶字段</b>、<b>分桶公式</b>、<b>来源文件</b>、<b>tree_level 分布</b> 与 <b>样例 row</b>。当前未加载 JSONL，因此样例 row 仍为空。";
+      renderInspectBoxes([
+        { label: "总记录数", value: String(TREE_DATA.total || 0) },
+        { label: "可见 action", value: String(Object.keys(TREE_DATA.actions || {}).length) },
+        { label: "已加载真实记录", value: TREE_DATA.recordsLoaded ? "是" : "否" },
+        { label: "当前说明", value: TREE_DATA.recordsLoaded ? "请选择右侧节点" : "请先选择 JSONL 文件" },
+      ]);
+      inspectRecords.innerHTML = '<div class="empty-state">选择 action 可先看分桶规则；选择 bucket 卡片可继续下钻到样例 row 的字段结构。</div>';
+    }
+
+    function findGroupEntry(action, target) {
+      return (TREE_DATA.groups[action] || []).find((entry) => String(entry.target) === String(target)) || null;
+    }
+
+    function renderInspector() {
+      if (currentSelection.type === "none" || !currentSelection.action) {
+        renderEmptyInspector();
+        return;
       }
 
-      // Compute non-overlapping block layout per action（第三层高度随完整路径长度变化）
-      let cursorY = 28;
-      const laidOut = actions.map(a => {
-        const children = (TREE_DATA.groups[a.name] || []).slice(0, 8);
-        const heights = children.length
-          ? children.map(c => rowHeightForTarget(c.target))
-          : [rowGap];
-        const innerH = heights.reduce((s, h) => s + h, 0) + Math.max(0, children.length - 1) * gapBetweenTargets;
-        const blockHeight = innerH + blockPadding * 2;
-        const actionY = cursorY + blockHeight / 2;
-        let yAcc = actionY - innerH / 2;
-        const childPos = children.map((c, ci) => {
-          const h = heights[ci];
-          const cy = yAcc + h / 2;
-          yAcc += h + (ci < children.length - 1 ? gapBetweenTargets : 0);
-          return { c, cy };
-        });
-        cursorY += blockHeight + blockGap;
-        return { ...a, y: actionY, children, childPos, blockHeight };
+      const rule = bucketRule(currentSelection.action);
+      if (currentSelection.type === "action") {
+        const detail = TREE_DATA.actionDetails && TREE_DATA.actionDetails[currentSelection.action]
+          ? TREE_DATA.actionDetails[currentSelection.action]
+          : null;
+        inspectTitle.textContent = currentSelection.action;
+        inspectMeta.textContent = detail && TREE_DATA.recordsLoaded
+          ? `action 级视图 · ${detail.count} 条记录 · ${detail.groupCount} 个 bucket`
+          : `action 级视图 · 当前是静态快照（仅显示 top bucket 结构）`;
+        inspectRule.innerHTML = `
+          <b>分桶字段：</b> <span class="inline-code">${escapeHtml(rule.fieldLine)}</span><br/>
+          <b>分桶公式：</b> <span class="inline-code">${escapeHtml(rule.formula)}</span>
+          <div style="margin-top:6px;">${escapeHtml(rule.desc)}</div>
+        `;
+        renderInspectBoxes([
+          { label: "记录数", value: String(detail ? detail.count : TREE_DATA.actions[currentSelection.action] || 0) },
+          { label: "bucket 数", value: String(detail ? detail.groupCount : (TREE_DATA.groups[currentSelection.action] || []).length) },
+          { label: "tree_level 分布", value: detail ? topPairs(detail.levels, 4) : topPairs({}, 4) },
+          { label: "来源文件（top）", value: detail ? topPairs(detail.files, 4) : "载入 JSONL 后可见" },
+        ]);
+        if (detail && detail.sampleRecords && detail.sampleRecords.length) {
+          inspectRecords.innerHTML = detail.sampleRecords.map((record, index) => renderRecordCard(record, index)).join("");
+        } else {
+          const topGroups = (TREE_DATA.groups[currentSelection.action] || []).slice(0, 6);
+          if (!topGroups.length) {
+            inspectRecords.innerHTML = '<div class="empty-state">当前 action 没有可展示的 bucket。</div>';
+          } else {
+            inspectRecords.innerHTML = topGroups.map((group, index) => {
+              return `
+                <div class="record-card">
+                  <div class="record-head">
+                    <div class="record-file">top bucket ${index + 1}</div>
+                    <span class="sample-badge">count ${group.count}</span>
+                  </div>
+                  <div class="record-title">${escapeHtml(group.target)}</div>
+                  <div class="record-grid">
+                    <div class="record-item"><b>分桶字段</b><div class="plain">${escapeHtml(rule.fieldLine)}</div></div>
+                    <div class="record-item"><b>分桶公式</b><div class="plain">${escapeHtml(rule.formula)}</div></div>
+                  </div>
+                </div>
+              `;
+            }).join("");
+          }
+        }
+        return;
+      }
+
+      const group = findGroupEntry(currentSelection.action, currentSelection.target);
+      inspectTitle.textContent = `${currentSelection.action}`;
+      inspectMeta.textContent = `bucket 级视图 · ${currentSelection.target}`;
+      inspectRule.innerHTML = `
+        <b>分桶字段：</b> <span class="inline-code">${escapeHtml(rule.fieldLine)}</span><br/>
+        <b>分桶公式：</b> <span class="inline-code">${escapeHtml(rule.formula)}</span>
+        <div style="margin-top:6px;">${escapeHtml(rule.desc)}</div>
+      `;
+      renderInspectBoxes([
+        { label: "当前 bucket", value: escapeHtml(currentSelection.target) },
+        { label: "记录数", value: String(group ? group.count : 0) },
+        { label: "tree_level 分布", value: group ? topPairs(group.levels, 4) : "—" },
+        { label: "来源文件（top）", value: group ? topPairs(group.files, 4) : "—" },
+      ]);
+      if (group && group.sampleRecords && group.sampleRecords.length) {
+        inspectRecords.innerHTML = group.sampleRecords.map((record, index) => renderRecordCard(record, index)).join("");
+      } else {
+        inspectRecords.innerHTML = '<div class="empty-state">当前 bucket 只有静态快照，没有真实 row 样例。请重新加载 JSONL 文件后再查看。</div>';
+      }
+    }
+
+    function selectionMatchesAction(action) {
+      return currentSelection.action === action;
+    }
+
+    function selectionMatchesBucket(action, target) {
+      return currentSelection.type === "bucket" && currentSelection.action === action && currentSelection.target === target;
+    }
+
+    function syncSelectionUI() {
+      document.querySelectorAll(".action-block").forEach((block) => {
+        block.classList.toggle("active", selectionMatchesAction(block.dataset.action || ""));
       });
-
-      const totalHeight = Math.max(520, cursorY + 24);
-      const svgW = targetX + 30 + targetTextWidth + 40;
-      svg.setAttribute("viewBox", `0 0 ${svgW} ${totalHeight}`);
-      svg.style.height = `${Math.min(900, totalHeight)}px`;
-      const rootY = totalHeight / 2;
-
-      // root
-      addNode(rootX, rootY, 18, "farm_owner_20260414_185227", `total=${total}`, "#e8f1ff");
-
-      laidOut.forEach((a) => {
-        addLine(rootX + 18, rootY, a.x - 18, a.y, 0.55);
-        const ar = 8 + Math.round((a.count / maxAction) * 10);
-        addNode(a.x, a.y, ar, a.name, `count=${a.count}`, "#eef5ff");
-
-        const cMax = Math.max(1, ...a.children.map(c => c.count));
-        (a.childPos || []).forEach(({ c, cy }) => {
-          addLine(a.x + ar, a.y, targetX - 14, cy, 0.38);
-          addTargetNode(targetX, cy, c.target, c.count, cMax);
-        });
+      document.querySelectorAll(".bucket-btn").forEach((btn) => {
+        btn.classList.toggle("active", selectionMatchesBucket(btn.dataset.action || "", btn.dataset.target || ""));
       });
+      document.querySelectorAll("#treeSvg [data-select-type]").forEach((node) => {
+        const selectType = node.dataset.selectType || "";
+        const action = node.dataset.action || "";
+        const target = node.dataset.target || "";
+        const baseFill = node.dataset.baseFill || "#eef5ff";
+        const circle = node.querySelector("circle");
+        if (!circle) return;
+        let active = false;
+        if (selectType === "action") {
+          active = selectionMatchesAction(action);
+        } else if (selectType === "bucket") {
+          active = selectionMatchesBucket(action, target);
+        }
+        circle.setAttribute("fill", active ? "#dce9ff" : baseFill);
+        circle.setAttribute("stroke-width", active ? "2.4" : "1.4");
+      });
+    }
 
-      // --- zoom / pan ---
-      let scale = 1;
-      let tx = 0;
-      let ty = 0;
-      let dragging = false;
-      let startX = 0;
-      let startY = 0;
-      let startTx = 0;
-      let startTy = 0;
-      const MIN_SCALE = 0.45;
-      const MAX_SCALE = 3.2;
-      const ZOOM_STEP = 1.18;
+    function setSelection(type, action, target = "") {
+      currentSelection = { type, action, target };
+      syncSelectionUI();
+      renderInspector();
+    }
 
-      function applyTransform() {
-        gRoot.setAttribute("transform", `translate(${tx} ${ty}) scale(${scale})`);
+    function ensureValidSelection() {
+      const actionEntries = orderedActionEntries(TREE_DATA.actions);
+      if (!actionEntries.length) {
+        currentSelection = { type: "none", action: "", target: "" };
+        return;
       }
-      function clampScale(v) {
-        return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v));
+      const actionExists = actionEntries.some(([action]) => action === currentSelection.action);
+      if (currentSelection.type === "bucket" && actionExists) {
+        const bucketExists = (TREE_DATA.groups[currentSelection.action] || []).some((entry) => String(entry.target) === String(currentSelection.target));
+        if (bucketExists) return;
       }
-      function zoomAt(clientX, clientY, factor) {
-        const rect = svg.getBoundingClientRect();
-        const px = clientX - rect.left;
-        const py = clientY - rect.top;
-        const prev = scale;
-        const next = clampScale(scale * factor);
-        if (next === prev) return;
-        tx = px - ((px - tx) * (next / prev));
-        ty = py - ((py - ty) * (next / prev));
-        scale = next;
-        applyTransform();
-      }
+      if (currentSelection.type === "action" && actionExists) return;
+      currentSelection = { type: "action", action: actionEntries[0][0], target: "" };
+    }
+
+    function applyTransform() {
+      if (!treeSvgRoot) return;
+      treeSvgRoot.setAttribute("transform", `translate(${treeTx} ${treeTy}) scale(${treeScale})`);
+    }
+
+    function clampScale(value) {
+      return Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
+    }
+
+    function zoomAt(clientX, clientY, factor) {
+      if (!treeSvgRoot) return;
+      const rect = svg.getBoundingClientRect();
+      const px = clientX - rect.left;
+      const py = clientY - rect.top;
+      const prev = treeScale;
+      const next = clampScale(treeScale * factor);
+      if (next === prev) return;
+      treeTx = px - ((px - treeTx) * (next / prev));
+      treeTy = py - ((py - treeTy) * (next / prev));
+      treeScale = next;
+      applyTransform();
+    }
+
+    function bindTreeInteraction() {
+      if (treeInteractionBound) return;
+      treeInteractionBound = true;
 
       svg.addEventListener("wheel", (e) => {
         e.preventDefault();
@@ -465,64 +1076,935 @@
       }, { passive: false });
 
       svg.addEventListener("mousedown", (e) => {
-        dragging = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        startTx = tx;
-        startTy = ty;
+        if (e.button !== 0 && e.button !== 2) return;
+        treeDragging = true;
+        panButton = e.button;
+        if (e.button === 2) {
+          rmbDragAnchorX = e.clientX;
+          rmbDragAnchorY = e.clientY;
+          rmbExceededDragThreshold = false;
+        }
+        treeStartX = e.clientX;
+        treeStartY = e.clientY;
+        treeStartTx = treeTx;
+        treeStartTy = treeTy;
         svg.style.cursor = "grabbing";
       });
+
       window.addEventListener("mousemove", (e) => {
-        if (!dragging) return;
-        tx = startTx + (e.clientX - startX);
-        ty = startTy + (e.clientY - startY);
+        if (!treeDragging) return;
+        if (panButton === 2 && !rmbExceededDragThreshold) {
+          const dx = e.clientX - rmbDragAnchorX;
+          const dy = e.clientY - rmbDragAnchorY;
+          if (dx * dx + dy * dy > RMB_DRAG_THRESHOLD_PX * RMB_DRAG_THRESHOLD_PX) {
+            rmbExceededDragThreshold = true;
+          }
+        }
+        treeTx = treeStartTx + (e.clientX - treeStartX);
+        treeTy = treeStartTy + (e.clientY - treeStartY);
         applyTransform();
       });
-      window.addEventListener("mouseup", () => {
-        dragging = false;
+
+      window.addEventListener("mouseup", (e) => {
+        if (!treeDragging) return;
+        if (e.button === 2 && panButton === 2 && rmbExceededDragThreshold) {
+          suppressNextContextMenu = true;
+        }
+        treeDragging = false;
+        panButton = null;
         svg.style.cursor = "default";
       });
 
-      zoomInBtn.onclick = () => zoomAt(svg.getBoundingClientRect().left + 40, svg.getBoundingClientRect().top + 40, ZOOM_STEP);
-      zoomOutBtn.onclick = () => zoomAt(svg.getBoundingClientRect().left + 40, svg.getBoundingClientRect().top + 40, 1 / ZOOM_STEP);
-      resetViewBtn.onclick = () => { scale = 1; tx = 0; ty = 0; applyTransform(); };
-      applyTransform();
+      svg.addEventListener("contextmenu", (e) => {
+        if (suppressNextContextMenu) {
+          e.preventDefault();
+          suppressNextContextMenu = false;
+        }
+      });
+
+      zoomInBtn.onclick = () => {
+        const rect = svg.getBoundingClientRect();
+        zoomAt(rect.left + 40, rect.top + 40, ZOOM_STEP);
+      };
+      zoomOutBtn.onclick = () => {
+        const rect = svg.getBoundingClientRect();
+        zoomAt(rect.left + 40, rect.top + 40, 1 / ZOOM_STEP);
+      };
+      resetViewBtn.onclick = () => {
+        treeScale = 1;
+        treeTx = 0;
+        treeTy = 0;
+        applyTransform();
+      };
     }
 
-    function parseDecisionText(text) {
-      const raw = text.trim();
-      if (!raw) return [];
-      // try JSON array/object first
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-        if (parsed && Array.isArray(parsed.records)) return parsed.records;
-      } catch (_) {}
-      // fallback JSONL
-      const rows = [];
-      for (const line of raw.split(/\r?\n/)) {
-        const s = line.trim();
-        if (!s) continue;
-        try { rows.push(JSON.parse(s)); } catch (_) {}
+    function addLine(gRoot, ns, x1, y1, x2, y2, opacity = 0.45) {
+      const line = document.createElementNS(ns, "line");
+      line.setAttribute("x1", x1);
+      line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2);
+      line.setAttribute("y2", y2);
+      line.setAttribute("stroke", "#86a9e8");
+      line.setAttribute("stroke-width", "2");
+      line.setAttribute("opacity", String(opacity));
+      gRoot.appendChild(line);
+    }
+
+    function addNode(gRoot, ns, x, y, radius, label, sub, color, options = {}) {
+      const group = document.createElementNS(ns, "g");
+      const circle = document.createElementNS(ns, "circle");
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
+      circle.setAttribute("r", radius);
+      circle.setAttribute("fill", color);
+      circle.setAttribute("stroke", "#2f6fed");
+      circle.setAttribute("stroke-width", "1.4");
+      const text1 = document.createElementNS(ns, "text");
+      text1.setAttribute("x", x + radius + 8);
+      text1.setAttribute("y", y - 2);
+      text1.setAttribute("font-size", "12");
+      text1.setAttribute("fill", "#1f3e6a");
+      text1.textContent = label;
+      const text2 = document.createElementNS(ns, "text");
+      text2.setAttribute("x", x + radius + 8);
+      text2.setAttribute("y", y + 13);
+      text2.setAttribute("font-size", "11");
+      text2.setAttribute("fill", "#55729e");
+      text2.textContent = sub;
+      group.appendChild(circle);
+      group.appendChild(text1);
+      group.appendChild(text2);
+      if (options.selectType) {
+        group.dataset.selectType = options.selectType;
+        group.dataset.action = options.action || "";
+        group.dataset.target = options.target || "";
+        group.dataset.baseFill = color;
+        group.style.cursor = "pointer";
+        group.addEventListener("click", () => setSelection(options.selectType, options.action || "", options.target || ""));
       }
-      return rows;
+      gRoot.appendChild(group);
+    }
+
+    function targetLabelBlockHeight(rawValue) {
+      const headerHeight = 20;
+      const text = String(rawValue || "");
+      const charsPerLine = 32;
+      const lines = Math.max(1, Math.ceil(text.length / charsPerLine));
+      return Math.min(220, headerHeight + lines * 13 + 6);
+    }
+
+    function rowHeightForTarget(rawValue) {
+      return Math.max(48, targetLabelBlockHeight(rawValue) + 18);
+    }
+
+    function addTargetNode(gRoot, ns, x, y, actionName, rawValue, count, maxCount) {
+      const group = document.createElementNS(ns, "g");
+      group.dataset.selectType = "bucket";
+      group.dataset.action = actionName;
+      group.dataset.target = rawValue;
+      group.dataset.baseFill = "#f7fbff";
+      group.style.cursor = "pointer";
+      group.addEventListener("click", () => setSelection("bucket", actionName, rawValue));
+
+      const circleRadius = 5 + Math.round((count / maxCount) * 8);
+      const circle = document.createElementNS(ns, "circle");
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
+      circle.setAttribute("r", circleRadius);
+      circle.setAttribute("fill", "#f7fbff");
+      circle.setAttribute("stroke", "#2f6fed");
+      circle.setAttribute("stroke-width", "1.4");
+      group.appendChild(circle);
+
+      const foreignObjectHeight = targetLabelBlockHeight(rawValue);
+      const foreignObject = document.createElementNS(ns, "foreignObject");
+      foreignObject.setAttribute("x", x + circleRadius + 6);
+      foreignObject.setAttribute("y", y - foreignObjectHeight / 2);
+      foreignObject.setAttribute("width", 430);
+      foreignObject.setAttribute("height", foreignObjectHeight);
+      const wrap = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+      wrap.style.fontFamily = "Segoe UI, Microsoft YaHei, sans-serif";
+      const cap = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+      cap.textContent = bucketRule(actionName).fieldLine;
+      cap.style.fontSize = "10px";
+      cap.style.color = "#5a6f8f";
+      cap.style.lineHeight = "1.25";
+      cap.style.marginBottom = "3px";
+      const value = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+      value.textContent = String(rawValue || "");
+      value.style.fontSize = "11px";
+      value.style.color = "#1f3e6a";
+      value.style.lineHeight = "1.3";
+      value.style.overflowWrap = "break-word";
+      value.style.wordBreak = "break-word";
+      wrap.appendChild(cap);
+      wrap.appendChild(value);
+      foreignObject.appendChild(wrap);
+      group.appendChild(foreignObject);
+
+      const countText = document.createElementNS(ns, "text");
+      countText.setAttribute("x", x + circleRadius + 6);
+      countText.setAttribute("y", y + foreignObjectHeight / 2 + 14);
+      countText.setAttribute("font-size", "11");
+      countText.setAttribute("fill", "#55729e");
+      countText.textContent = `count=${count}`;
+      group.appendChild(countText);
+      gRoot.appendChild(group);
+    }
+
+    function renderTreePage() {
+      const total = TREE_DATA.total || 0;
+      const actionEntries = orderedActionEntries(TREE_DATA.actions);
+      statsEl.innerHTML = actionEntries.map(([action, count]) => {
+        const pct = total ? Math.max(2, (count / total) * 100) : 2;
+        return `
+          <div class="box">
+            <div><b>${escapeHtml(action)}</b>：${count}</div>
+            <div class="bar"><i style="width:${pct}%"></i></div>
+          </div>
+        `;
+      }).join("");
+
+      treeEl.innerHTML = actionEntries.map(([action, count]) => {
+        const rule = bucketRule(action);
+        const groups = TREE_DATA.groups[action] || [];
+        const actionDetail = TREE_DATA.actionDetails && TREE_DATA.actionDetails[action] ? TREE_DATA.actionDetails[action] : null;
+        const hiddenGroupCount = Math.max(0, (actionDetail ? actionDetail.groupCount : groups.length) - groups.length);
+        const groupHtml = groups.map((group) => {
+          return `
+            <button class="bucket-btn${selectionMatchesBucket(action, group.target) ? " active" : ""}" type="button" data-action="${escapeHtml(action)}" data-target="${escapeHtml(group.target)}">
+              <div class="bucket-top">
+                <div class="bucket-key">${escapeHtml(group.target)}</div>
+                <span class="bucket-count">${group.count}</span>
+              </div>
+              <div class="bucket-field">聚合字段：${escapeHtml(rule.fieldLine)}</div>
+            </button>
+          `;
+        }).join("");
+        return `
+          <details open class="action-block${selectionMatchesAction(action) ? " active" : ""}" data-action="${escapeHtml(action)}">
+            <summary class="action-summary" data-action-summary="${escapeHtml(action)}">
+              <span>${escapeHtml(action)}</span>
+              <span class="summary-count">${count}</span>
+            </summary>
+            <div class="action-note"><b>聚合字段：</b>${escapeHtml(rule.fieldLine)}<br/><b>分桶公式：</b>${escapeHtml(rule.formula)}</div>
+            <div class="bucket-list">${groupHtml || '<div class="empty-state">当前 action 没有可展示 bucket。</div>'}</div>
+            ${hiddenGroupCount ? `<div class="tree-caption">其余 ${hiddenGroupCount} 个 bucket 已折叠；如果已加载 JSONL，可先点 action 看样例记录，再继续下钻。</div>` : ""}
+          </details>
+        `;
+      }).join("");
+
+      treeEl.querySelectorAll("[data-action-summary]").forEach((summary) => {
+        summary.addEventListener("click", () => {
+          setSelection("action", summary.dataset.actionSummary || "", "");
+        });
+      });
+      treeEl.querySelectorAll(".bucket-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          setSelection("bucket", button.dataset.action || "", button.dataset.target || "");
+        });
+      });
+
+      const ns = "http://www.w3.org/2000/svg";
+      svg.innerHTML = "";
+      treeSvgRoot = document.createElementNS(ns, "g");
+      svg.appendChild(treeSvgRoot);
+
+      const rootX = 130;
+      const actionX = 470;
+      const targetX = 900;
+      const rowGap = 30;
+      const blockPadding = 24;
+      const blockGap = 28;
+      const gapBetweenTargets = 12;
+      const actions = actionEntries.map(([name, count]) => ({ name, count, x: actionX, y: 0 }));
+      const maxAction = Math.max(1, ...actions.map((a) => a.count));
+
+      let cursorY = 28;
+      const laidOut = actions.map((actionEntry) => {
+        const children = (TREE_DATA.groups[actionEntry.name] || []).slice(0, 8);
+        const heights = children.length ? children.map((child) => rowHeightForTarget(child.target)) : [rowGap];
+        const innerHeight = heights.reduce((sum, h) => sum + h, 0) + Math.max(0, children.length - 1) * gapBetweenTargets;
+        const blockHeight = innerHeight + blockPadding * 2;
+        const actionY = cursorY + blockHeight / 2;
+        let yAcc = actionY - innerHeight / 2;
+        const childPos = children.map((child, childIndex) => {
+          const h = heights[childIndex];
+          const cy = yAcc + h / 2;
+          yAcc += h + (childIndex < children.length - 1 ? gapBetweenTargets : 0);
+          return { child, cy };
+        });
+        cursorY += blockHeight + blockGap;
+        return { ...actionEntry, y: actionY, children, childPos };
+      });
+
+      const totalHeight = Math.max(520, cursorY + 24);
+      const svgWidth = 1380;
+      svg.setAttribute("viewBox", `0 0 ${svgWidth} ${totalHeight}`);
+      svg.style.height = `${Math.min(920, totalHeight)}px`;
+      const rootY = totalHeight / 2;
+      const rootLabel = currentTreeLabel.length > 26 ? currentTreeLabel.slice(0, 26) + "…" : currentTreeLabel;
+
+      addNode(treeSvgRoot, ns, rootX, rootY, 18, rootLabel, `total=${total}`, "#e8f1ff");
+
+      laidOut.forEach((actionEntry) => {
+        const actionRadius = 8 + Math.round((actionEntry.count / maxAction) * 10);
+        addLine(treeSvgRoot, ns, rootX + 18, rootY, actionEntry.x - 18, actionEntry.y, 0.55);
+        addNode(treeSvgRoot, ns, actionEntry.x, actionEntry.y, actionRadius, actionEntry.name, `count=${actionEntry.count}`, "#eef5ff", {
+          selectType: "action",
+          action: actionEntry.name,
+        });
+
+        const maxChild = Math.max(1, ...actionEntry.children.map((child) => child.count));
+        actionEntry.childPos.forEach(({ child, cy }) => {
+          addLine(treeSvgRoot, ns, actionEntry.x + actionRadius, actionEntry.y, targetX - 14, cy, 0.38);
+          addTargetNode(treeSvgRoot, ns, targetX, cy, actionEntry.name, child.target, child.count, maxChild);
+        });
+      });
+
+      bindTreeInteraction();
+      applyTransform();
+      ensureValidSelection();
+      syncSelectionUI();
+      renderInspector();
+    }
+
+    function normalizeSaplingLevel(level) {
+      const normalized = safeText(level).toLowerCase();
+      return SAPLING_LEVEL_ORDER.includes(normalized) ? normalized : "";
+    }
+
+    function saplingLevelIndex(level) {
+      const idx = SAPLING_LEVEL_ORDER.indexOf(level);
+      return idx === -1 ? SAPLING_LEVEL_ORDER.length + 1 : idx;
+    }
+
+    function hasPresentValue(value) {
+      if (value == null) return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === "object") return Object.keys(value).length > 0;
+      return String(value).trim() !== "";
+    }
+
+    function sortCounterEntries(counter, limit = 6) {
+      return Object.entries(counter || {}).sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return String(a[0]).localeCompare(String(b[0]), "zh-CN");
+      }).slice(0, limit);
+    }
+
+    function buildSaplingGraphIndex(graphData) {
+      const labels = {};
+      const parentByChild = {};
+      if (!graphData || typeof graphData !== "object") {
+        return { labels, parentByChild };
+      }
+      (Array.isArray(graphData.nodes) ? graphData.nodes : []).forEach((node) => {
+        if (!node || typeof node !== "object") return;
+        const id = safeText(node.id);
+        if (!id) return;
+        labels[id] = safeText(node.label) || id;
+      });
+      const edges = Array.isArray(graphData.edges) ? graphData.edges : [];
+      edges.forEach((edge) => {
+        if (!edge || typeof edge !== "object") return;
+        const source = safeText(edge.source);
+        const target = safeText(edge.target);
+        if (!source || !target || source === target) return;
+        if (safeText(edge.type) === "parent_of" && !parentByChild[target]) {
+          parentByChild[target] = source;
+        }
+      });
+      edges.forEach((edge) => {
+        if (!edge || typeof edge !== "object") return;
+        const source = safeText(edge.source);
+        const target = safeText(edge.target);
+        if (!source || !target || source === target) return;
+        const type = safeText(edge.type);
+        if ((type === "contains" || type === "has_operation") && !parentByChild[target]) {
+          parentByChild[target] = source;
+        }
+      });
+      return { labels, parentByChild };
+    }
+
+    function isAllowedSaplingParent(childLevel, parentLevel) {
+      if (!parentLevel) return false;
+      if (childLevel === "branch") {
+        return parentLevel === "branch" || parentLevel === "trunk" || parentLevel === "root";
+      }
+      if (childLevel === "leaf") {
+        return parentLevel === "branch" || parentLevel === "trunk" || parentLevel === "root";
+      }
+      return false;
+    }
+
+    function compareSaplingNodeIds(aId, bId, nodesById) {
+      const a = nodesById[aId];
+      const b = nodesById[bId];
+      if (!a || !b) return String(aId).localeCompare(String(bId), "zh-CN");
+      const levelDiff = saplingLevelIndex(a.level) - saplingLevelIndex(b.level);
+      if (levelDiff !== 0) return levelDiff;
+      if (b.descendantCount !== a.descendantCount) return b.descendantCount - a.descendantCount;
+      if (b.directChildCount !== a.directChildCount) return b.directChildCount - a.directChildCount;
+      return a.label.localeCompare(b.label, "zh-CN");
+    }
+
+    function saplingMatchesQuery(node, query) {
+      const q = safeText(query).toLowerCase();
+      if (!q) return true;
+      const haystack = [
+        node.id,
+        node.label,
+        node.level,
+        node.knowledgeRole,
+        safeText(node.meta.func),
+        safeText(node.meta.source_file),
+        safeText(node.meta.document_category),
+      ].join("\n").toLowerCase();
+      return haystack.includes(q);
+    }
+
+    function buildSaplingData(records, graphData, treeFileLabel, graphFileLabel) {
+      const levelStats = {};
+      SAPLING_LEVEL_ORDER.forEach((level) => {
+        levelStats[level] = {
+          count: 0,
+          metaFields: {},
+          treePositionFields: {},
+          roles: {},
+          samples: [],
+        };
+      });
+
+      const data = {
+        total: 0,
+        levels: { root: 0, trunk: 0, branch: 0, leaf: 0 },
+        levelStats,
+        parentStats: { graph: 0, prefix: 0, root: 0 },
+        graphLoaded: !!graphData,
+        recordsLoaded: true,
+        treeFileLabel: treeFileLabel || "(loaded)",
+        graphFileLabel: graphData ? (graphFileLabel || "(loaded)") : "(未加载，先用 node_id 前缀回退)",
+        groups: { trunk_roots: [], root_branches: [], root_leaves: [] },
+        nodesById: {},
+        childrenByParent: {},
+      };
+      const graphIndex = buildSaplingGraphIndex(graphData);
+
+      (records || []).forEach((record) => {
+        if (!record || typeof record !== "object") return;
+        const meta = record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+        const treePosition = meta.tree_position && typeof meta.tree_position === "object" ? meta.tree_position : {};
+        const nodeId = safeText(meta.node_id || meta.tree_node_id);
+        const level = normalizeSaplingLevel(treePosition.tree_level || meta.tree_level);
+        if (!nodeId || !level || data.nodesById[nodeId]) return;
+
+        const label = safeText(meta.command_prefix || meta.section_title || graphIndex.labels[nodeId] || nodeId);
+        const role = safeText(treePosition.knowledge_role);
+        const node = {
+          id: nodeId,
+          label,
+          level,
+          meta,
+          treePosition,
+          raw: record,
+          pageContent: safeText(record.page_content || record.text),
+          knowledgeRole: role,
+          parentId: "",
+          parentResolvedBy: "root",
+          directChildCount: 0,
+          descendantCount: 0,
+        };
+        data.nodesById[nodeId] = node;
+        data.total += 1;
+        data.levels[level] = (data.levels[level] || 0) + 1;
+        const levelEntry = data.levelStats[level];
+        levelEntry.count += 1;
+        Object.entries(meta).forEach(([key, value]) => {
+          if (hasPresentValue(value)) {
+            levelEntry.metaFields[key] = (levelEntry.metaFields[key] || 0) + 1;
+          }
+        });
+        Object.entries(treePosition).forEach(([key, value]) => {
+          if (hasPresentValue(value)) {
+            levelEntry.treePositionFields[key] = (levelEntry.treePositionFields[key] || 0) + 1;
+          }
+        });
+        if (role) {
+          levelEntry.roles[role] = (levelEntry.roles[role] || 0) + 1;
+        }
+        if (levelEntry.samples.length < 3) {
+          levelEntry.samples.push(node);
+        }
+      });
+
+      const nodeIds = Object.keys(data.nodesById);
+      nodeIds.forEach((nodeId) => {
+        const node = data.nodesById[nodeId];
+        if (!node || node.level === "trunk" || node.level === "root") {
+          data.parentStats.root += 1;
+          return;
+        }
+
+        let parentId = "";
+        let parentMethod = "root";
+        if (graphData) {
+          let current = graphIndex.parentByChild[nodeId] || "";
+          const seen = new Set([nodeId]);
+          while (current && !seen.has(current)) {
+            seen.add(current);
+            const candidate = data.nodesById[current];
+            if (candidate && isAllowedSaplingParent(node.level, candidate.level)) {
+              parentId = current;
+              parentMethod = "graph";
+              break;
+            }
+            current = graphIndex.parentByChild[current] || "";
+          }
+        }
+        if (!parentId) {
+          const parts = nodeId.split("_");
+          for (let i = parts.length - 1; i > 0; i -= 1) {
+            const candidateId = parts.slice(0, i).join("_");
+            const candidate = data.nodesById[candidateId];
+            if (candidate && isAllowedSaplingParent(node.level, candidate.level)) {
+              parentId = candidateId;
+              parentMethod = "prefix";
+              break;
+            }
+          }
+        }
+
+        node.parentId = parentId;
+        node.parentResolvedBy = parentId ? parentMethod : "root";
+        data.parentStats[node.parentResolvedBy] = (data.parentStats[node.parentResolvedBy] || 0) + 1;
+        if (parentId) {
+          if (!data.childrenByParent[parentId]) data.childrenByParent[parentId] = [];
+          data.childrenByParent[parentId].push(nodeId);
+        }
+      });
+
+      function countDescendants(nodeId) {
+        const children = data.childrenByParent[nodeId] || [];
+        let total = children.length;
+        children.forEach((childId) => {
+          total += countDescendants(childId);
+        });
+        return total;
+      }
+
+      nodeIds.forEach((nodeId) => {
+        data.childrenByParent[nodeId] = data.childrenByParent[nodeId] || [];
+      });
+      nodeIds.forEach((nodeId) => {
+        const node = data.nodesById[nodeId];
+        node.directChildCount = (data.childrenByParent[nodeId] || []).length;
+        node.descendantCount = countDescendants(nodeId);
+      });
+      Object.keys(data.childrenByParent).forEach((parentId) => {
+        data.childrenByParent[parentId].sort((aId, bId) => compareSaplingNodeIds(aId, bId, data.nodesById));
+      });
+
+      nodeIds.forEach((nodeId) => {
+        const node = data.nodesById[nodeId];
+        if (node.parentId) return;
+        if (node.level === "trunk") data.groups.trunk_roots.push(nodeId);
+        else if (node.level === "branch") data.groups.root_branches.push(nodeId);
+        else if (node.level === "leaf") data.groups.root_leaves.push(nodeId);
+      });
+      Object.keys(data.groups).forEach((groupKey) => {
+        data.groups[groupKey].sort((aId, bId) => compareSaplingNodeIds(aId, bId, data.nodesById));
+      });
+
+      return data;
+    }
+
+    function findSaplingGroupConfig(groupKey) {
+      return SAPLING_GROUP_CONFIG.find((group) => group.key === groupKey) || SAPLING_GROUP_CONFIG[0];
+    }
+
+    function saplingGroupKeyForNodeId(nodeId) {
+      let current = SAPLING_DATA.nodesById[nodeId];
+      if (!current) return "trunk_roots";
+      while (current && current.parentId) {
+        current = SAPLING_DATA.nodesById[current.parentId];
+      }
+      if (!current) return "trunk_roots";
+      if (current.level === "trunk") return "trunk_roots";
+      if (current.level === "branch") return "root_branches";
+      return "root_leaves";
+    }
+
+    function setSaplingSelection(type, key, nodeId = "") {
+      saplingSelection = { type, key, nodeId };
+      renderSaplingPage();
+    }
+
+    function saplingSelectionMatchesGroup(groupKey) {
+      if (saplingSelection.type === "group") return saplingSelection.key === groupKey;
+      if (saplingSelection.type === "node") return saplingGroupKeyForNodeId(saplingSelection.nodeId) === groupKey;
+      return false;
+    }
+
+    function saplingSelectionMatchesNode(nodeId) {
+      return saplingSelection.type === "node" && saplingSelection.nodeId === nodeId;
+    }
+
+    function ensureValidSaplingSelection() {
+      const availableGroups = SAPLING_GROUP_CONFIG.filter((group) => (SAPLING_DATA.groups[group.key] || []).length > 0);
+      const fallbackGroup = (availableGroups[0] || SAPLING_GROUP_CONFIG[0]).key;
+      if (saplingSelection.type === "node" && SAPLING_DATA.nodesById[saplingSelection.nodeId]) {
+        saplingSelection.key = saplingGroupKeyForNodeId(saplingSelection.nodeId);
+        return;
+      }
+      if (saplingSelection.type === "group" && (SAPLING_DATA.groups[saplingSelection.key] || []).length > 0) {
+        return;
+      }
+      saplingSelection = { type: "group", key: fallbackGroup, nodeId: "" };
+    }
+
+    function renderSaplingLevelCards() {
+      saplingLevelCards.innerHTML = SAPLING_LEVEL_ORDER.map((level) => {
+        const levelEntry = SAPLING_DATA.levelStats[level] || createPreviewLevelStat(0, [], [], {});
+        const metaFields = sortCounterEntries(levelEntry.metaFields, 8).map(([key]) => `<span class="inline-code">${escapeHtml(key)}</span>`).join(" ");
+        const tpFields = sortCounterEntries(levelEntry.treePositionFields, 8).map(([key]) => `<span class="inline-code">${escapeHtml(key)}</span>`).join(" ");
+        const roles = sortCounterEntries(levelEntry.roles, 4).map(([role, count]) => `<span class="node-pill">${escapeHtml(role)} × ${count}</span>`).join("");
+        return `
+          <div class="level-card">
+            <h4>${escapeHtml(SAPLING_LEVEL_LABELS[level] || level)} <span class="node-pill">${levelEntry.count || 0}</span></h4>
+            <div class="level-line"><b>metadata 常见字段</b><br/>${metaFields || '<span class="muted">暂无</span>'}</div>
+            <div class="level-line"><b>tree_position 子字段</b><br/>${tpFields || '<span class="muted">暂无</span>'}</div>
+            <div class="level-line"><b>knowledge_role</b></div>
+            <div class="level-tags">${roles || '<span class="muted">暂无</span>'}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderSaplingCompareCards() {
+      saplingCompareCards.innerHTML = SAPLING_COMPARE_DEFS.map((item) => {
+        return `
+          <div class="compare-card">
+            <h4>${escapeHtml(SAPLING_LEVEL_LABELS[item.level] || item.level)}</h4>
+            <div class="compare-line"><b>树苗侧</b><br/>${escapeHtml(item.sapling)}</div>
+            <div class="compare-line"><b>农场主侧</b><br/>${escapeHtml(item.owner)}</div>
+            <div class="compare-line"><b>一致性判断</b><br/>${escapeHtml(item.consistency)}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderSaplingNodeCard(node, badgeText = "node") {
+      const meta = node.meta || {};
+      const treePosition = node.treePosition || {};
+      const linkedNodes = Array.isArray(treePosition.linked_nodes)
+        ? (treePosition.linked_nodes.length ? treePosition.linked_nodes.join("\n") : "—")
+        : (safeText(treePosition.linked_nodes) || "—");
+      const scopeValue = Array.isArray(meta.scope) ? meta.scope.join(", ") : (safeText(meta.scope) || "—");
+      const fieldHtml = [
+        { label: "node_id", value: node.id, mono: true },
+        { label: "command_prefix", value: safeText(meta.command_prefix) || node.label },
+        { label: "tree_level", value: node.level },
+        { label: "knowledge_role", value: safeText(treePosition.knowledge_role) || "—" },
+        { label: "parent_id", value: node.parentId || "(root)", mono: true },
+        { label: "parent_resolved_by", value: node.parentResolvedBy || "root" },
+        { label: "func", value: safeText(meta.func) || "—", mono: true },
+        { label: "scope", value: scopeValue },
+        { label: "document_category", value: safeText(meta.document_category) || "—" },
+        { label: "source_file", value: safeText(meta.source_file) || "—" },
+        { label: "scenario_id", value: safeText(meta.scenario_id) || "—" },
+        { label: "tree_position.linked_nodes", value: linkedNodes, wide: true, mono: true },
+        { label: "page_content", value: node.pageContent || "—", wide: true },
+      ].map((field) => {
+        return `<div class="record-item${field.wide ? " wide" : ""}"><b>${escapeHtml(field.label)}</b>${formatMultiline(field.value, !!field.mono)}</div>`;
+      }).join("");
+      const rawJson = escapeHtml(JSON.stringify(node.raw, null, 2));
+      return `
+        <div class="record-card">
+          <div class="record-head">
+            <div class="record-file">${escapeHtml(safeText(meta.source_file) || "(unknown source)")}</div>
+            <span class="sample-badge">${escapeHtml(badgeText)}</span>
+          </div>
+          <div class="record-title">${escapeHtml(node.label)} <span class="muted">(${escapeHtml(node.id)})</span></div>
+          <div class="record-grid">${fieldHtml}</div>
+          <details>
+            <summary>raw JSON</summary>
+            <pre class="code-block">${rawJson}</pre>
+          </details>
+        </div>
+      `;
+    }
+
+    function bindSaplingInspectorChildButtons() {
+      saplingInspectRecords.querySelectorAll("[data-sapling-child]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const nodeId = button.dataset.saplingChild || "";
+          setSaplingSelection("node", saplingGroupKeyForNodeId(nodeId), nodeId);
+        });
+      });
+    }
+
+    function renderSaplingEmptyInspector() {
+      saplingInspectTitle.textContent = "树苗 Inspector";
+      saplingInspectMeta.textContent = SAPLING_DATA.recordsLoaded
+        ? "已加载树苗文件。点击左侧分组或节点，可展开 metadata / tree_position / raw JSON。"
+        : "当前是预览态。载入树苗文件后点击左侧分组或节点，可展开 metadata / tree_position / raw JSON。";
+      saplingInspectRule.innerHTML = SAPLING_DATA.recordsLoaded
+        ? "这里会展示当前选中节点的 <b>层级</b>、<b>父节点恢复方式</b>、<b>稳定字段</b>、<b>子节点</b> 与 <b>样例 raw JSON</b>。"
+        : "这里会展示当前选中节点的 <b>层级</b>、<b>父节点恢复方式</b>、<b>稳定字段</b>、<b>子节点</b> 与 <b>样例 raw JSON</b>。当前还没有载入真实树苗记录。";
+      renderInspectBoxesInto(saplingInspectStats, [
+        { label: "有效节点", value: String(SAPLING_DATA.total || 0) },
+        { label: "Trunk / Branch / Leaf", value: `${SAPLING_DATA.levels.trunk || 0} / ${SAPLING_DATA.levels.branch || 0} / ${SAPLING_DATA.levels.leaf || 0}` },
+        { label: "已加载树苗文件", value: SAPLING_DATA.recordsLoaded ? "是" : "否" },
+        { label: "图谱文件", value: SAPLING_DATA.graphLoaded ? "已加载" : "未加载" },
+      ]);
+      saplingInspectRecords.innerHTML = '<div class="empty-state">选择左侧分组可先看层级概览；选择具体节点则可继续下钻到 metadata / tree_position / raw JSON。</div>';
+    }
+
+    function renderSaplingInspector() {
+      if (!saplingSelection || (!saplingSelection.nodeId && !saplingSelection.key)) {
+        renderSaplingEmptyInspector();
+        return;
+      }
+
+      if (saplingSelection.type === "group") {
+        const group = findSaplingGroupConfig(saplingSelection.key);
+        const allIds = SAPLING_DATA.groups[group.key] || [];
+        const filteredIds = saplingSearchQuery ? allIds.filter((nodeId) => saplingMatchesQuery(SAPLING_DATA.nodesById[nodeId], saplingSearchQuery)) : allIds;
+        const sampleNodes = filteredIds.slice(0, 3).map((nodeId) => SAPLING_DATA.nodesById[nodeId]).filter(Boolean);
+        saplingInspectTitle.textContent = group.label;
+        saplingInspectMeta.textContent = `${group.desc} 当前分组共 ${allIds.length} 个节点${saplingSearchQuery ? `，过滤后 ${filteredIds.length} 个` : ""}。`;
+        saplingInspectRule.innerHTML = `
+          <b>分组规则：</b> <span class="inline-code">${escapeHtml(group.level)}</span><br/>
+          <div style="margin-top:6px;">${escapeHtml(group.desc)}</div>
+        `;
+        renderInspectBoxesInto(saplingInspectStats, [
+          { label: "分组总数", value: String(allIds.length) },
+          { label: "当前可见", value: String(filteredIds.length) },
+          { label: "层级", value: escapeHtml(group.level) },
+          { label: "搜索条件", value: saplingSearchQuery ? escapeHtml(saplingSearchQuery) : "(无)" },
+        ]);
+        saplingInspectRecords.innerHTML = sampleNodes.length
+          ? sampleNodes.map((node, index) => renderSaplingNodeCard(node, `sample ${index + 1}`)).join("")
+          : '<div class="empty-state">当前分组没有可展示节点。若输入了搜索词，请尝试缩短关键词。</div>';
+        bindSaplingInspectorChildButtons();
+        return;
+      }
+
+      const node = SAPLING_DATA.nodesById[saplingSelection.nodeId];
+      if (!node) {
+        renderSaplingEmptyInspector();
+        return;
+      }
+      const compareDef = SAPLING_COMPARE_DEFS.find((item) => item.level === node.level);
+      const childIds = SAPLING_DATA.childrenByParent[node.id] || [];
+      const visibleChildIds = saplingSearchQuery
+        ? childIds.filter((childId) => saplingMatchesQuery(SAPLING_DATA.nodesById[childId], saplingSearchQuery))
+        : childIds;
+      const childLevelStats = {};
+      childIds.forEach((childId) => {
+        const child = SAPLING_DATA.nodesById[childId];
+        if (!child) return;
+        childLevelStats[child.level] = (childLevelStats[child.level] || 0) + 1;
+      });
+
+      saplingInspectTitle.textContent = node.label;
+      saplingInspectMeta.textContent = `${SAPLING_LEVEL_LABELS[node.level] || node.level} · node_id=${node.id}`;
+      saplingInspectRule.innerHTML = `
+        <b>父节点：</b> <span class="inline-code">${escapeHtml(node.parentId || "(root)")}</span><br/>
+        <b>恢复方式：</b> <span class="inline-code">${escapeHtml(node.parentResolvedBy || "root")}</span>
+        <div style="margin-top:6px;">${escapeHtml(compareDef ? compareDef.consistency : "这个层级暂无对照说明。")}</div>
+      `;
+      renderInspectBoxesInto(saplingInspectStats, [
+        { label: "直接子节点", value: String(childIds.length) },
+        { label: "子节点层级", value: topPairs(childLevelStats, 4) },
+        { label: "knowledge_role", value: escapeHtml(node.knowledgeRole || "—") },
+        { label: "搜索条件", value: saplingSearchQuery ? escapeHtml(saplingSearchQuery) : "(无)" },
+      ]);
+
+      let html = renderSaplingNodeCard(node, "selected");
+      if (childIds.length) {
+        const childButtons = visibleChildIds.slice(0, saplingSearchQuery ? 120 : 48).map((childId) => {
+          const child = SAPLING_DATA.nodesById[childId];
+          if (!child) return "";
+          return `<button type="button" class="child-node-btn" data-sapling-child="${escapeHtml(childId)}">${escapeHtml(child.label)} · ${escapeHtml(child.level)}</button>`;
+        }).join("");
+        const hidden = Math.max(0, visibleChildIds.length - (saplingSearchQuery ? 120 : 48));
+        html += `
+          <div class="record-card">
+            <div class="record-title">子节点（${childIds.length}）</div>
+            <div class="child-node-list">${childButtons || '<span class="muted">当前没有可见子节点</span>'}</div>
+            ${hidden ? `<div class="tree-caption">其余 ${hidden} 个子节点已折叠；可继续缩小搜索词。</div>` : ""}
+          </div>
+        `;
+      }
+      saplingInspectRecords.innerHTML = html;
+      bindSaplingInspectorChildButtons();
+    }
+
+    function renderSaplingTree() {
+      const hasNodes = Object.keys(SAPLING_DATA.nodesById || {}).length > 0;
+      if (!hasNodes) {
+        saplingTree.innerHTML = '<div class="empty-state">当前只有预览统计，还没有真实树苗节点列表。请加载 <code>commandtree_base.json</code> 或含树字段的 <code>knowledge_base.json</code>。</div>';
+        return;
+      }
+
+      saplingTree.innerHTML = SAPLING_GROUP_CONFIG.map((group) => {
+        const allIds = SAPLING_DATA.groups[group.key] || [];
+        const filteredIds = saplingSearchQuery ? allIds.filter((nodeId) => saplingMatchesQuery(SAPLING_DATA.nodesById[nodeId], saplingSearchQuery)) : allIds;
+        const visibleIds = filteredIds.slice(0, saplingSearchQuery ? 120 : 24);
+        const hiddenCount = Math.max(0, filteredIds.length - visibleIds.length);
+        const nodeHtml = visibleIds.map((nodeId) => {
+          const node = SAPLING_DATA.nodesById[nodeId];
+          return `
+            <button class="bucket-btn${saplingSelectionMatchesNode(nodeId) ? ' active' : ''}" type="button" data-sapling-node="${escapeHtml(nodeId)}">
+              <div class="bucket-top">
+                <div class="bucket-key">${escapeHtml(node.label)}</div>
+                <span class="bucket-count">${node.directChildCount}</span>
+              </div>
+              <div class="bucket-field"><span class="inline-code">${escapeHtml(node.id)}</span></div>
+              <div class="bucket-subline">level=${escapeHtml(node.level)} · parent=${escapeHtml(node.parentId || '(root)')} · role=${escapeHtml(node.knowledgeRole || '—')}</div>
+            </button>
+          `;
+        }).join("");
+        const note = saplingSearchQuery
+          ? `搜索命中 ${filteredIds.length} / ${allIds.length} 个节点。`
+          : group.desc;
+        return `
+          <details open class="action-block${saplingSelectionMatchesGroup(group.key) ? ' active' : ''}" data-sapling-group="${escapeHtml(group.key)}">
+            <summary class="action-summary" data-sapling-group-summary="${escapeHtml(group.key)}">
+              <span>${escapeHtml(group.label)}</span>
+              <span class="summary-count">${allIds.length}</span>
+            </summary>
+            <div class="action-note">${escapeHtml(note)}</div>
+            <div class="bucket-list">${nodeHtml || '<div class="empty-state">当前分组没有可见节点。</div>'}</div>
+            ${hiddenCount ? `<div class="tree-caption">其余 ${hiddenCount} 个节点已折叠；可继续输入搜索词。</div>` : ""}
+          </details>
+        `;
+      }).join("");
+
+      saplingTree.querySelectorAll("[data-sapling-group-summary]").forEach((summary) => {
+        summary.addEventListener("click", () => {
+          setSaplingSelection("group", summary.dataset.saplingGroupSummary || "trunk_roots", "");
+        });
+      });
+      saplingTree.querySelectorAll("[data-sapling-node]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const nodeId = button.dataset.saplingNode || "";
+          setSaplingSelection("node", saplingGroupKeyForNodeId(nodeId), nodeId);
+        });
+      });
+    }
+
+    function renderSaplingPage() {
+      saplingTitle.textContent = SAPLING_DATA.recordsLoaded
+        ? `原始树苗结构（来自 ${SAPLING_DATA.treeFileLabel}）`
+        : "原始树苗结构（推荐载入 commandtree_base.json）";
+      saplingSourcePath.textContent = SAPLING_DATA.treeFileLabel || "(未加载)";
+      saplingGraphPath.textContent = SAPLING_DATA.graphFileLabel || "(未加载，先用 node_id 前缀回退)";
+      const total = SAPLING_DATA.total || 0;
+      saplingStats.innerHTML = [
+        { label: "有效节点", value: total },
+        { label: "Trunk", value: SAPLING_DATA.levels.trunk || 0 },
+        { label: "Branch", value: SAPLING_DATA.levels.branch || 0 },
+        { label: "Leaf", value: SAPLING_DATA.levels.leaf || 0 },
+      ].map((item) => {
+        const pct = total ? Math.max(2, (item.value / total) * 100) : 2;
+        return `
+          <div class="box">
+            <div><b>${escapeHtml(item.label)}</b>：${item.value}</div>
+            <div class="bar"><i style="width:${pct}%"></i></div>
+          </div>
+        `;
+      }).join("");
+      saplingParentNote.innerHTML = SAPLING_DATA.recordsLoaded
+        ? `父子恢复统计：<span class="inline-code">graph=${SAPLING_DATA.parentStats.graph || 0}</span><span class="inline-code">prefix=${SAPLING_DATA.parentStats.prefix || 0}</span><span class="inline-code">root=${SAPLING_DATA.parentStats.root || 0}</span>。root 是页面合成层；原始树苗通常不持久化 root 节点。`
+        : `预览统计显示：原始树苗通常只有 <span class="inline-code">trunk</span> / <span class="inline-code">branch</span> / <span class="inline-code">leaf</span>；root 是页面合成层，不是树苗原始记录。`;
+      renderSaplingLevelCards();
+      renderSaplingCompareCards();
+      ensureValidSaplingSelection();
+      renderSaplingTree();
+      renderSaplingInspector();
     }
 
     filePicker.addEventListener("change", async (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      const text = await f.text();
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
       const records = parseDecisionText(text);
       if (!records.length) {
         alert("未解析到有效 JSON 记录，请选择 owner_decisions 的 json/jsonl 文件。");
         return;
       }
+      CURRENT_RECORDS = records;
       TREE_DATA = summarizeFromRecords(records);
-      treeTitle.textContent = `决策树统计（来自 ${f.name}）`;
-      sourcePath.textContent = f.name;
+      currentTreeLabel = file.name || "loaded_jsonl";
+      treeTitle.textContent = `决策树统计（来自 ${file.name}）`;
+      sourcePath.textContent = file.name;
+      treeScale = 1;
+      treeTx = 0;
+      treeTy = 0;
       renderTreePage();
     });
+
+    saplingPicker.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      const records = parseDecisionText(text);
+      if (!records.length) {
+        alert("未解析到有效树苗记录，请选择 commandtree_base / knowledge_base 的 json/jsonl 文件。");
+        return;
+      }
+      CURRENT_SAPLING_RECORDS = records;
+      SAPLING_DATA = buildSaplingData(
+        records,
+        CURRENT_SAPLING_GRAPH,
+        file.name || "loaded_sapling",
+        CURRENT_SAPLING_GRAPH_LABEL,
+      );
+      saplingSelection = { type: "group", key: "trunk_roots", nodeId: "" };
+      renderSaplingPage();
+    });
+
+    saplingGraphPicker.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {
+        alert("图谱文件必须是标准 JSON（建议选择 cli_keyword_graph.json）。");
+        return;
+      }
+      CURRENT_SAPLING_GRAPH = parsed;
+      CURRENT_SAPLING_GRAPH_LABEL = file.name || "loaded_graph";
+      if (CURRENT_SAPLING_RECORDS.length) {
+        SAPLING_DATA = buildSaplingData(
+          CURRENT_SAPLING_RECORDS,
+          CURRENT_SAPLING_GRAPH,
+          SAPLING_DATA.treeFileLabel,
+          CURRENT_SAPLING_GRAPH_LABEL,
+        );
+      } else {
+        SAPLING_DATA = {
+          ...SAPLING_DATA,
+          graphLoaded: true,
+          graphFileLabel: CURRENT_SAPLING_GRAPH_LABEL,
+        };
+      }
+      renderSaplingPage();
+    });
+
+    saplingSearch.addEventListener("input", (e) => {
+      saplingSearchQuery = safeText(e.target.value);
+      renderSaplingPage();
+    });
+
     renderTreePage();
+    renderSaplingPage();
   </script>
 </body>
 </html>

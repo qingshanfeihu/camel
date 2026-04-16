@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field as dc_field
 from dataclasses import fields as dc_fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from INAGENT.data_tools.quality_feedback_loop import (
     FEEDBACK_INBOX_SCHEMA_VERSION,
@@ -91,6 +91,48 @@ _CMD_LIKE_KEYWORDS = re.compile(
 
 _SECTION_NUMBER_RE = re.compile(r"^\s*[\d.]+\s*")
 _MIN_USEFUL_CONTENT_LEN = 10  # chunks with < 10 useful chars (after stripping title/number) are thin headers
+_GENERIC_NON_ACTIONABLE_TITLES = frozenset({
+    "配置示例",
+    "配置目标",
+    "概述",
+    "结果验证",
+    "Function List",
+    "Source List",
+})
+_OVERVIEW_KW = ("功能原理", "工作机制", "概述", "简介", "总体介绍", "体系结构", "架构")
+_EXPLICIT_COMMAND_LINE_RE = re.compile(
+    r"(?im)^\s*(show|no|clear|display|enable|config|write|hostname|webui|"
+    r"ping|traceroute|ip|interface|nat|slb|gslb|ipv6)\b"
+)
+_FUNCTION_SIGNATURE_RE = re.compile(
+    r"\b[A-Za-z_][\w\s\*]*\s+[A-Za-z_]\w*\s*\([^\n;]*\)\s*;"
+)
+_GENERIC_PROCEDURAL_TITLES = frozenset({
+    "操作步骤",
+    "配置步骤",
+    "步骤",
+    "Operation Steps",
+    "Configuration Steps",
+    "Steps",
+})
+_NARRATIVE_BRANCH_KW = (
+    "功能原理",
+    "基本原理",
+    "处理逻辑",
+    "工作机制",
+    "架构视图",
+    "系统架构",
+    "总体介绍",
+    "简介",
+)
+_CLI_PROMPT_PREFIX_RE = re.compile(
+    r"^\s*(?:\[[^\]]+\]\s*|<[^>]+>\s*|[A-Za-z0-9_.-]+(?:\([^)]*\))?[#>]\s*)+"
+)
+_CLI_COMMAND_START_RE = re.compile(
+    r"(?i)^(show|no|clear|display|enable|config|write|hostname|webui|"
+    r"ping|traceroute|ip|interface|nat|slb|gslb|ipv6|acl|rule|firewall|"
+    r"packet-filter|bond|quit|add)\b"
+)
 
 
 def _useful_content_length(text: str, section_title: str) -> int:
@@ -116,6 +158,464 @@ class _ChunkTreeContext:
     skeleton_module_id: str = ""
     skeleton_artifact_exists: bool = False
     hierarchy_prefix: str = ""
+
+
+@dataclass
+class _ExistingTreeIndex:
+    trunks: Set[str] = dc_field(default_factory=set)
+    branches: Set[str] = dc_field(default_factory=set)
+    commands: Set[str] = dc_field(default_factory=set)
+
+
+@dataclass
+class _CreatedTreeIndex:
+    trunks: Set[str] = dc_field(default_factory=set)
+    branches: Set[str] = dc_field(default_factory=set)
+
+
+def _normalize_target_node_id(raw: str) -> str:
+    cleaned = str(raw or "").strip().strip("`\"'")
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("＞", ">").replace("›", ">")
+    parts = [
+        re.sub(r"\s+", " ", part).strip()
+        for part in cleaned.split(">")
+        if part.strip()
+    ]
+    return " > ".join(parts)
+
+
+def _normalize_tree_fields(
+    action: str,
+    tree_level: str,
+    target_node_id: str,
+) -> Tuple[str, str, str]:
+    target = _normalize_target_node_id(target_node_id)
+    if action in _TREE_CREATE_TO_LEVEL:
+        return action, _TREE_CREATE_TO_LEVEL[action], target
+    if action in ("discard", "needs_tree_session"):
+        return action, "", ""
+    if action == "merge_into_existing":
+        if tree_level not in ("leaf", "branch", "trunk", "root"):
+            tree_level = ""
+        return action, tree_level, target
+    return "needs_tree_session", "", ""
+
+
+def _normalize_branch_parent_target(target_node_id: str, entity_title: str) -> str:
+    target = _normalize_target_node_id(target_node_id)
+    entity = _normalize_target_node_id(entity_title)
+    if not target or not entity:
+        return target
+    parts = [part.strip() for part in target.split(" > ") if part.strip()]
+    if parts and parts[-1] == entity:
+        return " > ".join(parts[:-1])
+    return target
+
+
+def _branch_parent_from_function_hierarchy(function_hierarchy: str) -> str:
+    normalized = _normalize_target_node_id(function_hierarchy)
+    if " > " not in normalized:
+        return ""
+    return " > ".join(normalized.split(" > ")[:-1])
+
+
+def _infer_tree_level_from_meta_signals(meta: Optional[Dict[str, object]]) -> str:
+    if not meta:
+        return "unknown"
+
+    llm_level = str(meta.get("tree_level") or "")
+    if llm_level in ("leaf", "new_leaf", "branch", "trunk", "root"):
+        return llm_level
+
+    fh = str(meta.get("function_hierarchy") or "").strip()
+    if fh:
+        parts = [p.strip() for p in fh.replace(">", "/").split("/") if p.strip()]
+        if len(parts) == 1:
+            return "trunk"
+        if len(parts) > 1:
+            sp = str(meta.get("section_path") or "").strip()
+            sp_parts = [p.strip() for p in sp.split(">") if p.strip()] if sp else []
+            if len(sp_parts) <= 1 and any(kw in sp for kw in _OVERVIEW_KW):
+                return "trunk"
+            return "branch"
+
+    return "unknown"
+
+
+def _looks_like_internal_function_signature(text: str, title: str) -> bool:
+    title_norm = str(title or "").strip().lower()
+    if title_norm in {"function list", "source list"}:
+        return True
+    preview = "\n".join(str(text or "").splitlines()[:4])
+    return bool(_FUNCTION_SIGNATURE_RE.search(preview))
+
+
+def _looks_like_non_actionable_heading(text: str, title: str) -> bool:
+    title_norm = str(title or "").strip()
+    useful_len = _useful_content_length(str(text or ""), title_norm)
+    if title_norm in _GENERIC_NON_ACTIONABLE_TITLES and not _EXPLICIT_COMMAND_LINE_RE.search(str(text or "")):
+        return True
+    if useful_len < 30 and any(token in str(text or "") for token in ("执行如下命令", "如下图", "拓扑图")):
+        return True
+    return False
+
+
+def _append_source_evidence(row: Dict[str, object], suffix: str) -> None:
+    evidence = str(row.get("source_evidence") or "")
+    row["source_evidence"] = f"{evidence}+{suffix}" if evidence else suffix
+
+
+def _rewrite_row_as_discard(row: Dict[str, object], reason: str) -> None:
+    row["action"] = "discard"
+    row["tree_level"] = ""
+    row["target_node_id"] = ""
+    chunk_meta_patch = row.get("chunk_meta_patch") or {}
+    if isinstance(chunk_meta_patch, dict):
+        chunk_meta_patch["owner_excluded"] = True
+    _append_source_evidence(row, reason)
+
+
+def _rewrite_row_as_needs_tree_session(row: Dict[str, object], reason: str) -> None:
+    row["action"] = "needs_tree_session"
+    row["tree_level"] = ""
+    row["target_node_id"] = ""
+    _append_source_evidence(row, reason)
+
+
+def _compose_branch_path(parent: str, entity_title: str) -> str:
+    parent_norm = _normalize_target_node_id(parent)
+    entity_norm = _normalize_target_node_id(entity_title)
+    if not parent_norm or not entity_norm:
+        return ""
+    return _normalize_target_node_id(f"{parent_norm} > {entity_norm}")
+
+
+def _select_llm_target_id(
+    action: str,
+    raw_target_id: str,
+    ctx: _ChunkTreeContext,
+    patch: Dict[str, object],
+) -> str:
+    target = _normalize_target_node_id(raw_target_id)
+    if target:
+        return target
+
+    if not action.startswith("tree_create"):
+        return ""
+
+    if action == "tree_create_leaf":
+        for candidate in (
+            ctx.parent_candidate_id,
+            ctx.hierarchy_prefix,
+            patch.get("function_hierarchy") if isinstance(patch, dict) else "",
+        ):
+            normalized = _normalize_target_node_id(str(candidate or ""))
+            if normalized:
+                return normalized
+        return ""
+
+    if action == "tree_create_branch":
+        parent_hint = _branch_parent_from_function_hierarchy(
+            str(patch.get("function_hierarchy") or "") if isinstance(patch, dict) else "",
+        )
+        if parent_hint:
+            return parent_hint
+        pm = _normalize_target_node_id(
+            str(patch.get("product_module") or "") if isinstance(patch, dict) else "",
+        )
+        if pm and pm != "unknown":
+            return pm
+
+    return ""
+
+
+def _get_cli_graph_store_safe() -> object:
+    try:
+        from INAGENT.rag.cli_graph_store import get_cli_graph_store
+        return get_cli_graph_store()
+    except Exception:
+        return None
+
+
+def _build_existing_tree_index(cli_graph: object = None) -> _ExistingTreeIndex:
+    index = _ExistingTreeIndex()
+    cli_graph = cli_graph or _get_cli_graph_store_safe()
+    if cli_graph is None:
+        return index
+
+    try:
+        cli_graph._ensure_loaded()  # type: ignore[attr-defined]
+    except Exception:
+        return index
+
+    module_nodes = getattr(cli_graph, "_module_nodes", {}) or {}
+    nodes_by_id = getattr(cli_graph, "_nodes_by_id", {}) or {}
+    cmd_nid_to_label = getattr(cli_graph, "_cmd_nid_to_label", {}) or {}
+
+    for module_id, node in module_nodes.items():
+        label = _normalize_target_node_id(str(node.get("label") or module_id))
+        if label:
+            index.trunks.add(label)
+
+    for module_id, node in module_nodes.items():
+        module_label = _normalize_target_node_id(str(node.get("label") or module_id))
+        if not module_label:
+            continue
+        try:
+            branch_ids = cli_graph.get_branch_ids(module_id)  # type: ignore[attr-defined]
+        except Exception:
+            branch_ids = []
+        for branch_id in branch_ids:
+            branch_node = nodes_by_id.get(branch_id, {})
+            branch_label = _normalize_target_node_id(str(branch_node.get("label") or branch_id))
+            if branch_label:
+                index.branches.add(f"{module_label} > {branch_label}")
+
+    for nid in cmd_nid_to_label:
+        label = _normalize_target_node_id(str(nodes_by_id.get(nid, {}).get("label") or nid))
+        if label:
+            index.commands.add(label)
+
+    return index
+
+
+def _target_kind(
+    target_node_id: str,
+    existing: _ExistingTreeIndex,
+    created: Optional[_CreatedTreeIndex] = None,
+) -> str:
+    target = _normalize_target_node_id(target_node_id)
+    created = created or _CreatedTreeIndex()
+    if not target:
+        return "unknown"
+    if target in existing.commands:
+        return "command"
+    if target in existing.branches or target in created.branches:
+        return "branch"
+    if target in existing.trunks or target in created.trunks:
+        return "trunk"
+    return "unknown"
+
+
+def _build_created_tree_index(
+    rows: List[Dict[str, object]],
+    existing: _ExistingTreeIndex,
+) -> _CreatedTreeIndex:
+    created = _CreatedTreeIndex()
+    for row in rows:
+        if str(row.get("action") or "") == "tree_create_trunk":
+            entity = _normalize_target_node_id(str(row.get("entity_title") or ""))
+            if entity:
+                created.trunks.add(entity)
+
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            if str(row.get("action") or "") != "tree_create_branch":
+                continue
+            parent = _normalize_branch_parent_target(
+                str(row.get("target_node_id") or ""),
+                str(row.get("entity_title") or ""),
+            )
+            entity = _normalize_target_node_id(str(row.get("entity_title") or ""))
+            if not parent or not entity:
+                continue
+            if _target_kind(parent, existing, created) not in {"trunk", "branch"}:
+                continue
+            path = _compose_branch_path(parent, entity)
+            if path and path not in created.branches:
+                created.branches.add(path)
+                changed = True
+    return created
+
+
+def _best_branch_parent(
+    row: Dict[str, object],
+    ctx: _ChunkTreeContext,
+    patch: Dict[str, object],
+    existing: _ExistingTreeIndex,
+    created: _CreatedTreeIndex,
+    cli_graph: object = None,
+) -> str:
+    cli_graph = cli_graph or _get_cli_graph_store_safe()
+    target = _normalize_branch_parent_target(
+        str(row.get("target_node_id") or ""),
+        str(row.get("entity_title") or ""),
+    )
+    candidates = [
+        target,
+        _branch_parent_from_function_hierarchy(str(patch.get("function_hierarchy") or "")),
+        _normalize_target_node_id(str(ctx.hierarchy_prefix or "")),
+        _normalize_target_node_id(str(patch.get("product_module") or "")),
+    ]
+    cmd_prefix = str(patch.get("command_prefix") or "")
+    if cli_graph is not None and cmd_prefix:
+        try:
+            hp = _normalize_target_node_id(cli_graph.get_hierarchy_prefix(cmd_prefix))  # type: ignore[attr-defined]
+        except Exception:
+            hp = ""
+        if hp:
+            candidates.insert(1, hp)
+
+    for candidate in candidates:
+        if _target_kind(candidate, existing, created) in {"trunk", "branch"}:
+            return candidate
+    return ""
+
+
+def _best_leaf_parent(
+    row: Dict[str, object],
+    ctx: _ChunkTreeContext,
+    patch: Dict[str, object],
+    existing: _ExistingTreeIndex,
+    created: _CreatedTreeIndex,
+    cli_graph: object = None,
+) -> str:
+    cli_graph = cli_graph or _get_cli_graph_store_safe()
+    candidates = [
+        _normalize_target_node_id(str(row.get("target_node_id") or "")),
+        _normalize_target_node_id(str(ctx.parent_candidate_id or "")),
+        _normalize_target_node_id(str(ctx.hierarchy_prefix or "")),
+        _normalize_target_node_id(str(patch.get("function_hierarchy") or "")),
+    ]
+    cmd_prefix = str(patch.get("command_prefix") or "")
+    if cli_graph is not None and cmd_prefix:
+        try:
+            hp = _normalize_target_node_id(cli_graph.get_hierarchy_prefix(cmd_prefix))  # type: ignore[attr-defined]
+        except Exception:
+            hp = ""
+        if hp:
+            candidates.insert(1, hp)
+
+    for candidate in candidates:
+        if _target_kind(candidate, existing, created) in {"command", "branch"}:
+            return candidate
+    return ""
+
+
+def _validate_hierarchy_decisions(
+    rules_decided: List[Dict[str, object]],
+    llm_decided: List[Dict[str, object]],
+    tree_contexts: Dict[str, _ChunkTreeContext],
+    llm_patches: Dict[str, Dict[str, object]],
+    candidate_chunks: List[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    chunk_by_key = {
+        _chunk_key(chunk): chunk
+        for chunk in candidate_chunks
+        if _chunk_key(chunk)
+    }
+    all_rows = list(rules_decided) + list(llm_decided)
+    cli_graph = _get_cli_graph_store_safe()
+    existing = _build_existing_tree_index(cli_graph)
+
+    for row in all_rows:
+        action, tree_level, target = _normalize_tree_fields(
+            str(row.get("action") or ""),
+            str(row.get("tree_level") or ""),
+            str(row.get("target_node_id") or ""),
+        )
+        row["action"] = action
+        row["tree_level"] = tree_level
+        row["target_node_id"] = target
+        if action == "tree_create_branch":
+            row["target_node_id"] = _normalize_branch_parent_target(
+                str(row.get("target_node_id") or ""),
+                str(row.get("entity_title") or ""),
+            )
+
+    created = _build_created_tree_index(all_rows, existing)
+    normalized = 0
+    rerouted = 0
+
+    for row in all_rows:
+        action = str(row.get("action") or "")
+        if action not in _VALID_CLASSIFICATION_ACTIONS:
+            _rewrite_row_as_needs_tree_session(row, "hierarchy_invalid_action")
+            rerouted += 1
+            continue
+        if action in {"discard", "needs_tree_session", "merge_into_existing"}:
+            action, tree_level, target = _normalize_tree_fields(
+                action,
+                str(row.get("tree_level") or ""),
+                str(row.get("target_node_id") or ""),
+            )
+            row["action"] = action
+            row["tree_level"] = tree_level
+            row["target_node_id"] = target
+            continue
+
+        key = f"{str(row.get('source_file') or '')}::{str(row.get('target_block_id') or '')}"
+        chunk = chunk_by_key.get(key, {})
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        patch = llm_patches.get(key) or {}
+        chunk_meta = dict(meta)
+        if isinstance(patch, dict):
+            chunk_meta.update(patch)
+        ctx = tree_contexts.get(key, _ChunkTreeContext(chunk_key=key))
+        title = str(meta.get("section_title") or row.get("entity_title") or "")
+        text = str(chunk.get("page_content") or "")
+
+        if _looks_like_internal_function_signature(text, title):
+            _rewrite_row_as_discard(row, "hierarchy_internal_function_signature")
+            rerouted += 1
+            continue
+
+        if action == "tree_create_branch":
+            best_parent = _best_branch_parent(row, ctx, patch, existing, created, cli_graph)
+            if best_parent:
+                if best_parent != str(row.get("target_node_id") or ""):
+                    normalized += 1
+                row["target_node_id"] = best_parent
+                row["tree_level"] = "branch"
+                created = _build_created_tree_index(all_rows, existing)
+                continue
+            _rewrite_row_as_needs_tree_session(row, "hierarchy_invalid_branch_parent")
+            rerouted += 1
+            continue
+
+        if action != "tree_create_leaf":
+            continue
+
+        best_leaf_parent = _best_leaf_parent(row, ctx, patch, existing, created, cli_graph)
+        if best_leaf_parent:
+            if best_leaf_parent != str(row.get("target_node_id") or ""):
+                normalized += 1
+            row["target_node_id"] = best_leaf_parent
+            row["tree_level"] = "leaf"
+            continue
+
+        if _looks_like_non_actionable_heading(text, title):
+            _rewrite_row_as_discard(row, "hierarchy_non_actionable_heading")
+            rerouted += 1
+            continue
+
+        inferred_level = _infer_tree_level_from_meta_signals(chunk_meta)
+        if inferred_level in {"branch", "trunk"}:
+            best_parent = _best_branch_parent(row, ctx, patch, existing, created, cli_graph)
+            if best_parent:
+                row["action"] = "tree_create_branch"
+                row["tree_level"] = "branch"
+                row["target_node_id"] = best_parent
+                _append_source_evidence(row, "normalized_leaf_to_branch")
+                normalized += 1
+                created = _build_created_tree_index(all_rows, existing)
+                continue
+
+        _rewrite_row_as_needs_tree_session(row, "hierarchy_invalid_leaf_parent")
+        rerouted += 1
+
+    logger.info(
+        "[farm-owner] hierarchy validation: normalized %d rows, rerouted %d rows",
+        normalized,
+        rerouted,
+    )
+    return rules_decided, llm_decided
 
 
 def _setup_logging() -> None:
@@ -470,7 +970,7 @@ def _stage2_tree_context_lookup(
             if not ctx.exists_in_tree and entity_hints:
                 best_hint = entity_hints[0]
                 tokens = best_hint.split()
-                for length in range(len(tokens) - 1, 0, -1):
+                for length in range(len(tokens) - 1, 1, -1):
                     prefix = " ".join(tokens[:length])
                     try:
                         exists, similar = cli_graph.command_exists(prefix)
@@ -664,7 +1164,11 @@ _CLASSIFICATION_SYSTEM_PROMPT = """\
 注意：
 - 只有包含实质性技术内容（CLI命令/配置步骤/功能行为描述/参数说明）的chunk才应归入2-6类。
 - 仅有标题+章节号、概述性导语、或物理环境相关说明的chunk应归为discard。
+- 下列内容默认不要判为 tree_create_leaf：Function List/Source List、C函数签名/内部实现、物理接线/拓扑步骤、CLI快捷键/语法说明、只有“配置示例/配置目标”标题但没有具体命令正文的chunk。
+- tree_create_leaf 只用于原子CLI命令、明确命令参数、或绑定到具体命令的输出/行为说明。
 - target_node_id对于tree_create_*类action必须填写建议的父节点路径（如"SLB"、"基础网络 > VXLAN"），不可为空。
+- tree_create_leaf 的 target_node_id 不能是 bare trunk（如"SLB"、"基础网络"）；如果只能判断到模块层，请改判为 tree_create_branch 或 needs_tree_session。
+- 不要凭空发明 A > B 形式的父路径；只有当 B 明显是已有或应新建的功能分支时才使用该路径。
 - tree_level要与action匹配：tree_create_leaf→"leaf"，tree_create_branch→"branch"，tree_create_trunk→"trunk"。
 
 返回JSON对象，包含 "results" 数组，每个元素必须包含 chunk_index 字段与输入对应。
@@ -761,10 +1265,22 @@ def _stage4_llm_batch_classification(
             if ctx.similar_commands:
                 sc_str = ",".join(ctx.similar_commands[:3])
                 header += f" similar_nodes={sc_str}"
+            if ctx.parent_candidate_id:
+                header += f" parent_candidate={ctx.parent_candidate_id}"
+            if ctx.hierarchy_prefix:
+                header += f" hierarchy_prefix={ctx.hierarchy_prefix}"
             if patch.get("product_module"):
                 header += f" module={patch['product_module']}"
+            if patch.get("function_hierarchy"):
+                header += f" function_hierarchy={patch['function_hierarchy']}"
             if patch.get("command_prefix"):
                 header += f" cmd_prefix={patch['command_prefix']}"
+            if patch.get("chunk_type"):
+                header += f" chunk_type={patch['chunk_type']}"
+            if patch.get("step_type"):
+                header += f" step_type={patch['step_type']}"
+            if meta.get("section_path"):
+                header += f" section_path={meta['section_path']}"
             chunk_lines.append(f"{header}\n{text}")
 
         user_content = f"共 {len(batch)} 个chunk，请逐一返回分类结果。\n\n" + "\n---\n".join(chunk_lines)
@@ -843,18 +1359,20 @@ def _stage4_llm_batch_classification(
                 if action not in _VALID_CLASSIFICATION_ACTIONS:
                     action = "needs_tree_session"
                 tree_level = str(llm_item.get("tree_level") or "")
-                target_id = str(llm_item.get("target_node_id") or "")
                 reason = str(llm_item.get("reason") or "")
-                # Fallback: infer target_node_id from product_module for tree_create
-                if not target_id and action.startswith("tree_create"):
-                    pm = str(patch.get("product_module") or "")
-                    if pm and pm != "unknown":
-                        target_id = pm
+                target_id = _select_llm_target_id(
+                    action,
+                    str(llm_item.get("target_node_id") or ""),
+                    tree_contexts.get(key, _ChunkTreeContext(chunk_key=key)),
+                    patch if isinstance(patch, dict) else {},
+                )
             else:
                 action = "needs_tree_session"
                 tree_level = ""
                 target_id = ""
                 reason = "llm_response_missing"
+
+            action, tree_level, target_id = _normalize_tree_fields(action, tree_level, target_id)
 
             rows.append({
                 "schema_version": _OWNER_DECISION_SCHEMA_VERSION,
@@ -1267,6 +1785,15 @@ def _classify_quality_passed_chunks(
 
     # Reconcile conflicting tree-level decisions across chunks
     rules_decided, llm_decided = _reconcile_decisions(rules_decided, llm_decided)
+
+    # Validate hierarchy structure after reconciliation
+    rules_decided, llm_decided = _validate_hierarchy_decisions(
+        rules_decided,
+        llm_decided,
+        tree_contexts,
+        llm_patches,
+        candidates,
+    )
 
     # Stage 5: Assemble
     return _stage5_assemble_decisions(

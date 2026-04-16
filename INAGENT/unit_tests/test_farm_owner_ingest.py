@@ -12,16 +12,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from INAGENT.data_tools.farm_owner_ingest import (
     _ChunkTreeContext,
+    _ExistingTreeIndex,
+    _build_discard_row,
     _chunk_key,
+    _fallback_batch,
+    _normalize_target_node_id,
+    _normalize_tree_fields,
     _reconcile_decisions,
+    _select_llm_target_id,
     _stage1_rules_prefilter,
+    _stage2_tree_context_lookup,
     _stage3_rules_classification,
     _stage5_assemble_decisions,
-    _build_discard_row,
-    _fallback_batch,
     _useful_content_length,
+    _validate_hierarchy_decisions,
     run_farm_owner_pipeline,
 )
+from INAGENT.rag.cli_graph_store import CLIGraphStore
 
 
 def _make_chunk(
@@ -121,7 +128,123 @@ def test_stage5_wrong_product_generates_feedback() -> None:
     assert len(wp_feedback) == 1
 
 
-# ── Stage 3 tests ──────────────────────────────────────────────────
+# ── Stage 2/3 tests ────────────────────────────────────────────────
+
+
+def test_stage2_prefix_truncation_skips_single_token_false_positive() -> None:
+    chunk = _make_chunk(
+        section_title="On my PC",
+        page_content="Windows client routing configuration steps.",
+        command_prefix="",
+        tree_node_id="",
+    )
+    cli_graph = MagicMock()
+    cli_graph.command_exists.side_effect = lambda text: {
+        "On my PC": (False, []),
+        "On my": (False, []),
+        "On": (True, ["aaa method rank on"]),
+    }.get(text, (False, []))
+    cli_graph.get_hierarchy_prefix.return_value = ""
+
+    with patch(
+        "INAGENT.rag.cli_graph_store.get_cli_graph_store",
+        return_value=cli_graph,
+    ), patch(
+        "INAGENT.rag.skeleton_index.get_skeleton_index",
+        return_value=None,
+    ):
+        contexts = _stage2_tree_context_lookup([chunk])
+
+    ctx = contexts["cli.json::1"]
+    assert ctx.exists_in_tree is False
+    assert ctx.parent_candidate_id == ""
+    assert [call.args[0] for call in cli_graph.command_exists.call_args_list] == [
+        "On my PC",
+        "On my",
+    ]
+
+
+
+def test_command_exists_single_token_fuzzy_match_returns_similar_only() -> None:
+    store = CLIGraphStore()
+    store._loaded = True
+    store._nodes_by_id = {
+        "aaa_method_rank_on": {"label": "aaa method rank on", "type": "command"},
+    }
+    store._cmd_nid_to_label = {"aaa_method_rank_on": "aaa method rank on"}
+    store._cmd_label_exact = {
+        "aaa method rank on": "aaa_method_rank_on",
+        "aaa_method_rank_on": "aaa_method_rank_on",
+    }
+    store._cmd_token_index = {"on": ["aaa_method_rank_on"]}
+
+    exists, similar = store.command_exists("On")
+
+    assert exists is False
+    assert similar == ["aaa method rank on"]
+
+
+
+def test_command_exists_single_token_exact_match_still_returns_true() -> None:
+    store = CLIGraphStore()
+    store._loaded = True
+    store._nodes_by_id = {
+        "ping": {"label": "ping", "type": "command"},
+    }
+    store._cmd_nid_to_label = {"ping": "ping"}
+    store._cmd_label_exact = {"ping": "ping"}
+    store._cmd_token_index = {"ping": ["ping"]}
+
+    exists, similar = store.command_exists("ping")
+
+    assert exists is True
+    assert similar == ["ping"]
+
+
+
+def test_select_llm_target_id_leaf_does_not_fallback_to_product_module() -> None:
+    ctx = _ChunkTreeContext(chunk_key="cli.json::1")
+
+    target = _select_llm_target_id(
+        "tree_create_leaf",
+        "",
+        ctx,
+        {"product_module": "SLB"},
+    )
+
+    assert target == ""
+
+
+
+def test_select_llm_target_id_branch_can_fallback_to_product_module() -> None:
+    ctx = _ChunkTreeContext(chunk_key="cli.json::1")
+
+    target = _select_llm_target_id(
+        "tree_create_branch",
+        "",
+        ctx,
+        {"product_module": "SLB"},
+    )
+
+    assert target == "SLB"
+
+
+
+def test_normalize_target_node_id_normalizes_path_spacing() -> None:
+    assert _normalize_target_node_id(
+        "  基础网络 ＞  IP域表  >   通用命令  ",
+    ) == "基础网络 > IP域表 > 通用命令"
+
+
+
+def test_normalize_tree_fields_clears_non_tree_targets() -> None:
+    assert _normalize_tree_fields("discard", "leaf", "SLB") == ("discard", "", "")
+    assert _normalize_tree_fields(
+        "needs_tree_session",
+        "branch",
+        "基础网络 > IP域表",
+    ) == ("needs_tree_session", "", "")
+
 
 
 def test_stage3_exact_tree_match_rule() -> None:
@@ -531,6 +654,7 @@ def _make_decision(
     target_node_id: str = "SLB",
     tree_level: str = "leaf",
     source_evidence: str = "test",
+    target_block_id: str = "1",
 ) -> dict:
     return {
         "schema_version": "1.0",
@@ -538,14 +662,191 @@ def _make_decision(
         "entity_title": entity_title,
         "action": action,
         "target_node_id": target_node_id,
-        "target_block_id": "1",
+        "target_block_id": target_block_id,
         "tree_level": tree_level,
         "fill_fields": {},
         "enrich_fields": {},
-        "chunk_meta_patch": {},
+        "chunk_meta_patch": {"source_file": "cli.json"},
         "source_evidence": source_evidence,
         "resolved_value": {},
     }
+
+
+
+def _run_hierarchy_validation(
+    llm_rows: list[dict],
+    chunks: list[dict],
+    existing: _ExistingTreeIndex,
+    tree_contexts: dict[str, _ChunkTreeContext] | None = None,
+    llm_patches: dict[str, dict[str, object]] | None = None,
+) -> list[dict]:
+    with patch(
+        "INAGENT.data_tools.farm_owner_ingest._get_cli_graph_store_safe",
+        return_value=None,
+    ), patch(
+        "INAGENT.data_tools.farm_owner_ingest._build_existing_tree_index",
+        return_value=existing,
+    ):
+        _, validated = _validate_hierarchy_decisions(
+            [],
+            llm_rows,
+            tree_contexts or {},
+            llm_patches or {},
+            chunks,
+        )
+    return validated
+
+
+
+def test_validate_hierarchy_rewrites_bare_trunk_leaf_to_existing_branch() -> None:
+    rows = [
+        _make_decision(
+            entity_title="show ipregion name",
+            target_node_id="基础网络",
+            target_block_id="1",
+        ),
+    ]
+    chunks = [
+        _make_chunk(
+            block_id="1",
+            section_title="IP域表通用命令",
+            page_content="show ipregion name\n查看IP域表条目。",
+        ),
+    ]
+    validated = _run_hierarchy_validation(
+        rows,
+        chunks,
+        _ExistingTreeIndex(
+            trunks={"基础网络"},
+            branches={"基础网络 > IP域表"},
+        ),
+        llm_patches={"cli.json::1": {"function_hierarchy": "基础网络 > IP域表"}},
+    )
+
+    assert validated[0]["action"] == "tree_create_leaf"
+    assert validated[0]["target_node_id"] == "基础网络 > IP域表"
+    assert validated[0]["tree_level"] == "leaf"
+
+
+
+def test_validate_hierarchy_reroutes_bare_trunk_leaf_without_branch_context() -> None:
+    rows = [
+        _make_decision(
+            entity_title="show slb session",
+            target_node_id="SLB",
+            target_block_id="1",
+        ),
+    ]
+    chunks = [
+        _make_chunk(
+            block_id="1",
+            section_title="show slb session",
+            page_content="show slb session\n查看会话保持状态。",
+        ),
+    ]
+    validated = _run_hierarchy_validation(
+        rows,
+        chunks,
+        _ExistingTreeIndex(trunks={"SLB"}),
+    )
+
+    assert validated[0]["action"] == "needs_tree_session"
+    assert validated[0]["tree_level"] == ""
+    assert validated[0]["target_node_id"] == ""
+
+
+
+def test_validate_hierarchy_rejects_invented_leaf_parent_without_branch() -> None:
+    rows = [
+        _make_decision(
+            entity_title="show ipregion name",
+            target_node_id="基础网络 > IP域表",
+            target_block_id="1",
+        ),
+    ]
+    chunks = [
+        _make_chunk(
+            block_id="1",
+            section_title="show ipregion name",
+            page_content="show ipregion name\n查看IP域表条目。",
+        ),
+    ]
+    validated = _run_hierarchy_validation(
+        rows,
+        chunks,
+        _ExistingTreeIndex(trunks={"基础网络"}),
+    )
+
+    assert validated[0]["action"] == "needs_tree_session"
+    assert validated[0]["tree_level"] == ""
+    assert validated[0]["target_node_id"] == ""
+
+
+
+def test_validate_hierarchy_allows_leaf_when_batch_creates_branch() -> None:
+    rows = [
+        _make_decision(
+            entity_title="IP域表",
+            action="tree_create_branch",
+            target_node_id="基础网络",
+            tree_level="branch",
+            target_block_id="1",
+        ),
+        _make_decision(
+            entity_title="show ipregion name",
+            action="tree_create_leaf",
+            target_node_id="基础网络 > IP域表",
+            tree_level="leaf",
+            target_block_id="2",
+        ),
+    ]
+    chunks = [
+        _make_chunk(
+            block_id="1",
+            section_title="IP域表",
+            page_content="IP域表\nIP地域信息库功能说明，支持地址归属判断。",
+        ),
+        _make_chunk(
+            block_id="2",
+            section_title="show ipregion name",
+            page_content="show ipregion name\n查看IP域表条目。",
+        ),
+    ]
+    validated = _run_hierarchy_validation(
+        rows,
+        chunks,
+        _ExistingTreeIndex(trunks={"基础网络"}),
+    )
+
+    assert validated[0]["action"] == "tree_create_branch"
+    assert validated[0]["target_node_id"] == "基础网络"
+    assert validated[1]["action"] == "tree_create_leaf"
+    assert validated[1]["target_node_id"] == "基础网络 > IP域表"
+
+
+
+def test_validate_hierarchy_discards_function_signature_leaf() -> None:
+    rows = [
+        _make_decision(
+            entity_title="Function List",
+            target_node_id="基础网络",
+            target_block_id="1",
+        ),
+    ]
+    chunks = [
+        _make_chunk(
+            block_id="1",
+            section_title="Function List",
+            page_content="Function List\nint dns64_init(struct dns64_ctx *ctx);",
+        ),
+    ]
+    validated = _run_hierarchy_validation(rows, chunks, _ExistingTreeIndex())
+
+    assert validated[0]["action"] == "discard"
+    assert validated[0]["tree_level"] == ""
+    assert validated[0]["target_node_id"] == ""
+    assert validated[0]["chunk_meta_patch"]["owner_excluded"] is True
+
 
 
 def test_reconcile_promotes_leaf_to_branch() -> None:

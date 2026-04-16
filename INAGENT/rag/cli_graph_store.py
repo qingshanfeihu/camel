@@ -296,7 +296,7 @@ class CLIGraphStore:
             return False, []
 
         max_score = max(scored.values())
-        if max_score >= len(tokens):
+        if len(tokens) > 1 and max_score >= len(tokens):
             best_nid = max(scored, key=scored.get)
             return True, [self._nodes_by_id[best_nid].get("label", best_nid)]
 
